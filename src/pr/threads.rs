@@ -303,14 +303,14 @@ static SECTION: LazyLock<Regex> = LazyLock::new(|| {
 });
 static SECTION_END: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"(?i)^<summary>[^<]*(review details|review info|files selected|files skipped|learnings|commits|run configuration)",
+        r"(?i)^<summary>[^<]*(review details|review info|files selected|files skipped|learnings|commits|run configuration|prompt for all review comments)",
     )
     .unwrap()
 });
 static OLD_FILE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^<summary>([^<>\s][^<>]*?) \(\d+\)</summary>").unwrap());
+    LazyLock::new(|| Regex::new(r"^<summary>([A-Za-z0-9_./][^<>]*?) \(\d+\)</summary>").unwrap());
 static OLD_FINDING: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^`(\d+)(?:-(\d+))?`:\s*(.*)$").unwrap());
+    LazyLock::new(|| Regex::new(r"^(?:Line range hint\s+)?`(\d+)(?:-(\d+))?`:\s*(.*)$").unwrap());
 static NEW_FINDING: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^`([^`\s]+):(\d+)(?:-(\d+))?`\s*$").unwrap());
 static BOLD_TITLE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\*\*(.+)\*\*$").unwrap());
@@ -318,7 +318,8 @@ static BOLD_TITLE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\*\*(.+)\*\*
 /// Parse findings out of a CodeRabbit review body.
 ///
 /// Two layouts exist. The older nests findings under `<summary>PATH (N)</summary>` file blocks,
-/// each starting with `` `10-16`: **title** `` and separated by `---`. The newer sits in a
+/// each starting with `` `10-16`: **title** `` (sometimes after `Line range hint`) and separated by
+/// `---`. The newer sits in a
 /// blockquote and gives each finding its own `<details>` block starting with
 /// `` `path/to/file.c:9-23` `` on a line of its own.
 pub fn parse_review_body(body: &str) -> Vec<BodyFinding> {
@@ -337,9 +338,9 @@ pub fn parse_review_body(body: &str) -> Vec<BodyFinding> {
         let trimmed = line.trim();
 
         // Structure markers inside a code fence are part of the finding's text.
-        if in_fence {
+        if in_fence || trimmed.starts_with("```") {
             if trimmed.starts_with("```") {
-                in_fence = false;
+                in_fence = !in_fence;
             }
             if let Some(f) = current.as_mut() {
                 push_line(f, line);
@@ -381,14 +382,19 @@ pub fn parse_review_body(body: &str) -> Vec<BodyFinding> {
             if let Some(caps) = OLD_FINDING.captures(trimmed) {
                 finish(&mut current, &mut findings);
                 let (start_line, line) = span(&caps[1], caps.get(2).map(|m| m.as_str()));
-                let title = caps[3].trim().trim_matches('*').trim().to_string();
+                let rest = caps[3].trim();
+                // Newer bodies put a category line here and the bold title on the next line.
+                let (title, body) = match BOLD_TITLE.captures(rest) {
+                    Some(t) if !rest.contains(" | ") => (t[1].trim().to_string(), String::new()),
+                    _ => (String::new(), format!("{rest}\n")),
+                };
                 current = Some(BodyFinding {
                     kind: kind.clone(),
                     path: path.clone(),
                     start_line,
                     line,
                     title,
-                    body: String::new(),
+                    body,
                 });
                 continue;
             }
@@ -410,9 +416,6 @@ pub fn parse_review_body(body: &str) -> Vec<BodyFinding> {
         let Some(f) = current.as_mut() else {
             continue;
         };
-        if trimmed.starts_with("```") {
-            in_fence = true;
-        }
         // The newer layout puts the title on its own bold line after a category line.
         if f.title.is_empty() && !trimmed.contains(" | ") {
             if let Some(caps) = BOLD_TITLE.captures(trimmed) {
@@ -473,7 +476,8 @@ fn print_finding(f: &Finding) {
         "review {}  {}:{span}  coderabbitai (bot)  {}",
         f.review_id, f.item.path, f.item.kind
     );
-    if !f.item.title.is_empty() {
+    // The newer layout repeats the title in the body, the older keeps it on the anchor line.
+    if !f.item.title.is_empty() && !f.item.body.contains(&f.item.title) {
         println!("  {}", f.item.title);
     }
     println!("{}", indent(&first_lines(&clean_body(&f.item.body), BODY_LINES), "  "));
@@ -726,9 +730,17 @@ These variables are initialized once during the library constructor.
 
 ---
 
-`45`: **Define constant for maximum compression level.**
+Line range hint `45`: **Define constant for maximum compression level.**
 
 The maximum value of 10 should be a constant.
+
+<details>
+<summary>🧰 Tools</summary>
+<details>
+<summary>🪛 cppcheck (2)</summary>
+[error] 24-24: unknown macro
+</details>
+</details>
 
 </blockquote></details>
 <details>
@@ -801,6 +813,55 @@ Looks fine.
 `ignored/path.c:1`
 </details>"#;
 
+    /// Trimmed from a 2026 CodeRabbit review on calcom/cal.com#30135.
+    const NITPICK_BODY: &str = r#"**Actionable comments posted: 1**
+
+<details>
+<summary>🧹 Nitpick comments (1)</summary><blockquote>
+
+<details>
+<summary>packages/embeds/embed-core/src/embed.test.ts (1)</summary><blockquote>
+
+`823-826`: _🎯 Functional Correctness_ | _🔵 Trivial_ | _⚡ Quick win_
+
+**Assert the guard's state and queue invariants.**
+
+The test does not verify that `iframeReady` remains falsy.
+
+<details>
+<summary>🤖 Prompt for AI Agents</summary>
+
+```
+In `@packages/embeds/embed-core/src/embed.test.ts` around lines 823 - 826, extend the test.
+```
+
+</details>
+
+</blockquote></details>
+
+</blockquote></details>
+
+<details>
+<summary>🤖 Prompt for all review comments with AI agents</summary>
+
+```
+Outside diff range comments:
+`packages/other.ts:5`
+```
+
+</details>"#;
+
+    #[test]
+    fn parses_nitpick_layout_with_category_line() {
+        let f = parse_review_body(NITPICK_BODY);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].kind, "nitpick");
+        assert_eq!(f[0].path, "packages/embeds/embed-core/src/embed.test.ts");
+        assert_eq!((f[0].start_line, f[0].line), (Some(823), 826));
+        assert_eq!(f[0].title, "Assert the guard's state and queue invariants.");
+        assert!(f[0].body.starts_with("_🎯 Functional Correctness_"));
+    }
+
     #[test]
     fn parses_old_layout_by_file_block() {
         let f = parse_review_body(OLD_BODY);
@@ -812,6 +873,9 @@ Looks fine.
         assert!(f[0].body.contains("int env_dfltcc_disabled;"));
         assert_eq!((f[1].start_line, f[1].line), (None, 45));
         assert_eq!(f[1].title, "Define constant for maximum compression level.");
+        // A tool summary with a count inside a finding is not a file block.
+        assert!(f[1].body.contains("unknown macro"));
+        assert_eq!(f[1].path, "arch/s390/dfltcc_common.c");
         assert_eq!(f[2].path, "CMakeLists.txt");
         assert!(!f[2].body.contains("auto-generated"));
     }
