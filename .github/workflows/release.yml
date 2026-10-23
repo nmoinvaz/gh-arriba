@@ -1,0 +1,142 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    name: Prepare
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Normalize version
+        id: version
+        env:
+          INPUT: ${{ inputs.version }}
+        run: |
+          VERSION="${INPUT#v}"
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Version must look like 1.2.3, got $INPUT"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Update Cargo.toml
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: sed -i "s/^version = \".*\"/version = \"$VERSION\"/" Cargo.toml
+
+      - name: Update Cargo.lock
+        run: cargo update --workspace
+
+      - name: Commit and tag
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock
+          git commit -m "Bump to version $VERSION"
+          git tag "$VERSION"
+          git push origin HEAD:${{ github.ref_name }}
+          git push origin "$VERSION"
+
+  build:
+    name: Build ${{ matrix.asset }}
+    needs: prepare
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          # gh picks the asset whose name ends in its own OS and architecture.
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            asset: gh-arriba-darwin-arm64
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            asset: gh-arriba-darwin-amd64
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            asset: gh-arriba-linux-amd64
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            asset: gh-arriba-linux-arm64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            asset: gh-arriba-windows-amd64.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.version }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # Static musl binaries run on any Linux distribution regardless of its glibc version.
+      - name: Install musl tools
+        if: contains(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          if [[ "$TARGET" == *musl* ]]; then
+            export "CC_${TARGET//-/_}=musl-gcc"
+          fi
+          cargo build --release --locked --target "$TARGET"
+
+      - name: Stage
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          ASSET: ${{ matrix.asset }}
+        run: |
+          ext=""
+          [[ "$TARGET" == *windows* ]] && ext=".exe"
+          mkdir dist
+          cp "target/$TARGET/release/gh-arriba$ext" "dist/$ASSET"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}
+          if-no-files-found: error
+
+  release:
+    name: Release
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          gh release create "$VERSION" dist/* \
+            --repo "${{ github.repository }}" \
+            --title "$VERSION" \
+            --generate-notes
