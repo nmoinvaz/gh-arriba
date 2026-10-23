@@ -17,6 +17,12 @@ use context::Ctx;
 use github::Client;
 
 fn main() -> Result<()> {
+    // Exit quietly when stdout closes early, as when piped into head, instead of panicking.
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+
     let cli = Cli::parse();
 
     let ctx = Ctx {

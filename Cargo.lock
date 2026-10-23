@@ -452,6 +452,7 @@ dependencies = [
  "chrono",
  "clap",
  "dialoguer",
+ "libc",
  "regex",
  "reqwest",
  "secretscan",
