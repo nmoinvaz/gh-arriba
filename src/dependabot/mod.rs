@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use regex::Regex;
 use serde::Serialize;
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::sync::LazyLock;
 use std::time::Duration;
@@ -182,7 +182,11 @@ impl DepPr {
 
     /// Diff size as `3 files (+10 -4)`.
     pub fn size(&self) -> String {
-        let files = if self.changed_files == 1 { "file" } else { "files" };
+        let files = if self.changed_files == 1 {
+            "file"
+        } else {
+            "files"
+        };
         format!(
             "{} {files} (+{} -{})",
             self.changed_files, self.additions, self.deletions
@@ -272,47 +276,44 @@ fragment Dep on PullRequest {
     };
 }
 
-const REPO_QUERY: &str = concat!(
-    dep_fragment!(),
-    r#"
+const LIGHT_REPO_QUERY: &str = r#"
 query($owner: String!, $repo: String!, $cursor: String) {
   repository(owner: $owner, name: $repo) {
     pullRequests(states: OPEN, first: 100, after: $cursor) {
       pageInfo { hasNextPage endCursor }
-      nodes { ...Dep }
+      nodes { number title url author { login } repository { nameWithOwner } }
     }
   }
-}"#
-);
+}"#;
 
-const SEARCH_QUERY: &str = concat!(
-    dep_fragment!(),
-    r#"
+const LIGHT_SEARCH_QUERY: &str = r#"
 query($q: String!, $cursor: String) {
   search(query: $q, type: ISSUE, first: 100, after: $cursor) {
     pageInfo { hasNextPage endCursor }
-    nodes { ...Dep }
+    nodes {
+      ... on PullRequest { number title url author { login } repository { nameWithOwner } }
+    }
   }
-}"#
-);
+}"#;
 
-/// Aliases per refetch query, which keeps each request well under GraphQL cost limits.
-const REFETCH_BATCH: usize = 50;
+/// PRs per detail request. Each costs GitHub about 0.3s to compute, and requests that run past
+/// 10s fail with a 502.
+const DETAIL_BATCH: usize = 20;
 
-/// Fetch every open Dependabot PR in scope. With `settle`, PRs whose mergeability GitHub has not
-/// computed yet are fetched again after a short wait.
-pub fn fetch_prs(client: &Client, scope: &Scope, settle: bool) -> Result<Vec<DepPr>> {
+/// Every open Dependabot PR in scope with just its number, title, URL, and repository. These
+/// fields are cheap, so pages hold 100 PRs.
+pub fn fetch_light(client: &Client, scope: &Scope) -> Result<Vec<Value>> {
     let mut nodes = Vec::new();
     let mut cursor = Value::Null;
     loop {
         let (query, mut variables, key) = match scope {
             Scope::Repo(r) => (
-                REPO_QUERY,
+                LIGHT_REPO_QUERY,
                 json!({ "owner": r.owner, "repo": r.name }),
                 "repository",
             ),
             Scope::Org(o) => (
-                SEARCH_QUERY,
+                LIGHT_SEARCH_QUERY,
                 json!({ "q": format!("is:pr is:open author:app/dependabot org:{o} archived:false") }),
                 "search",
             ),
@@ -337,6 +338,18 @@ pub fn fetch_prs(client: &Client, scope: &Scope, settle: bool) -> Result<Vec<Dep
         }
         cursor = page["pageInfo"]["endCursor"].clone();
     }
+    Ok(nodes)
+}
+
+/// Fetch every open Dependabot PR in scope with checks and mergeability. With `settle`, PRs whose
+/// mergeability GitHub has not computed yet are fetched again after a short wait.
+pub fn fetch_prs(client: &Client, scope: &Scope, settle: bool) -> Result<Vec<DepPr>> {
+    // Find Dependabot's PRs cheaply, then pay for details on those alone.
+    let keys: Vec<(String, u64)> = fetch_light(client, scope)?
+        .iter()
+        .map(|n| (repo_of(n), n["number"].as_u64().unwrap_or(0)))
+        .collect();
+    let mut nodes = fetch_details(client, &keys)?;
 
     // Querying mergeability starts GitHub computing it, so a second look usually has the answer.
     if settle {
@@ -347,7 +360,7 @@ pub fn fetch_prs(client: &Client, scope: &Scope, settle: bool) -> Result<Vec<Dep
             .collect();
         if !unknown.is_empty() {
             std::thread::sleep(Duration::from_secs(2));
-            for fresh in refetch(client, &unknown)? {
+            for fresh in fetch_details(client, &unknown)? {
                 let key = (repo_of(&fresh), fresh["number"].as_u64());
                 if let Some(slot) = nodes
                     .iter_mut()
@@ -362,10 +375,10 @@ pub fn fetch_prs(client: &Client, scope: &Scope, settle: bool) -> Result<Vec<Dep
     nodes.iter().map(parse_pr).collect()
 }
 
-/// Fetch specific PRs again in batched, aliased queries.
-fn refetch(client: &Client, prs: &[(String, u64)]) -> Result<Vec<Value>> {
+/// Fetch full details for specific PRs in batched, aliased queries, keeping their order.
+fn fetch_details(client: &Client, prs: &[(String, u64)]) -> Result<Vec<Value>> {
     let mut fresh = Vec::new();
-    for batch in prs.chunks(REFETCH_BATCH) {
+    for batch in prs.chunks(DETAIL_BATCH) {
         let mut query = String::from(dep_fragment!());
         query.push_str("query {\n");
         for (i, (repo, number)) in batch.iter().enumerate() {
@@ -394,7 +407,10 @@ fn repo_of(node: &Value) -> String {
 
 /// Dependabot's login is `dependabot` in GraphQL and `dependabot[bot]` in REST.
 pub fn is_dependabot(login: Option<&str>) -> bool {
-    matches!(login, Some("dependabot" | "dependabot[bot]" | "app/dependabot"))
+    matches!(
+        login,
+        Some("dependabot" | "dependabot[bot]" | "app/dependabot")
+    )
 }
 
 fn parse_pr(node: &Value) -> Result<DepPr> {
@@ -476,6 +492,12 @@ static GROUP: LazyLock<Regex> = LazyLock::new(|| {
         .unwrap()
 });
 
+/// Titles without versions, as `Bump picomatch` when a package moves to different versions in
+/// several directories, or `Bump x and y` for peer updates.
+static BARE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^(?:bump|update)\s+(?P<pkg>.+?)(?:\s+in\s+(?P<dir>/\S*))?$").unwrap()
+});
+
 /// Parse `Bump PKG from OLD to NEW in DIR` and its variants. Unrecognized titles keep the whole
 /// title as the package with no versions.
 pub fn parse_title(title: &str) -> Update {
@@ -504,11 +526,18 @@ pub fn parse_title(title: &str) -> Update {
             change: Change::Other,
         };
     }
+    let (package, directory) = match BARE.captures(&t) {
+        Some(c) => (
+            c["pkg"].to_string(),
+            c.name("dir").map(|d| d.as_str().to_string()),
+        ),
+        None => (t.to_string(), None),
+    };
     Update {
-        package: t.to_string(),
+        package,
         from: None,
         to: None,
-        directory: None,
+        directory,
         group: false,
         updates: None,
         change: Change::Other,
@@ -554,42 +583,99 @@ pub fn package_prefix(name: &str) -> String {
         .to_string()
 }
 
-/// Group PRs within a repo that move prefix-sharing packages between the same two versions.
+/// Names a package answers to when matching families, its full name and its prefix, both without
+/// a scope's `@`. `next` and `@next/eslint-plugin-next` share `next`, and `typescript-eslint` and
+/// `@typescript-eslint/parser` share `typescript-eslint`.
+fn family_keys(name: &str) -> HashSet<String> {
+    [name.to_string(), package_prefix(name)]
+        .into_iter()
+        .map(|k| k.trim_start_matches('@').to_string())
+        .collect()
+}
+
+/// Name for a family, the first member's prefix when every member shares it, else the shortest
+/// key they all share, else the first member's prefix.
+fn family_label(family: &[&DepPr]) -> String {
+    let first = package_prefix(&family[0].update.package);
+    let mut shared = family_keys(&family[0].update.package);
+    for p in &family[1..] {
+        let keys = family_keys(&p.update.package);
+        shared.retain(|k| keys.contains(k));
+    }
+    if shared.contains(first.trim_start_matches('@')) {
+        return first;
+    }
+    shared
+        .into_iter()
+        .min_by_key(|k| (k.len(), k.clone()))
+        .unwrap_or(first)
+}
+
+/// Group PRs within a repo that move related packages between the same two versions. Packages
+/// are related when their family keys overlap, transitively.
 pub fn build_groups(prs: &[DepPr]) -> Vec<LockStep> {
-    let mut map: BTreeMap<(String, String, String, String), Vec<&DepPr>> = BTreeMap::new();
+    let mut buckets: BTreeMap<(String, String, String), Vec<&DepPr>> = BTreeMap::new();
     for pr in prs {
         let (Some(from), Some(to)) = (&pr.update.from, &pr.update.to) else {
             continue;
         };
-        let key = (
-            pr.repo.clone(),
-            package_prefix(&pr.update.package),
-            from.clone(),
-            to.clone(),
-        );
-        map.entry(key).or_default().push(pr);
+        buckets
+            .entry((pr.repo.clone(), from.clone(), to.clone()))
+            .or_default()
+            .push(pr);
     }
-    map.into_iter()
-        .filter(|(_, members)| members.len() >= 2)
-        .map(|((repo, prefix, from, to), mut members)| {
-            members.sort_by_key(|p| p.number);
+
+    let mut groups = Vec::new();
+    for ((repo, from, to), mut members) in buckets {
+        members.sort_by_key(|p| p.number);
+        let keys: Vec<HashSet<String>> = members
+            .iter()
+            .map(|p| family_keys(&p.update.package))
+            .collect();
+
+        // Union-find over members whose keys overlap.
+        let mut parent: Vec<usize> = (0..members.len()).collect();
+        fn root(parent: &mut [usize], mut i: usize) -> usize {
+            while parent[i] != i {
+                parent[i] = parent[parent[i]];
+                i = parent[i];
+            }
+            i
+        }
+        for i in 0..members.len() {
+            for j in i + 1..members.len() {
+                if !keys[i].is_disjoint(&keys[j]) {
+                    let (a, b) = (root(&mut parent, i), root(&mut parent, j));
+                    parent[b.max(a)] = a.min(b);
+                }
+            }
+        }
+        let mut families: BTreeMap<usize, Vec<&DepPr>> = BTreeMap::new();
+        for (i, pr) in members.iter().enumerate() {
+            families.entry(root(&mut parent, i)).or_default().push(pr);
+        }
+
+        for family in families.into_values().filter(|f| f.len() >= 2) {
             // A blocked member blocks the group, otherwise the first PR decides how it merges.
-            let status = if members.iter().any(|p| p.category == Category::Blocked) {
+            let status = if family.iter().any(|p| p.category == Category::Blocked) {
                 Category::Blocked
             } else {
-                members[0].category
+                family[0].category
             };
-            LockStep {
-                change: members[0].update.change,
-                prs: members.iter().map(|p| p.number).collect(),
-                repo,
-                prefix,
-                from,
-                to,
+            groups.push(LockStep {
+                repo: repo.clone(),
+                prefix: family_label(&family),
+                from: from.clone(),
+                to: to.clone(),
+                change: family[0].update.change,
+                prs: family.iter().map(|p| p.number).collect(),
                 status,
-            }
-        })
-        .collect()
+            });
+        }
+    }
+    // Oldest group first, the order a person would merge them.
+    groups.sort_by(|a, b| (&a.repo, a.prs[0]).cmp(&(&b.repo, b.prs[0])));
+    groups
 }
 
 // -------------------------------------------------------------------------
@@ -703,9 +789,23 @@ pub(crate) mod tests {
         assert_eq!(u.name(), "dev-dependencies group (7 updates)");
         assert_eq!(u.versions(), "");
 
-        let u = parse_title("chore(deps): Bump the cargo-minor-and-patch group across 1 directory with 3 updates");
+        let u = parse_title(
+            "chore(deps): Bump the cargo-minor-and-patch group across 1 directory with 3 updates",
+        );
         assert_eq!(u.package, "cargo-minor-and-patch");
         assert_eq!(u.updates, Some(3));
+    }
+
+    #[test]
+    fn title_without_versions() {
+        let u = parse_title("Bump picomatch");
+        assert_eq!(u.package, "picomatch");
+        assert_eq!(u.from, None);
+        assert!(!u.group);
+
+        let u = parse_title("chore(deps): bump webpack and webpack-cli in /web");
+        assert_eq!(u.package, "webpack and webpack-cli");
+        assert_eq!(u.directory.as_deref(), Some("/web"));
     }
 
     #[test]
@@ -730,7 +830,10 @@ pub(crate) mod tests {
 
     #[test]
     fn categories() {
-        assert_eq!(categorize("MERGEABLE", "CLEAN", Some("SUCCESS")).0, Category::Ready);
+        assert_eq!(
+            categorize("MERGEABLE", "CLEAN", Some("SUCCESS")).0,
+            Category::Ready
+        );
         assert_eq!(categorize("MERGEABLE", "BLOCKED", None).0, Category::Ready);
         assert_eq!(
             categorize("CONFLICTING", "DIRTY", Some("SUCCESS")).0,
@@ -748,14 +851,23 @@ pub(crate) mod tests {
             categorize("MERGEABLE", "UNSTABLE", Some("PENDING")),
             (Category::Blocked, Some("checks pending".into()))
         );
-        assert_eq!(categorize("UNKNOWN", "UNKNOWN", Some("SUCCESS")).0, Category::Blocked);
+        assert_eq!(
+            categorize("UNKNOWN", "UNKNOWN", Some("SUCCESS")).0,
+            Category::Blocked
+        );
     }
 
     #[test]
     fn prefixes() {
-        assert_eq!(package_prefix("@typescript-eslint/parser"), "@typescript-eslint");
+        assert_eq!(
+            package_prefix("@typescript-eslint/parser"),
+            "@typescript-eslint"
+        );
         assert_eq!(package_prefix("golang.org/x/net"), "golang.org/x");
-        assert_eq!(package_prefix("io.github.revxrsal:lamp.common"), "io.github.revxrsal");
+        assert_eq!(
+            package_prefix("io.github.revxrsal:lamp.common"),
+            "io.github.revxrsal"
+        );
         assert_eq!(package_prefix("serde_json"), "serde");
         assert_eq!(package_prefix("react-dom"), "react");
         assert_eq!(package_prefix("react"), "react");
@@ -764,12 +876,42 @@ pub(crate) mod tests {
     #[test]
     fn lockstep_groups_need_matching_versions() {
         let prs = vec![
-            pr("o/r", 13, "Bump @typescript-eslint/eslint-plugin from 6.0.0 to 7.0.0", Category::NeedsRebase),
-            pr("o/r", 12, "Bump @typescript-eslint/parser from 6.0.0 to 7.0.0", Category::Ready),
-            pr("o/r", 14, "Bump @typescript-eslint/utils from 6.0.0 to 7.1.0", Category::Ready),
-            pr("o/r", 9, "Bump pino-http from 10.5.0 to 11.0.0", Category::Ready),
-            pr("o/r", 10, "Bump pino from 9.14.0 to 10.4.0", Category::Ready),
-            pr("o/other", 2, "Bump @typescript-eslint/parser from 6.0.0 to 7.0.0", Category::Ready),
+            pr(
+                "o/r",
+                13,
+                "Bump @typescript-eslint/eslint-plugin from 6.0.0 to 7.0.0",
+                Category::NeedsRebase,
+            ),
+            pr(
+                "o/r",
+                12,
+                "Bump @typescript-eslint/parser from 6.0.0 to 7.0.0",
+                Category::Ready,
+            ),
+            pr(
+                "o/r",
+                14,
+                "Bump @typescript-eslint/utils from 6.0.0 to 7.1.0",
+                Category::Ready,
+            ),
+            pr(
+                "o/r",
+                9,
+                "Bump pino-http from 10.5.0 to 11.0.0",
+                Category::Ready,
+            ),
+            pr(
+                "o/r",
+                10,
+                "Bump pino from 9.14.0 to 10.4.0",
+                Category::Ready,
+            ),
+            pr(
+                "o/other",
+                2,
+                "Bump @typescript-eslint/parser from 6.0.0 to 7.0.0",
+                Category::Ready,
+            ),
         ];
         let groups = build_groups(&prs);
         assert_eq!(groups.len(), 1);
@@ -781,16 +923,85 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn lockstep_joins_scoped_and_bare_names() {
+        let prs = vec![
+            pr(
+                "o/r",
+                13,
+                "Bump next from 15.5.28 to 16.4.2 in /apps/web",
+                Category::Ready,
+            ),
+            pr(
+                "o/r",
+                15,
+                "Bump @next/eslint-plugin-next from 15.5.28 to 16.4.2",
+                Category::Ready,
+            ),
+            pr(
+                "o/r",
+                20,
+                "Bump typescript-eslint from 8.0.0 to 8.1.0",
+                Category::Ready,
+            ),
+            pr(
+                "o/r",
+                21,
+                "Bump @typescript-eslint/parser from 8.0.0 to 8.1.0",
+                Category::Ready,
+            ),
+            pr(
+                "o/r",
+                22,
+                "Bump @typescript-eslint/utils from 8.0.0 to 8.1.0",
+                Category::Ready,
+            ),
+            pr(
+                "o/r",
+                30,
+                "Bump nextra from 15.5.28 to 16.4.2",
+                Category::Ready,
+            ),
+        ];
+        let groups = build_groups(&prs);
+        let found: Vec<(String, Vec<u64>)> = groups
+            .iter()
+            .map(|g| (g.prefix.clone(), g.prs.clone()))
+            .collect();
+        assert_eq!(
+            found,
+            vec![
+                ("next".to_string(), vec![13, 15]),
+                ("typescript-eslint".to_string(), vec![20, 21, 22]),
+            ]
+        );
+    }
+
+    #[test]
     fn lockstep_status_follows_first_or_blocked_member() {
         let prs = vec![
-            pr("o/r", 1, "Bump serde from 1.0.1 to 1.0.2", Category::NeedsRebase),
-            pr("o/r", 2, "Bump serde_json from 1.0.1 to 1.0.2", Category::Ready),
+            pr(
+                "o/r",
+                1,
+                "Bump serde from 1.0.1 to 1.0.2",
+                Category::NeedsRebase,
+            ),
+            pr(
+                "o/r",
+                2,
+                "Bump serde_json from 1.0.1 to 1.0.2",
+                Category::Ready,
+            ),
         ];
         assert_eq!(build_groups(&prs)[0].status, Category::NeedsRebase);
 
         let prs = vec![
             pr("o/r", 1, "Bump serde from 1.0.1 to 1.0.2", Category::Ready),
-            pr("o/r", 2, "Bump serde_json from 1.0.1 to 1.0.2", Category::Blocked),
+            pr(
+                "o/r",
+                2,
+                "Bump serde_json from 1.0.1 to 1.0.2",
+                Category::Blocked,
+            ),
         ];
         assert_eq!(build_groups(&prs)[0].status, Category::Blocked);
     }
@@ -799,10 +1010,19 @@ pub(crate) mod tests {
     fn overview_singles_exclude_grouped() {
         let o = Overview::new(vec![
             pr("o/r", 1, "Bump serde from 1.0.1 to 1.0.2", Category::Ready),
-            pr("o/r", 2, "Bump serde_json from 1.0.1 to 1.0.2", Category::Ready),
+            pr(
+                "o/r",
+                2,
+                "Bump serde_json from 1.0.1 to 1.0.2",
+                Category::Ready,
+            ),
             pr("o/r", 3, "Bump tokio from 1.0.0 to 1.1.0", Category::Ready),
         ]);
-        let singles: Vec<u64> = o.singles(Category::Ready).iter().map(|p| p.number).collect();
+        let singles: Vec<u64> = o
+            .singles(Category::Ready)
+            .iter()
+            .map(|p| p.number)
+            .collect();
         assert_eq!(singles, vec![3]);
         assert_eq!(o.count(Category::Ready), 3);
     }

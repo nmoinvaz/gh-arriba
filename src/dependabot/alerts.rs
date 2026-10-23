@@ -4,7 +4,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use std::collections::HashSet;
 
-use super::{DepPr, Scope, fetch_prs, table};
+use super::{Scope, fetch_light, parse_title, table};
 use crate::cli::{DependabotAlertsArgs, DependabotDismissArgs};
 use crate::context::Ctx;
 use crate::github::Client;
@@ -54,10 +54,15 @@ pub fn run_alerts(ctx: &Ctx, args: DependabotAlertsArgs) -> Result<()> {
     let scope = Scope::new(ctx, args.org)?;
     let mut alerts = fetch_alerts(&ctx.client, &scope)?;
 
+    // Matching fix PRs is a convenience, so a failure leaves the alerts without them.
     if !alerts.is_empty() {
-        let prs = fetch_prs(&ctx.client, &scope, false)?;
-        for alert in &mut alerts {
-            alert.fix_pr = find_fix(&prs, &alert.repo, &alert.package);
+        match fetch_candidates(&ctx.client, &scope) {
+            Ok(candidates) => {
+                for alert in &mut alerts {
+                    alert.fix_pr = find_fix(&candidates, &alert.repo, &alert.package);
+                }
+            }
+            Err(e) => eprintln!("warning: couldn't match alerts to Dependabot PRs: {e}"),
         }
     }
     alerts.sort_by(|a, b| {
@@ -84,7 +89,10 @@ pub fn run_alerts(ctx: &Ctx, args: DependabotAlertsArgs) -> Result<()> {
         };
         println!(
             "\n{label}  {}  {} ({})  {}",
-            a.severity, a.package, a.ecosystem, a.advisory()
+            a.severity,
+            a.package,
+            a.ecosystem,
+            a.advisory()
         );
         println!("  {}", a.summary);
         let mut details = vec![a.manifest.clone()];
@@ -166,15 +174,46 @@ fn parse_alert(a: &Value, repo: Option<String>) -> Alert {
     }
 }
 
-/// The open Dependabot PR that bumps `package` in `repo`, matched case-insensitively.
-fn find_fix(prs: &[DepPr], repo: &str, package: &str) -> Option<FixPr> {
-    prs.iter()
-        .find(|p| p.repo == repo && !p.update.group && p.update.package.eq_ignore_ascii_case(package))
-        .map(|p| FixPr {
-            number: p.number,
-            title: p.title.clone(),
-            url: p.url.clone(),
+/// An open Dependabot PR reduced to what fix matching needs.
+struct Candidate {
+    repo: String,
+    /// Updated package. None for grouped updates, which name no single package.
+    package: Option<String>,
+    pr: FixPr,
+}
+
+/// Titles of open Dependabot PRs, without the costly check and mergeability fields.
+fn fetch_candidates(client: &Client, scope: &Scope) -> Result<Vec<Candidate>> {
+    let nodes = fetch_light(client, scope)?;
+    Ok(nodes
+        .iter()
+        .map(|n| {
+            let title = str_of(n, "title");
+            let update = parse_title(&title);
+            Candidate {
+                repo: str_of(&n["repository"], "nameWithOwner"),
+                package: (!update.group).then_some(update.package),
+                pr: FixPr {
+                    number: n["number"].as_u64().unwrap_or(0),
+                    title,
+                    url: str_of(n, "url"),
+                },
+            }
         })
+        .collect())
+}
+
+/// The open Dependabot PR that bumps `package` in `repo`, matched case-insensitively.
+fn find_fix(candidates: &[Candidate], repo: &str, package: &str) -> Option<FixPr> {
+    candidates
+        .iter()
+        .find(|c| {
+            c.repo == repo
+                && c.package
+                    .as_deref()
+                    .is_some_and(|p| p.eq_ignore_ascii_case(package))
+        })
+        .map(|c| c.pr.clone())
 }
 
 fn severity_rank(severity: &str) -> u8 {
@@ -198,10 +237,12 @@ pub fn run_dismiss(ctx: &Ctx, args: DependabotDismissArgs) -> Result<()> {
         .to_possible_value()
         .map(|v| v.get_name().to_string())
         .unwrap_or_default();
-    if let Some(c) = &args.comment {
-        if c.chars().count() > MAX_COMMENT {
-            bail!("Dismissal comments are limited to {MAX_COMMENT} characters.");
-        }
+    if args
+        .comment
+        .as_ref()
+        .is_some_and(|c| c.chars().count() > MAX_COMMENT)
+    {
+        bail!("Dismissal comments are limited to {MAX_COMMENT} characters.");
     }
 
     let mut targets = Vec::new();
@@ -209,7 +250,13 @@ pub fn run_dismiss(ctx: &Ctx, args: DependabotDismissArgs) -> Result<()> {
         let value = ctx
             .client
             .get(&format!("{}/dependabot/alerts/{number}", repo.api()))
-            .map_err(|e| access_error(e, &repo.to_string()))?;
+            .map_err(|e| {
+                if e.to_string().contains("No alert found") {
+                    anyhow!("Alert #{number} not found in {repo}")
+                } else {
+                    access_error(e, &repo.to_string())
+                }
+            })?;
         let alert = parse_alert(&value, Some(repo.to_string()));
         if alert.state != "open" {
             eprintln!("  skipped #{number}, already {}", alert.state);
@@ -236,10 +283,7 @@ pub fn run_dismiss(ctx: &Ctx, args: DependabotDismissArgs) -> Result<()> {
             .collect();
         println!("{}", table(&rows, "  "));
     }
-    let question = format!(
-        "Dismiss {} alert(s) in {repo} as {reason}?",
-        targets.len()
-    );
+    let question = format!("Dismiss {} alert(s) in {repo} as {reason}?", targets.len());
     if !prompt::confirm(&question, ctx.yes)? {
         println!("Cancelled.");
         return Ok(());
@@ -277,8 +321,6 @@ pub fn run_dismiss(ctx: &Ctx, args: DependabotDismissArgs) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::Category;
-    use super::super::tests::pr;
     use super::*;
 
     fn alert_json() -> Value {
@@ -320,20 +362,43 @@ mod tests {
         assert_eq!(a.advisory(), "GHSA-35jh-r3h4-6jhm");
     }
 
+    fn candidate(repo: &str, number: u64, title: &str) -> Candidate {
+        let update = parse_title(title);
+        Candidate {
+            repo: repo.to_string(),
+            package: (!update.group).then_some(update.package),
+            pr: FixPr {
+                number,
+                title: title.to_string(),
+                url: String::new(),
+            },
+        }
+    }
+
     #[test]
     fn fix_pr_matches_package_case_insensitively() {
-        let prs = vec![
-            pr("o/r", 3, "Bump lodash from 4.17.20 to 4.17.21", Category::Ready),
-            pr("o/other", 4, "Bump lodash from 4.17.20 to 4.17.21", Category::Ready),
+        let candidates = vec![
+            candidate("o/r", 2, "Bump the lodash group with 3 updates"),
+            candidate("o/r", 3, "Bump lodash from 4.17.20 to 4.17.21"),
+            candidate("o/other", 4, "Bump lodash from 4.17.20 to 4.17.21"),
         ];
-        assert_eq!(find_fix(&prs, "o/r", "Lodash").map(|p| p.number), Some(3));
-        assert!(find_fix(&prs, "o/r", "underscore").is_none());
+        assert_eq!(
+            find_fix(&candidates, "o/r", "Lodash").map(|p| p.number),
+            Some(3)
+        );
+        assert!(find_fix(&candidates, "o/r", "underscore").is_none());
     }
 
     #[test]
     fn access_errors_explained() {
-        let e = access_error(anyhow!("GitHub API 403 on GET x: Resource not accessible"), "o/r");
-        assert!(e.to_string().starts_with("Dependabot alerts are disabled for o/r"));
+        let e = access_error(
+            anyhow!("GitHub API 403 on GET x: Resource not accessible"),
+            "o/r",
+        );
+        assert!(
+            e.to_string()
+                .starts_with("Dependabot alerts are disabled for o/r")
+        );
         let e = access_error(anyhow!("GitHub API 500 on GET x: boom"), "o/r");
         assert!(e.to_string().starts_with("GitHub API 500"));
     }

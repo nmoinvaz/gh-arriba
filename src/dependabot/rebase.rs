@@ -50,8 +50,10 @@ pub fn run(ctx: &Ctx, args: DependabotRebaseArgs) -> Result<()> {
     let body = json!({ "body": REBASE_COMMENT });
     let mut requested = Vec::new();
     for pr in &targets {
-        ctx.client
-            .post(&format!("{}/issues/{}/comments", repo.api(), pr.number), &body)?;
+        ctx.client.post(
+            &format!("{}/issues/{}/comments", repo.api(), pr.number),
+            &body,
+        )?;
         if !ctx.json {
             println!("  requested rebase on #{} {}", pr.number, pr.title);
         }

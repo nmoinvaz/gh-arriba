@@ -152,9 +152,8 @@ fn plan_units<'a>(
         return Ok(units);
     }
 
-    let wanted = |c: Category| {
-        c == Category::Ready || (c == Category::NeedsRebase && (auto || !all_ready))
-    };
+    let wanted =
+        |c: Category| c == Category::Ready || (c == Category::NeedsRebase && (auto || !all_ready));
     let mut units: Vec<Unit> = o
         .groups
         .iter()
@@ -439,7 +438,9 @@ impl Merger<'_> {
             return Ok(());
         }
         let path = format!("{}/pulls/{}/reviews", self.repo.api(), pr.number);
-        self.ctx.client.post(&path, &json!({ "event": "APPROVE" }))?;
+        self.ctx
+            .client
+            .post(&path, &json!({ "event": "APPROVE" }))?;
         Ok(())
     }
 
@@ -499,18 +500,48 @@ mod tests {
     use super::*;
 
     fn overview() -> Overview {
-        let mut needs = pr("o/r", 13, "Bump @types/x from 1.0.0 to 1.0.1", Category::NeedsRebase);
+        let mut needs = pr(
+            "o/r",
+            13,
+            "Bump @types/x from 1.0.0 to 1.0.1",
+            Category::NeedsRebase,
+        );
         needs.review_decision = Some("APPROVED".into());
-        let mut blocked = pr("o/r", 20, "Bump pino from 9.14.0 to 10.4.0", Category::Blocked);
+        let mut blocked = pr(
+            "o/r",
+            20,
+            "Bump pino from 9.14.0 to 10.4.0",
+            Category::Blocked,
+        );
         blocked.reason = Some("failing checks".into());
         Overview::new(vec![
             pr("o/r", 10, "Bump serde from 1.0.1 to 1.0.2", Category::Ready),
-            pr("o/r", 11, "Bump serde_json from 1.0.1 to 1.0.2", Category::Ready),
-            pr("o/r", 12, "Bump serde_derive from 1.0.1 to 1.0.2", Category::NeedsRebase),
+            pr(
+                "o/r",
+                11,
+                "Bump serde_json from 1.0.1 to 1.0.2",
+                Category::Ready,
+            ),
+            pr(
+                "o/r",
+                12,
+                "Bump serde_derive from 1.0.1 to 1.0.2",
+                Category::NeedsRebase,
+            ),
             needs,
             pr("o/r", 14, "Bump tokio from 1.0.0 to 1.1.0", Category::Ready),
-            pr("o/r", 15, "Bump eslint-a from 2.0.0 to 3.0.0", Category::NeedsRebase),
-            pr("o/r", 16, "Bump eslint-b from 2.0.0 to 3.0.0", Category::Ready),
+            pr(
+                "o/r",
+                15,
+                "Bump eslint-a from 2.0.0 to 3.0.0",
+                Category::NeedsRebase,
+            ),
+            pr(
+                "o/r",
+                16,
+                "Bump eslint-b from 2.0.0 to 3.0.0",
+                Category::Ready,
+            ),
             blocked,
         ])
     }
@@ -536,14 +567,20 @@ mod tests {
     fn all_ready_with_auto_adds_rebase_work() {
         let o = overview();
         let units = plan_units(&o, "o/r", &[], true, true).unwrap();
-        assert_eq!(numbers(&units), vec!["group eslint", "group serde", "#13", "#14"]);
+        assert_eq!(
+            numbers(&units),
+            vec!["group serde", "group eslint", "#13", "#14"]
+        );
     }
 
     #[test]
     fn interactive_offers_ready_and_rebase_work() {
         let o = overview();
         let units = plan_units(&o, "o/r", &[], false, false).unwrap();
-        assert_eq!(numbers(&units), vec!["group eslint", "group serde", "#13", "#14"]);
+        assert_eq!(
+            numbers(&units),
+            vec!["group serde", "group eslint", "#13", "#14"]
+        );
     }
 
     #[test]
@@ -613,29 +650,48 @@ mod tests {
         let o = overview();
         let ready = o.get("o/r", 14).unwrap();
         assert_eq!(
-            describe(ready, Action::Merge { fallback: false }, false, MergeMethod::Rebase),
+            describe(
+                ready,
+                Action::Merge { fallback: false },
+                false,
+                MergeMethod::Rebase
+            ),
             "approve, merge (rebase)"
         );
         let approved = o.get("o/r", 13).unwrap();
         assert_eq!(
-            describe(approved, Action::Auto { rebase: true }, true, MergeMethod::Squash),
+            describe(
+                approved,
+                Action::Auto { rebase: true },
+                true,
+                MergeMethod::Squash
+            ),
             "comment, auto-merge, request rebase"
         );
         let blocked = o.get("o/r", 20).unwrap();
         assert_eq!(
-            describe(blocked, Action::Merge { fallback: false }, false, MergeMethod::Merge),
+            describe(
+                blocked,
+                Action::Merge { fallback: false },
+                false,
+                MergeMethod::Merge
+            ),
             "approve, merge (merge), despite failing checks"
         );
     }
 
     #[test]
     fn conflict_and_settings_errors() {
-        assert!(is_conflict(&anyhow!("GitHub API 405 on PUT x: Pull Request is not mergeable")));
+        assert!(is_conflict(&anyhow!(
+            "GitHub API 405 on PUT x: Pull Request is not mergeable"
+        )));
         assert!(!is_conflict(&anyhow!("GitHub API 403 on PUT x: forbidden")));
         let repo = Repo::parse("o/r").unwrap();
         assert_eq!(
             explain(
-                &anyhow!("GraphQL error: Pull request Auto merge is not allowed for this repository"),
+                &anyhow!(
+                    "GraphQL error: Pull request Auto merge is not allowed for this repository"
+                ),
                 &repo
             ),
             "auto-merge is disabled in o/r settings"

@@ -169,17 +169,33 @@ mod tests {
 
     #[test]
     fn row_shows_reason_for_blocked() {
-        let mut p = pr("o/r", 8, "Bump pino from 9.14.0 to 10.4.0", Category::Blocked);
+        let mut p = pr(
+            "o/r",
+            8,
+            "Bump pino from 9.14.0 to 10.4.0",
+            Category::Blocked,
+        );
         p.reason = Some("failing checks".into());
         assert_eq!(
             row(&p, false),
-            vec!["#8", "pino", "9.14.0 → 10.4.0", "🔴 major", "failing checks"]
+            vec![
+                "#8",
+                "pino",
+                "9.14.0 → 10.4.0",
+                "🔴 major",
+                "failing checks"
+            ]
         );
     }
 
     #[test]
     fn row_omits_badge_for_groups() {
-        let p = pr("o/r", 5, "Bump the dev group with 7 updates", Category::Ready);
+        let p = pr(
+            "o/r",
+            5,
+            "Bump the dev group with 7 updates",
+            Category::Ready,
+        );
         let r = row(&p, true);
         assert_eq!(r[0], "o/r#5");
         assert_eq!(r[1], "dev group (7 updates)");
