@@ -3,8 +3,8 @@ use reqwest::Method;
 use reqwest::blocking::{Client as Http, RequestBuilder, Response};
 use reqwest::header::LINK;
 use serde_json::{Value, json};
-use std::cell::OnceCell;
 use std::process::Command;
+use std::sync::OnceLock;
 
 /// REST and GraphQL client authenticated with the token gh uses.
 pub struct Client {
@@ -12,7 +12,7 @@ pub struct Client {
     token: String,
     api: String,
     graphql: String,
-    viewer: OnceCell<String>,
+    viewer: OnceLock<String>,
 }
 
 impl Client {
@@ -43,7 +43,7 @@ impl Client {
             token,
             api,
             graphql,
-            viewer: OnceCell::new(),
+            viewer: OnceLock::new(),
         })
     }
 
