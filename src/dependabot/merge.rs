@@ -83,11 +83,11 @@ pub fn run(ctx: &Ctx, args: DependabotMergeArgs) -> Result<()> {
                 .collect();
             println!("{}", table(&rows, "  "));
         }
-        let all_auto = steps.iter().all(|(_, a)| matches!(a, Action::Auto { .. }));
-        let verb = if all_auto {
-            "Approve and auto-merge"
-        } else {
+        let immediate = steps.iter().any(|(p, a)| merges_now(p, *a));
+        let verb = if immediate {
             "Merge"
+        } else {
+            "Approve and auto-merge"
         };
         let question = format!("{verb} {} PR(s) in {repo}?", steps.len());
         if !prompt::confirm(&question, ctx.yes)? {
@@ -489,6 +489,14 @@ fn method_name(method: MergeMethod) -> &'static str {
     }
 }
 
+/// Whether a step merges right away rather than waiting on auto-merge.
+fn merges_now(p: &DepPr, action: Action) -> bool {
+    match action {
+        Action::Merge { .. } => true,
+        Action::Auto { rebase } => !rebase && immediately_mergeable(&p.merge_state),
+    }
+}
+
 /// Merge states GitHub merges without waiting, mirroring `isImmediatelyMergeable` in gh.
 fn immediately_mergeable(merge_state: &str) -> bool {
     matches!(merge_state, "CLEAN" | "HAS_HOOKS" | "UNSTABLE")
@@ -719,6 +727,12 @@ mod tests {
             ),
             "approve, auto-merge"
         );
+        assert!(merges_now(clean, Action::Auto { rebase: false }));
+        assert!(!merges_now(
+            &blocked_by_review,
+            Action::Auto { rebase: false }
+        ));
+        assert!(!merges_now(clean, Action::Auto { rebase: true }));
         assert!(immediately_mergeable("UNSTABLE"));
         assert!(!immediately_mergeable("BEHIND"));
     }
