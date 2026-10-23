@@ -15,7 +15,10 @@ impl<'a> GistClient<'a> {
 
     /// Search for a gist by its description, returning the gist ID if found.
     pub fn find_gist(&self, description: &str) -> Result<Option<String>> {
-        let gists = self.client.get_all("gists").context("Failed to list gists")?;
+        let gists = self
+            .client
+            .get_all("gists")
+            .context("Failed to list gists")?;
         Ok(gists
             .iter()
             .find(|g| g["description"].as_str() == Some(description))

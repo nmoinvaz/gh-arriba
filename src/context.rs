@@ -44,7 +44,10 @@ impl Repo {
             .strip_prefix("https://")
             .or_else(|| s.strip_prefix("http://"))
             .map(|r| r.split_once('/').map(|(_, path)| path).unwrap_or(""))
-            .or_else(|| s.strip_prefix("git@").and_then(|r| r.split_once(':').map(|(_, p)| p)))
+            .or_else(|| {
+                s.strip_prefix("git@")
+                    .and_then(|r| r.split_once(':').map(|(_, p)| p))
+            })
             .unwrap_or(s);
         let parts: Vec<&str> = rest.split('/').filter(|p| !p.is_empty()).collect();
         let (owner, name) = match parts.as_slice() {
@@ -157,8 +160,15 @@ pub fn resolve_pr(repo_flag: Option<&str>, arg: Option<&str>) -> Result<PrRef> {
 
 /// Repository gh resolves for the working directory, honoring `gh repo set-default`.
 pub fn current_repo() -> Result<Repo> {
-    let name = gh(&["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"])
-        .context("Not in a GitHub repository. Pass --repo OWNER/REPO.")?;
+    let name = gh(&[
+        "repo",
+        "view",
+        "--json",
+        "nameWithOwner",
+        "--jq",
+        ".nameWithOwner",
+    ])
+    .context("Not in a GitHub repository. Pass --repo OWNER/REPO.")?;
     Repo::parse(&name)
 }
 
@@ -208,10 +218,22 @@ mod tests {
     fn repo_parses_common_forms() {
         assert_eq!(Repo::parse("a/b").unwrap(), repo("a", "b"));
         assert_eq!(Repo::parse("github.com/a/b").unwrap(), repo("a", "b"));
-        assert_eq!(Repo::parse("https://github.com/a/b").unwrap(), repo("a", "b"));
-        assert_eq!(Repo::parse("https://github.com/a/b.git").unwrap(), repo("a", "b"));
-        assert_eq!(Repo::parse("https://github.com/a/b/pull/3").unwrap(), repo("a", "b"));
-        assert_eq!(Repo::parse("git@github.com:a/b.git").unwrap(), repo("a", "b"));
+        assert_eq!(
+            Repo::parse("https://github.com/a/b").unwrap(),
+            repo("a", "b")
+        );
+        assert_eq!(
+            Repo::parse("https://github.com/a/b.git").unwrap(),
+            repo("a", "b")
+        );
+        assert_eq!(
+            Repo::parse("https://github.com/a/b/pull/3").unwrap(),
+            repo("a", "b")
+        );
+        assert_eq!(
+            Repo::parse("git@github.com:a/b.git").unwrap(),
+            repo("a", "b")
+        );
         assert!(Repo::parse("just-a-name").is_err());
     }
 

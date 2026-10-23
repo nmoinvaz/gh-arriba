@@ -4,9 +4,9 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 
-use crate::config::project::ProjectConfig;
 use crate::config::gist::GistClient;
-use crate::config::manifest::{current_platform, Manifest, ManifestFile};
+use crate::config::manifest::{Manifest, ManifestFile, current_platform};
+use crate::config::project::ProjectConfig;
 
 /// Tolerance for comparing local mtime against the manifest timestamp.
 /// Accounts for coarser filesystem mtime resolution (e.g. FAT's two-second
@@ -188,15 +188,14 @@ fn build_plan(
     let current = current_platform();
     let mut plan = Vec::new();
     for (idx, entry) in manifest.files.iter().enumerate() {
-        let platform_match =
-            entry.platform.is_none() || entry.platform.as_deref() == Some(current);
+        let platform_match = entry.platform.is_none() || entry.platform.as_deref() == Some(current);
         if !platform_match {
             continue;
         }
-        if let Some(focus) = focus {
-            if !focus.contains(&entry.path) {
-                continue;
-            }
+        if let Some(focus) = focus
+            && !focus.contains(&entry.path)
+        {
+            continue;
         }
 
         let action = match local_mtime(config, &entry.path) {
@@ -362,7 +361,9 @@ pub fn do_status(
     gist_id: Option<&str>,
 ) -> Result<()> {
     let Some(id) = gist_id else {
-        println!("No gist exists for this project. `gh arriba config sync FILE...` would create one.");
+        println!(
+            "No gist exists for this project. `gh arriba config sync FILE...` would create one."
+        );
         return Ok(());
     };
 
@@ -412,9 +413,7 @@ pub fn do_status(
     if push == 0 && pull == 0 && stale == 0 {
         println!("Everything is in sync ({in_sync} file(s)).");
     } else {
-        println!(
-            "Summary: {push} to push, {pull} to pull, {in_sync} in sync, {stale} stale"
-        );
+        println!("Summary: {push} to push, {pull} to pull, {in_sync} in sync, {stale} stale");
     }
     print_gist_url(id, is_gist_private(client, id)?);
 
@@ -458,11 +457,11 @@ pub fn do_restore(
     let mut in_sync = 0usize;
     for entry in &targets {
         // Skip when local mtime already matches the manifest timestamp.
-        if let Some(local) = local_mtime(config, &entry.path) {
-            if (local - entry.updated_at).num_seconds().abs() <= MTIME_TOLERANCE_SECS {
-                in_sync += 1;
-                continue;
-            }
+        if let Some(local) = local_mtime(config, &entry.path)
+            && (local - entry.updated_at).num_seconds().abs() <= MTIME_TOLERANCE_SECS
+        {
+            in_sync += 1;
+            continue;
         }
 
         let Some(content) = client.get_file_content(&gist, &entry.gist) else {
@@ -535,7 +534,11 @@ pub fn do_add(
         }
         // A platform-agnostic entry and a platform-specific one for the same
         // path would both match on sync. Reject the mix instead.
-        if entries.iter().chain(added.iter()).any(|e| e.path == normalized) {
+        if entries
+            .iter()
+            .chain(added.iter())
+            .any(|e| e.path == normalized)
+        {
             anyhow::bail!(
                 "{normalized} is already tracked with a different platform scope. \
                  Run `gh arriba config remove {normalized}` first to change it."

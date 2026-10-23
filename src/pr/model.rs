@@ -216,7 +216,10 @@ fn parse_comment(node: &Value) -> Result<Comment> {
 pub fn is_bot(typename: Option<&str>, login: &str) -> bool {
     typename == Some("Bot")
         || login.ends_with("[bot]")
-        || matches!(login, "copilot-pull-request-reviewer" | "coderabbitai" | "Copilot")
+        || matches!(
+            login,
+            "copilot-pull-request-reviewer" | "coderabbitai" | "Copilot"
+        )
 }
 
 pub fn vars(pr: &PrRef) -> Value {

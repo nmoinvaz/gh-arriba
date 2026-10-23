@@ -220,7 +220,10 @@ fn check(resp: Response, method: &Method, path: &str) -> Result<Response> {
             message = format!("{message} ({})", details.join("; "));
         }
     }
-    bail!("GitHub API {} on {method} {path}: {message}", status.as_u16())
+    bail!(
+        "GitHub API {} on {method} {path}: {message}",
+        status.as_u16()
+    )
 }
 
 /// Parse a JSON body, mapping an empty body (such as 204) to Null.
@@ -251,8 +254,12 @@ fn next_link(resp: &Response) -> Option<String> {
 fn parse_next_link(header: &str) -> Option<String> {
     header.split(',').find_map(|part| {
         let (url, rel) = part.split_once(';')?;
-        rel.contains("rel=\"next\"")
-            .then(|| url.trim().trim_start_matches('<').trim_end_matches('>').to_string())
+        rel.contains("rel=\"next\"").then(|| {
+            url.trim()
+                .trim_start_matches('<')
+                .trim_end_matches('>')
+                .to_string()
+        })
     })
 }
 
@@ -261,21 +268,20 @@ pub fn get_github_token(host: &str) -> Result<String> {
     if let Ok(output) = Command::new("gh")
         .args(["auth", "token", "--hostname", host])
         .output()
+        && output.status.success()
     {
-        if output.status.success() {
-            let token = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !token.is_empty() {
-                return Ok(token);
-            }
+        let token = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !token.is_empty() {
+            return Ok(token);
         }
     }
 
     // Fall back to environment variables.
     for var in ["GH_TOKEN", "GITHUB_TOKEN"] {
-        if let Ok(token) = std::env::var(var) {
-            if !token.is_empty() {
-                return Ok(token);
-            }
+        if let Ok(token) = std::env::var(var)
+            && !token.is_empty()
+        {
+            return Ok(token);
         }
     }
 
@@ -304,7 +310,13 @@ mod tests {
     #[test]
     fn per_page_appended_once() {
         assert_eq!(with_per_page("https://a/x"), "https://a/x?per_page=100");
-        assert_eq!(with_per_page("https://a/x?state=open"), "https://a/x?state=open&per_page=100");
-        assert_eq!(with_per_page("https://a/x?per_page=5"), "https://a/x?per_page=5");
+        assert_eq!(
+            with_per_page("https://a/x?state=open"),
+            "https://a/x?state=open&per_page=100"
+        );
+        assert_eq!(
+            with_per_page("https://a/x?per_page=5"),
+            "https://a/x?per_page=5"
+        );
     }
 }

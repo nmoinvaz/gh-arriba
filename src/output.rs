@@ -21,7 +21,11 @@ pub fn first_lines(text: &str, max: usize) -> String {
     if lines.len() <= max {
         return lines.join("\n");
     }
-    format!("{}\n[+{} lines]", lines[..max].join("\n"), lines.len() - max)
+    format!(
+        "{}\n[+{} lines]",
+        lines[..max].join("\n"),
+        lines.len() - max
+    )
 }
 
 #[cfg(test)]

@@ -75,11 +75,7 @@ impl ProjectConfig {
             .ok()?;
         if output.status.success() {
             let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if url.is_empty() {
-                None
-            } else {
-                Some(url)
-            }
+            if url.is_empty() { None } else { Some(url) }
         } else {
             None
         }
@@ -88,10 +84,10 @@ impl ProjectConfig {
 
 fn expand_tilde(path: &Path) -> PathBuf {
     let s = path.to_string_lossy();
-    if s.starts_with("~/") || s == "~" {
-        if let Some(home) = std::env::var_os("HOME") {
-            return PathBuf::from(home).join(s.strip_prefix("~/").unwrap_or(""));
-        }
+    if (s.starts_with("~/") || s == "~")
+        && let Some(home) = std::env::var_os("HOME")
+    {
+        return PathBuf::from(home).join(s.strip_prefix("~/").unwrap_or(""));
     }
     path.to_path_buf()
 }
@@ -142,7 +138,10 @@ mod tests {
     #[test]
     fn gist_filename_tags_platform_when_no_extension() {
         let c = config();
-        assert_eq!(c.gist_filename("Makefile", Some("linux")), "proj_Makefile[linux]");
+        assert_eq!(
+            c.gist_filename("Makefile", Some("linux")),
+            "proj_Makefile[linux]"
+        );
     }
 
     #[test]
