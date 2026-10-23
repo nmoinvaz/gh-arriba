@@ -1,6 +1,6 @@
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use dialoguer::{Confirm, MultiSelect, Select};
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Read};
 
 /// True when a person can answer prompts. Prompts render on stderr so stdout stays clean.
 pub fn interactive() -> bool {
@@ -42,4 +42,29 @@ pub fn multi_select(prompt: &str, items: &[String]) -> Result<Vec<usize>> {
         .with_prompt(prompt)
         .items(items)
         .interact()?)
+}
+
+/// Text from the argument, or from stdin for `-` or a piped stdin. `what` names it in errors.
+pub fn read_body(arg: Option<&str>, what: &str) -> Result<String> {
+    let body = match arg {
+        Some("-") => read_stdin()?,
+        Some(text) => text.to_string(),
+        None if std::io::stdin().is_terminal() => {
+            bail!("Pass the {what} as an argument, or pipe it on stdin")
+        }
+        None => read_stdin()?,
+    };
+    let body = body.trim_end_matches(['\n', '\r']).to_string();
+    if body.trim().is_empty() {
+        bail!("The {what} is empty");
+    }
+    Ok(body)
+}
+
+fn read_stdin() -> Result<String> {
+    let mut s = String::new();
+    std::io::stdin()
+        .read_to_string(&mut s)
+        .context("Failed to read stdin")?;
+    Ok(s)
 }

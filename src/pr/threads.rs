@@ -1,11 +1,10 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use regex::Regex;
 use serde::Serialize;
 use serde_json::json;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
-use std::io::{IsTerminal, Read};
 use std::sync::LazyLock;
 
 use crate::cli::{ReplyArgs, ResolveArgs, ThreadsArgs};
@@ -13,6 +12,7 @@ use crate::context::{Ctx, PrRef};
 use crate::github::Client;
 use crate::output::{first_lines, indent, print_json};
 use crate::pr::model::{PrThreads, Thread, fetch_pr, fetch_threads, time_of, vars};
+use crate::prompt;
 
 /// Body lines shown per comment in human output.
 const BODY_LINES: usize = 12;
@@ -496,7 +496,7 @@ fn print_finding(f: &Finding) {
 // -------------------------------------------------------------------------
 
 pub fn run_reply(ctx: &Ctx, args: ReplyArgs) -> Result<()> {
-    let body = read_body(args.body.as_deref())?;
+    let body = prompt::read_body(args.body.as_deref(), "reply")?;
 
     let (comment, thread_id) = match comment_id(&args.target)? {
         Some(id) => {
@@ -555,31 +555,6 @@ mutation($id: ID!, $body: String!) {
 struct NewComment {
     id: u64,
     url: String,
-}
-
-/// Reply text from the argument, or stdin for `-` or a piped stdin.
-fn read_body(arg: Option<&str>) -> Result<String> {
-    let body = match arg {
-        Some("-") => read_stdin()?,
-        Some(text) => text.to_string(),
-        None if std::io::stdin().is_terminal() => {
-            bail!("Pass the text as an argument, or pipe it on stdin")
-        }
-        None => read_stdin()?,
-    };
-    let body = body.trim_end_matches(['\n', '\r']).to_string();
-    if body.trim().is_empty() {
-        bail!("The reply is empty");
-    }
-    Ok(body)
-}
-
-fn read_stdin() -> Result<String> {
-    let mut s = String::new();
-    std::io::stdin()
-        .read_to_string(&mut s)
-        .context("Failed to read stdin")?;
-    Ok(s)
 }
 
 // -------------------------------------------------------------------------

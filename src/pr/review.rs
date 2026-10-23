@@ -1,7 +1,6 @@
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use serde_json::{Value, json};
-use std::io::{IsTerminal, Read};
 
 use crate::cli::{PrArg, ReviewAddArgs, ReviewCommand, ReviewEvent, ReviewSubmitArgs, Side};
 use crate::context::{Ctx, PrRef};
@@ -256,28 +255,6 @@ fn parse_location(s: &str) -> Result<(String, Range)> {
     Ok((path.to_string(), range))
 }
 
-/// Body from the argument, or from stdin when it is `-` or omitted.
-fn read_body(arg: Option<String>) -> Result<String> {
-    let body = match arg {
-        Some(b) if b != "-" => b,
-        _ => {
-            if std::io::stdin().is_terminal() {
-                eprintln!("Reading the comment from stdin, end it with Ctrl-D.");
-            }
-            let mut s = String::new();
-            std::io::stdin()
-                .read_to_string(&mut s)
-                .context("Failed to read the comment from stdin")?;
-            s
-        }
-    };
-    let body = body.trim_end().to_string();
-    if body.trim().is_empty() {
-        bail!("The comment body is empty");
-    }
-    Ok(body)
-}
-
 fn side_name(side: Side) -> &'static str {
     match side {
         Side::Left => "LEFT",
@@ -331,7 +308,7 @@ struct Added {
 
 fn add(ctx: &Ctx, args: ReviewAddArgs) -> Result<()> {
     let (path, range) = parse_location(&args.location)?;
-    let body = read_body(args.body)?;
+    let body = prompt::read_body(args.body.as_deref(), "comment")?;
     let pr = ctx.pr(args.pr.as_deref())?;
     let client = &ctx.client;
 

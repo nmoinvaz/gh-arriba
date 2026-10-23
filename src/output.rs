@@ -10,7 +10,7 @@ pub fn print_json<T: Serialize + ?Sized>(value: &T) -> Result<()> {
 /// Indent every line of `text` with `prefix`.
 pub fn indent(text: &str, prefix: &str) -> String {
     text.lines()
-        .map(|l| format!("{prefix}{l}"))
+        .map(|l| format!("{prefix}{l}").trim_end().to_string())
         .collect::<Vec<_>>()
         .join("\n")
 }
