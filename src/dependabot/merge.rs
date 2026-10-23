@@ -229,6 +229,9 @@ fn describe(p: &DepPr, action: Action, comment: bool, method: MergeMethod) -> St
             format!("merge ({method}), or auto-merge if it conflicts")
         }
         Action::Auto { rebase: true } => "auto-merge, request rebase".to_string(),
+        Action::Auto { rebase: false } if immediately_mergeable(&p.merge_state) => {
+            format!("merge ({method}), it can't wait for auto-merge")
+        }
         Action::Auto { rebase: false } => "auto-merge".to_string(),
     });
     if let Some(reason) = &p.reason {
@@ -410,8 +413,15 @@ impl Merger<'_> {
     }
 
     fn auto(&self, pr: &DepPr, rebase: bool) -> Result<String> {
+        // GitHub refuses auto-merge on a PR that can merge right now, so merge it directly, as
+        // `gh pr merge --auto` does. A PR waiting on a rebase never qualifies, and its cached state
+        // may predate the conflict that sent it here.
+        if !rebase && immediately_mergeable(&pr.merge_state) {
+            self.merge(pr)?;
+            return Ok(format!("merged ({})", method_name(self.method)));
+        }
         if let Err(e) = self.enable_auto_merge(pr) {
-            // GitHub refuses auto-merge on a PR that can merge right now, so merge it directly.
+            // The PR became mergeable after the approval above.
             if e.to_string().contains("clean status") {
                 self.merge(pr)?;
                 return Ok(format!("merged ({})", method_name(self.method)));
@@ -477,6 +487,11 @@ fn method_name(method: MergeMethod) -> &'static str {
         MergeMethod::Squash => "squash",
         MergeMethod::Rebase => "rebase",
     }
+}
+
+/// Merge states GitHub merges without waiting, mirroring `isImmediatelyMergeable` in gh.
+fn immediately_mergeable(merge_state: &str) -> bool {
+    matches!(merge_state, "CLEAN" | "HAS_HOOKS" | "UNSTABLE")
 }
 
 /// Merge refusals that a rebase can fix: 405 not mergeable, 409 head changed.
@@ -678,6 +693,34 @@ mod tests {
             ),
             "approve, merge (merge), despite failing checks"
         );
+    }
+
+    #[test]
+    fn auto_merge_on_clean_pr_merges_now() {
+        let o = overview();
+        let clean = o.get("o/r", 14).unwrap();
+        assert_eq!(
+            describe(
+                clean,
+                Action::Auto { rebase: false },
+                false,
+                MergeMethod::Rebase
+            ),
+            "approve, merge (rebase), it can't wait for auto-merge"
+        );
+        let mut blocked_by_review = clean.clone();
+        blocked_by_review.merge_state = "BLOCKED".into();
+        assert_eq!(
+            describe(
+                &blocked_by_review,
+                Action::Auto { rebase: false },
+                false,
+                MergeMethod::Rebase
+            ),
+            "approve, auto-merge"
+        );
+        assert!(immediately_mergeable("UNSTABLE"));
+        assert!(!immediately_mergeable("BEHIND"));
     }
 
     #[test]
