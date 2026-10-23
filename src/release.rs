@@ -274,8 +274,15 @@ fn version_input(inputs: &[Input]) -> Result<&Input> {
 struct PlanInput {
     name: String,
     value: Option<String>,
-    /// "version", "set", "prompt", "default", or "unset". Only the first three are sent.
+    /// "version", "set", "prompt", "default", "unset", or "missing". Only the first three are sent.
     source: String,
+    description: String,
+    #[serde(rename = "type")]
+    kind: String,
+    required: bool,
+    default: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    options: Vec<String>,
 }
 
 impl PlanInput {
@@ -325,12 +332,14 @@ fn parse_fields(
     Ok(parsed)
 }
 
-/// Resolve every declared input's value, prompting for required ones that have none.
+/// Resolve every declared input's value, prompting for required ones that have none. A dry run
+/// marks those as missing instead.
 fn resolve_inputs(
     inputs: &[Input],
     version_name: &str,
     version: &str,
     fields: &[(String, String)],
+    dry_run: bool,
 ) -> Result<Vec<PlanInput>> {
     let mut plan = Vec::new();
     let mut missing = Vec::new();
@@ -342,6 +351,8 @@ fn resolve_inputs(
             (Some(v.clone()), "set")
         } else if let Some(d) = &input.default {
             (Some(d.clone()), "default")
+        } else if input.required && dry_run {
+            (None, "missing")
         } else if input.required {
             if !prompt::interactive() {
                 missing.push(input.name.clone());
@@ -355,6 +366,11 @@ fn resolve_inputs(
             name: input.name.clone(),
             value,
             source: source.to_string(),
+            description: input.description.clone(),
+            kind: input.kind.clone(),
+            required: input.required,
+            default: input.default.clone(),
+            options: input.options.clone(),
         });
     }
     if !missing.is_empty() {
@@ -404,6 +420,7 @@ fn render(plan: &Plan) -> String {
             let note = match i.source.as_str() {
                 "default" => "  (default)",
                 "unset" => "  (unset)",
+                "missing" => "  (required, no value)",
                 _ => "",
             };
             out.push_str(&format!("  {:<width$}  {value}{note}\n", i.name));
@@ -462,7 +479,7 @@ pub fn run(ctx: &Ctx, args: ReleaseArgs) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("{} ({}): {e}", workflow.name, workflow.path))?;
     let version_name = version_input(&inputs)?.name.clone();
     let fields = parse_fields(&args.fields, &inputs, &version_name)?;
-    let resolved = resolve_inputs(&inputs, &version_name, &version, &fields)?;
+    let resolved = resolve_inputs(&inputs, &version_name, &version, &fields, args.dry_run)?;
 
     let mut plan = Plan {
         repo: repo.to_string(),
@@ -475,6 +492,14 @@ pub fn run(ctx: &Ctx, args: ReleaseArgs) -> Result<()> {
         run_id: None,
         run_url: None,
     };
+
+    if args.dry_run {
+        if ctx.json {
+            return output::print_json(&plan);
+        }
+        print!("{}", render(&plan));
+        return Ok(());
+    }
 
     // With --json the plan goes to stderr, so stdout carries only the final document.
     if ctx.json {
@@ -716,7 +741,7 @@ on:
         assert!(parse_fields(&["nope=1".to_string()], &inputs, "version").is_err());
         assert!(parse_fields(&["channel".to_string()], &inputs, "version").is_err());
 
-        let plan = resolve_inputs(&inputs, "version", "0.4.1", &fields).unwrap();
+        let plan = resolve_inputs(&inputs, "version", "0.4.1", &fields, false).unwrap();
         let rows: Vec<(&str, Option<&str>, &str, bool)> = plan
             .iter()
             .map(|i| {
@@ -736,5 +761,18 @@ on:
                 ("dry_run", Some("false"), "default", false),
             ]
         );
+    }
+
+    #[test]
+    fn dry_run_marks_missing_required_inputs() {
+        let yaml = "on:\n  workflow_dispatch:\n    inputs:\n      version:\n        required: true\n      notes:\n        description: Release notes\n        required: true\n";
+        let inputs = dispatch_inputs(yaml).unwrap();
+        let plan = resolve_inputs(&inputs, "version", "1.0.0", &[], true).unwrap();
+        assert_eq!(plan[1].source, "missing");
+        assert_eq!(plan[1].value, None);
+        assert_eq!(plan[1].description, "Release notes");
+        assert!(!plan[1].sent());
+        // Without a dry run and without a terminal, the missing input is an error.
+        assert!(resolve_inputs(&inputs, "version", "1.0.0", &[], false).is_err());
     }
 }

@@ -45,7 +45,7 @@ gh arriba [options] <command>
 | Command | Description |
 |---------|-------------|
 | `run logs <RUN_OR_JOB>` | Download job logs to files for searching |
-| `release` | Dispatch the repo's release workflow with a version bump |
+| `release` | Dispatch the repo's release workflow with a version bump, previewing with `--dry-run` |
 
 ### Dependabot
 

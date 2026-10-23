@@ -316,6 +316,10 @@ pub struct ReleaseArgs {
     /// Follow the run until it finishes
     #[arg(long)]
     pub watch: bool,
+
+    /// Print the plan without dispatching
+    #[arg(long, conflicts_with = "watch")]
+    pub dry_run: bool,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
