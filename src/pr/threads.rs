@@ -4,6 +4,7 @@ use regex::Regex;
 use serde::Serialize;
 use serde_json::json;
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::io::{IsTerminal, Read};
 use std::sync::LazyLock;
 
@@ -105,15 +106,15 @@ impl Filter {
         if (self.bots && !starter.bot) || (self.humans && starter.bot) {
             return false;
         }
-        if let Some(a) = &self.author {
-            if !same_login(&starter.author, a) {
-                return false;
-            }
+        if let Some(a) = &self.author
+            && !same_login(&starter.author, a)
+        {
+            return false;
         }
-        if let Some(since) = self.since {
-            if !t.comments.iter().any(|c| c.created_at > since) {
-                return false;
-            }
+        if let Some(since) = self.since
+            && !t.comments.iter().any(|c| c.created_at > since)
+        {
+            return false;
         }
         true
     }
@@ -176,7 +177,10 @@ fn print_thread(t: &Thread) {
         "{}  {location}  {}{bot}  comment {}",
         t.id, starter.author, starter.id
     );
-    println!("{}", indent(&first_lines(&clean_body(&starter.body), BODY_LINES), "  "));
+    println!(
+        "{}",
+        indent(&first_lines(&clean_body(&starter.body), BODY_LINES), "  ")
+    );
     for reply in &t.comments[1..] {
         let first = clean_body(&reply.body)
             .lines()
@@ -188,7 +192,7 @@ fn print_thread(t: &Thread) {
 }
 
 /// Line or range of a thread, using the original lines once it is outdated.
-fn line_span(t: &Thread) -> String {
+pub(super) fn line_span(t: &Thread) -> String {
     let (start, end) = if t.line.is_some() {
         (t.start_line, t.line)
     } else {
@@ -378,26 +382,26 @@ pub fn parse_review_body(body: &str) -> Vec<BodyFinding> {
             file = Some(caps[1].to_string());
             continue;
         }
-        if let Some(path) = file.as_ref() {
-            if let Some(caps) = OLD_FINDING.captures(trimmed) {
-                finish(&mut current, &mut findings);
-                let (start_line, line) = span(&caps[1], caps.get(2).map(|m| m.as_str()));
-                let rest = caps[3].trim();
-                // Newer bodies put a category line here and the bold title on the next line.
-                let (title, body) = match BOLD_TITLE.captures(rest) {
-                    Some(t) if !rest.contains(" | ") => (t[1].trim().to_string(), String::new()),
-                    _ => (String::new(), format!("{rest}\n")),
-                };
-                current = Some(BodyFinding {
-                    kind: kind.clone(),
-                    path: path.clone(),
-                    start_line,
-                    line,
-                    title,
-                    body,
-                });
-                continue;
-            }
+        if let Some(path) = file.as_ref()
+            && let Some(caps) = OLD_FINDING.captures(trimmed)
+        {
+            finish(&mut current, &mut findings);
+            let (start_line, line) = span(&caps[1], caps.get(2).map(|m| m.as_str()));
+            let rest = caps[3].trim();
+            // Newer bodies put a category line here and the bold title on the next line.
+            let (title, body) = match BOLD_TITLE.captures(rest) {
+                Some(t) if !rest.contains(" | ") => (t[1].trim().to_string(), String::new()),
+                _ => (String::new(), format!("{rest}\n")),
+            };
+            current = Some(BodyFinding {
+                kind: kind.clone(),
+                path: path.clone(),
+                start_line,
+                line,
+                title,
+                body,
+            });
+            continue;
         }
         if let Some(caps) = NEW_FINDING.captures(trimmed) {
             finish(&mut current, &mut findings);
@@ -417,10 +421,11 @@ pub fn parse_review_body(body: &str) -> Vec<BodyFinding> {
             continue;
         };
         // The newer layout puts the title on its own bold line after a category line.
-        if f.title.is_empty() && !trimmed.contains(" | ") {
-            if let Some(caps) = BOLD_TITLE.captures(trimmed) {
-                f.title = caps[1].trim().to_string();
-            }
+        if f.title.is_empty()
+            && !trimmed.contains(" | ")
+            && let Some(caps) = BOLD_TITLE.captures(trimmed)
+        {
+            f.title = caps[1].trim().to_string();
         }
         push_line(f, line);
     }
@@ -480,7 +485,10 @@ fn print_finding(f: &Finding) {
     if !f.item.title.is_empty() && !f.item.body.contains(&f.item.title) {
         println!("  {}", f.item.title);
     }
-    println!("{}", indent(&first_lines(&clean_body(&f.item.body), BODY_LINES), "  "));
+    println!(
+        "{}",
+        indent(&first_lines(&clean_body(&f.item.body), BODY_LINES), "  ")
+    );
 }
 
 // -------------------------------------------------------------------------
@@ -509,10 +517,9 @@ pub fn run_reply(ctx: &Ctx, args: ReplyArgs) -> Result<()> {
             (reply, thread_id)
         }
         None => {
-            let data = ctx.client.graphql(
-                REPLY_MUTATION,
-                json!({ "id": args.target, "body": body }),
-            )?;
+            let data = ctx
+                .client
+                .graphql(REPLY_MUTATION, json!({ "id": args.target, "body": body }))?;
             let c = &data["addPullRequestReviewThreadReply"]["comment"];
             let reply = NewComment {
                 id: c["databaseId"].as_u64().unwrap_or(0),
@@ -590,10 +597,11 @@ pub fn run_resolve(ctx: &Ctx, args: ResolveArgs) -> Result<()> {
             None => target.clone(),
             Some(id) => {
                 let c = lookup_comment(ctx, id)?;
-                if !cache.contains_key(&c.pr.number) {
-                    cache.insert(c.pr.number, fetch_threads(&ctx.client, &c.pr)?);
-                }
-                find_thread(&cache[&c.pr.number], target)?.id.clone()
+                let threads = match cache.entry(c.pr.number) {
+                    Entry::Occupied(e) => e.into_mut(),
+                    Entry::Vacant(e) => e.insert(fetch_threads(&ctx.client, &c.pr)?),
+                };
+                find_thread(threads, target)?.id.clone()
             }
         };
         let r = set_resolved(&ctx.client, &thread_id, resolve)?;
@@ -869,7 +877,10 @@ Outside diff range comments:
         assert_eq!(f[0].kind, "outside_diff_and_nitpick");
         assert_eq!(f[0].path, "arch/s390/dfltcc_common.c");
         assert_eq!((f[0].start_line, f[0].line), (Some(10), 16));
-        assert_eq!(f[0].title, "Document thread-safety considerations for global variables.");
+        assert_eq!(
+            f[0].title,
+            "Document thread-safety considerations for global variables."
+        );
         assert!(f[0].body.contains("int env_dfltcc_disabled;"));
         assert_eq!((f[1].start_line, f[1].line), (None, 45));
         assert_eq!(f[1].title, "Define constant for maximum compression level.");
@@ -901,7 +912,10 @@ Outside diff range comments:
     #[test]
     fn clean_body_drops_nested_details_and_comments() {
         let body = "_⚠️ Potential issue_\r\n\r\n**Fix it.**\r\n\r\n<details>\r\n<summary>Prompt</summary>\r\n<details>inner</details>\r\nprompt text\r\n</details>\r\n\r\n<!-- fingerprint -->\r\nTail.";
-        assert_eq!(clean_body(body), "_⚠️ Potential issue_\n\n**Fix it.**\n\nTail.");
+        assert_eq!(
+            clean_body(body),
+            "_⚠️ Potential issue_\n\n**Fix it.**\n\nTail."
+        );
     }
 
     fn comment(author: &str, bot: bool, at: &str) -> Comment {
@@ -958,10 +972,24 @@ Outside diff range comments:
 
     #[test]
     fn filter_by_starter_kind_and_login() {
-        let bot = thread(false, false, vec![comment("coderabbitai", true, "2026-01-01T00:00:00Z")]);
-        let human = thread(false, false, vec![comment("alice", false, "2026-01-01T00:00:00Z")]);
-        let bots = Filter { bots: true, ..filter() };
-        let humans = Filter { humans: true, ..filter() };
+        let bot = thread(
+            false,
+            false,
+            vec![comment("coderabbitai", true, "2026-01-01T00:00:00Z")],
+        );
+        let human = thread(
+            false,
+            false,
+            vec![comment("alice", false, "2026-01-01T00:00:00Z")],
+        );
+        let bots = Filter {
+            bots: true,
+            ..filter()
+        };
+        let humans = Filter {
+            humans: true,
+            ..filter()
+        };
         assert!(bots.keep(&bot) && !bots.keep(&human));
         assert!(humans.keep(&human) && !humans.keep(&bot));
         let by = Filter {
@@ -977,7 +1005,11 @@ Outside diff range comments:
     fn filter_since_keeps_threads_with_newer_comments() {
         let since = Some("2026-01-02T00:00:00Z".parse().unwrap());
         let f = Filter { since, ..filter() };
-        let old = thread(false, false, vec![comment("a", false, "2026-01-01T00:00:00Z")]);
+        let old = thread(
+            false,
+            false,
+            vec![comment("a", false, "2026-01-01T00:00:00Z")],
+        );
         let replied = thread(
             false,
             false,
