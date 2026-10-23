@@ -389,7 +389,7 @@ fn apply_edits(content: &str, edits: &[&Suggestion]) -> String {
         .to_string();
 
     let mut ordered: Vec<&&Suggestion> = edits.iter().collect();
-    ordered.sort_by(|a, b| b.start.cmp(&a.start));
+    ordered.sort_by_key(|s| std::cmp::Reverse(s.start));
     for s in ordered {
         let first = (s.start - 1) as usize;
         let last = s.end as usize;

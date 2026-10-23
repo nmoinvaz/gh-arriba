@@ -64,10 +64,5 @@ impl Manifest {
 
 /// Returns the current platform name: "macos", "linux", or "windows".
 pub fn current_platform() -> &'static str {
-    match std::env::consts::OS {
-        "macos" => "macos",
-        "linux" => "linux",
-        "windows" => "windows",
-        other => other,
-    }
+    std::env::consts::OS
 }
