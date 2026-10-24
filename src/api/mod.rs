@@ -3,6 +3,7 @@
 
 mod client;
 pub mod dependabot;
+pub mod gists;
 pub mod json;
 pub mod releases;
 mod repo;
