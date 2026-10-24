@@ -374,7 +374,10 @@ pub fn run(ctx: &Ctx, args: ReleaseArgs) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::Client;
     use crate::workflow::dispatch_inputs;
+    use mockito::{Matcher, Server, ServerGuard};
+    use serde_json::json;
 
     #[test]
     fn version_parse_and_bump() {
@@ -542,5 +545,155 @@ on:
         assert!(!plan[1].sent());
         // Without a dry run and without a terminal, the missing input is an error.
         assert!(resolve_inputs(&inputs, "version", "1.0.0", &[], false).is_err());
+    }
+
+    fn ctx(server: &ServerGuard, json: bool) -> Ctx {
+        Ctx {
+            client: Client::for_tests(&server.url()),
+            repo_flag: Some("o/r".into()),
+            json,
+            yes: true,
+        }
+    }
+
+    fn release_args() -> ReleaseArgs {
+        ReleaseArgs {
+            bump: Bump::Minor,
+            version: None,
+            fields: Vec::new(),
+            workflow: None,
+            git_ref: None,
+            watch: false,
+            dry_run: true,
+        }
+    }
+
+    /// o/r with default branch main, releases `tags` (newest first), and the GCS workflow.
+    fn serve_repo(server: &mut ServerGuard, tags: &[&str]) {
+        server
+            .mock("GET", "/repos/o/r")
+            .with_body(r#"{"default_branch": "main"}"#)
+            .create();
+        let releases: Vec<_> = tags.iter().map(|t| json!({"tag_name": t})).collect();
+        server
+            .mock("GET", "/repos/o/r/releases")
+            .match_query(Matcher::Any)
+            .with_body(json!(releases).to_string())
+            .create();
+        server
+            .mock("GET", "/repos/o/r/actions/workflows")
+            .match_query(Matcher::Any)
+            .with_body(
+                r#"{"workflows": [
+                    {"id": 1, "name": "CI", "path": ".github/workflows/ci.yml", "state": "active"},
+                    {"id": 2, "name": "Release", "path": ".github/workflows/release.yml",
+                     "state": "active"}
+                ]}"#,
+            )
+            .create();
+        server
+            .mock("GET", "/repos/o/r/contents/.github/workflows/release.yml")
+            .match_query(Matcher::Any)
+            .with_body(GCS)
+            .create();
+    }
+
+    #[test]
+    fn dry_run_plans_without_dispatching() {
+        let mut server = Server::new();
+        serve_repo(&mut server, &["v1.4.2"]);
+        let dispatched = server
+            .mock("POST", "/repos/o/r/actions/workflows/2/dispatches")
+            .expect(0)
+            .create();
+        run(&ctx(&server, true), release_args()).unwrap();
+        let mut args = release_args();
+        args.fields = vec!["channel=beta".to_string()];
+        run(&ctx(&server, false), args).unwrap();
+        // The version input is set with --version only.
+        let mut args = release_args();
+        args.fields = vec!["version=9".to_string()];
+        assert_eq!(
+            run(&ctx(&server, true), args).unwrap_err().to_string(),
+            "Set the version with --version, not -f version=..."
+        );
+        dispatched.assert();
+    }
+
+    #[test]
+    fn version_needs_a_readable_previous_tag() {
+        let mut server = Server::new();
+        serve_repo(&mut server, &["nightly"]);
+        assert_eq!(
+            run(&ctx(&server, true), release_args())
+                .unwrap_err()
+                .to_string(),
+            "Can't read a version from tag nightly. Pass --version."
+        );
+        let mut args = release_args();
+        args.version = Some("2.0.0".to_string());
+        run(&ctx(&server, true), args).unwrap();
+    }
+
+    #[test]
+    fn plan_renders_each_input_source() {
+        let inputs = dispatch_inputs(GCS).unwrap();
+        let plan = Plan {
+            repo: "o/r".to_string(),
+            workflow: "Release".to_string(),
+            workflow_path: ".github/workflows/release.yml".to_string(),
+            git_ref: "main".to_string(),
+            previous: None,
+            version: "1.0.0".to_string(),
+            inputs: resolve_inputs(&inputs, "version", "1.0.0", &[], false).unwrap(),
+            run_id: None,
+            run_url: None,
+        };
+        assert_eq!(
+            render(&plan),
+            "Repository: o/r\n\
+             Workflow:   Release (.github/workflows/release.yml)\n\
+             Ref:        main\n\
+             Previous:   none\n\
+             Version:    1.0.0\n\
+             Inputs:\n  \
+             version  1.0.0\n  \
+             channel  stable  (default)\n  \
+             dry_run  false  (default)\n"
+        );
+    }
+
+    #[test]
+    fn release_dispatches_the_planned_inputs() {
+        let mut server = Server::new();
+        serve_repo(&mut server, &[]);
+        server
+            .mock("GET", "/repos/o/r/actions/workflows/2/runs")
+            .match_query(Matcher::Any)
+            .with_body(r#"{"workflow_runs": []}"#)
+            .expect(1)
+            .create();
+        server
+            .mock("GET", "/repos/o/r/actions/workflows/2/runs")
+            .match_query(Matcher::Any)
+            .with_body(r#"{"workflow_runs": [{"id": 5, "actor": {"login": "me"}}]}"#)
+            .create();
+        server
+            .mock("POST", "/graphql")
+            .with_body(r#"{"data": {"viewer": {"login": "me"}}}"#)
+            .create();
+        // Defaults stay out of the dispatch, so the workflow applies its own.
+        let dispatched = server
+            .mock("POST", "/repos/o/r/actions/workflows/2/dispatches")
+            .match_body(Matcher::Json(
+                json!({"ref": "main", "inputs": {"version": "1.0.0", "channel": "beta"}}),
+            ))
+            .with_status(204)
+            .create();
+        let mut args = release_args();
+        args.dry_run = false;
+        args.fields = vec!["channel=beta".to_string()];
+        run(&ctx(&server, true), args).unwrap();
+        dispatched.assert();
     }
 }
