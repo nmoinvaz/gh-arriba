@@ -10,6 +10,7 @@ mod prompt;
 mod release;
 mod run;
 mod runners;
+mod workflow;
 
 use anyhow::Result;
 use clap::Parser;

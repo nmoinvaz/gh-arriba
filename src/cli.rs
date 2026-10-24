@@ -353,9 +353,21 @@ pub struct LogsArgs {
 
 #[derive(Args)]
 pub struct WatchArgs {
-    /// Run IDs, job IDs, or Actions URLs
-    #[arg(value_name = "RUN", required = true)]
+    /// Run IDs, job IDs, or Actions URLs (default: every run for the local HEAD commit)
+    #[arg(value_name = "RUN")]
     pub runs: Vec<String>,
+
+    /// Watch every run for this commit
+    #[arg(long, conflicts_with_all = ["runs", "branch"])]
+    pub sha: Option<String>,
+
+    /// Watch the runs for the newest commit with runs on this branch
+    #[arg(long, conflicts_with = "runs")]
+    pub branch: Option<String>,
+
+    /// Only runs of this workflow, by name or file
+    #[arg(short, long, value_name = "NAME", conflicts_with = "runs")]
+    pub workflow: Option<String>,
 
     #[command(flatten)]
     pub wait: WaitArgs,
