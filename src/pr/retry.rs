@@ -1,30 +1,14 @@
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 use crate::cli::RetryArgs;
 use crate::context::{Ctx, PrRef, Repo, git, parse_pr_ref};
 use crate::github::Client;
 use crate::output;
-use crate::pr::model::vars;
-
-/// One check run on the PR's head commit.
-#[derive(Clone, Debug)]
-pub(super) struct CheckRun {
-    pub(super) name: String,
-    pub(super) workflow: String,
-    pub(super) event: String,
-    /// Actions workflow run, absent for checks from other apps.
-    pub(super) run_id: Option<u64>,
-    pub(super) status: String,
-    pub(super) conclusion: Option<String>,
-    pub(super) started_at: Option<DateTime<Utc>>,
-    pub(super) completed_at: Option<DateTime<Utc>>,
-    /// Page with the check's details, such as the Actions job.
-    pub(super) url: Option<String>,
-}
+use crate::pr::model::str_of;
+use crate::pr::rollup::{self, CheckRun, is_failed, latest};
 
 /// A commit status from an external service, which cannot be rerun.
 #[derive(Clone, Debug)]
@@ -39,124 +23,20 @@ struct Checks {
     statuses: Vec<StatusContext>,
 }
 
-const CHECKS_QUERY: &str = r#"
-query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
-  repository(owner: $owner, name: $repo) {
-    pullRequest(number: $number) {
-      title
-      commits(last: 1) {
-        nodes {
-          commit {
-            statusCheckRollup {
-              contexts(first: 100, after: $cursor) {
-                pageInfo { hasNextPage endCursor }
-                nodes {
-                  __typename
-                  ... on CheckRun {
-                    name status conclusion startedAt
-                    checkSuite { workflowRun { databaseId event workflow { name } } }
-                  }
-                  ... on StatusContext { context state }
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-  }
-}"#;
-
 fn fetch_checks(client: &Client, pr: &PrRef) -> Result<Checks> {
-    let mut checks = Checks {
-        title: String::new(),
-        runs: Vec::new(),
-        statuses: Vec::new(),
-    };
-    let mut cursor = Value::Null;
-    loop {
-        let mut variables = vars(pr);
-        variables["cursor"] = cursor;
-        let data = client.graphql(CHECKS_QUERY, variables)?;
-        let p = &data["repository"]["pullRequest"];
-        if p.is_null() {
-            anyhow::bail!("Pull request {pr} not found");
-        }
-        checks.title = p["title"].as_str().unwrap_or_default().to_string();
-        let contexts = &p["commits"]["nodes"][0]["commit"]["statusCheckRollup"]["contexts"];
-        // A commit with no checks at all has a null rollup.
-        if contexts.is_null() {
-            break;
-        }
-        for node in contexts["nodes"].as_array().into_iter().flatten() {
-            match node["__typename"].as_str() {
-                Some("CheckRun") => checks.runs.push(parse_check_run(node)),
-                Some("StatusContext") => checks.statuses.push(StatusContext {
-                    context: node["context"].as_str().unwrap_or_default().to_string(),
-                    state: node["state"].as_str().unwrap_or_default().to_string(),
-                }),
-                _ => {}
-            }
-        }
-        if contexts["pageInfo"]["hasNextPage"].as_bool() != Some(true) {
-            break;
-        }
-        cursor = contexts["pageInfo"]["endCursor"].clone();
-    }
-    Ok(checks)
-}
-
-pub(super) fn parse_check_run(node: &Value) -> CheckRun {
-    let run = &node["checkSuite"]["workflowRun"];
-    CheckRun {
-        name: node["name"].as_str().unwrap_or_default().to_string(),
-        workflow: run["workflow"]["name"]
-            .as_str()
-            .unwrap_or_default()
-            .to_string(),
-        event: run["event"].as_str().unwrap_or_default().to_string(),
-        run_id: run["databaseId"].as_u64(),
-        status: node["status"].as_str().unwrap_or_default().to_string(),
-        conclusion: node["conclusion"].as_str().map(str::to_string),
-        started_at: node["startedAt"]
-            .as_str()
-            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-            .map(|t| t.with_timezone(&Utc)),
-        completed_at: node["completedAt"]
-            .as_str()
-            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-            .map(|t| t.with_timezone(&Utc)),
-        url: node["detailsUrl"].as_str().map(str::to_string),
-    }
-}
-
-/// Keep the latest attempt of each check, as `gh pr checks` does, so reruns supersede failures.
-pub(super) fn latest(runs: Vec<CheckRun>) -> Vec<CheckRun> {
-    let mut by_key: HashMap<(String, String, String), CheckRun> = HashMap::new();
-    for run in runs {
-        let key = (run.workflow.clone(), run.name.clone(), run.event.clone());
-        match by_key.get(&key) {
-            Some(existing) if recency(existing) >= recency(&run) => {}
-            _ => {
-                by_key.insert(key, run);
-            }
-        }
-    }
-    let mut runs: Vec<CheckRun> = by_key.into_values().collect();
-    runs.sort_by_key(|r| (r.workflow.to_lowercase(), r.name.to_lowercase()));
-    runs
-}
-
-/// Ordering key for attempts. A queued rerun has no start time yet but is the newest attempt.
-fn recency(run: &CheckRun) -> (bool, Option<DateTime<Utc>>) {
-    (run.started_at.is_none(), run.started_at)
-}
-
-pub(super) fn is_failed(conclusion: Option<&str>) -> bool {
-    matches!(
-        conclusion,
-        Some("FAILURE" | "CANCELLED" | "TIMED_OUT" | "STARTUP_FAILURE")
-    )
+    let rollup = rollup::fetch(client, pr, "title")?;
+    Ok(Checks {
+        title: str_of(&rollup.pr, "title"),
+        runs: rollup.runs,
+        statuses: rollup
+            .statuses
+            .iter()
+            .map(|s| StatusContext {
+                context: str_of(s, "context"),
+                state: str_of(s, "state"),
+            })
+            .collect(),
+    })
 }
 
 #[derive(Debug, Serialize)]
