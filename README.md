@@ -1,5 +1,7 @@
 # gh-arriba
 
+[![codecov](https://codecov.io/gh/nmoinvaz/gh-arriba/graph/badge.svg)](https://codecov.io/gh/nmoinvaz/gh-arriba)
+
 A GitHub CLI extension for the chores `gh` doesn't cover: review threads, pending reviews,
 CI retries, signed rebases, releases, Dependabot, and project config sync.
 
