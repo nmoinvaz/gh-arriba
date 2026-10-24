@@ -4,6 +4,7 @@
 mod client;
 pub mod dependabot;
 pub mod json;
+pub mod releases;
 mod repo;
 
 pub use client::{Client, encode_path, encode_segment, is_failed};

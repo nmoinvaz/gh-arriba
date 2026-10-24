@@ -2,7 +2,7 @@ use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::api::{Client, Repo};
+use crate::api::releases;
 use crate::cli::{Bump, ReleaseArgs};
 use crate::context::Ctx;
 use crate::run::watch;
@@ -61,18 +61,6 @@ impl std::fmt::Display for Version {
             self.prefix, self.major, self.minor, self.patch
         )
     }
-}
-
-/// Tag of the newest published release, skipping drafts.
-fn latest_release_tag(client: &Client, repo: &Repo) -> Result<Option<String>> {
-    let releases = client.get(&format!("{}/releases?per_page=10", repo.api()))?;
-    Ok(releases
-        .as_array()
-        .into_iter()
-        .flatten()
-        .find(|r| r["draft"].as_bool() != Some(true))
-        .and_then(|r| r["tag_name"].as_str())
-        .map(str::to_string))
 }
 
 /// Pick the workflow named by `-w`, or the one that looks like the release workflow.
@@ -297,7 +285,7 @@ pub fn run(ctx: &Ctx, args: ReleaseArgs) -> Result<()> {
             .to_string(),
     };
 
-    let previous = latest_release_tag(client, &repo)?;
+    let previous = releases::latest_tag(client, &repo)?;
     let version = match (&args.version, &previous) {
         (Some(v), _) => v.clone(),
         (None, Some(tag)) => Version::parse(tag)
