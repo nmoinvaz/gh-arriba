@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 use crate::cli::{DispatchArgs, LogsArgs, RunCommand, WatchArgs};
 use crate::context::{Ctx, Repo, git};
+use crate::github::is_failed;
 use crate::log::{self, Excerpt};
 use crate::{output, workflow};
 
@@ -79,11 +80,6 @@ struct Downloaded {
     cached: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     excerpt: Option<Excerpt>,
-}
-
-/// Conclusions `--failed` keeps.
-fn is_failed(conclusion: Option<&str>) -> bool {
-    matches!(conclusion, Some("failure" | "cancelled" | "timed_out"))
 }
 
 /// Whether a job name contains any of `patterns`, ignoring case. No patterns keeps every job.
@@ -629,13 +625,5 @@ mod tests {
     #[test]
     fn encode_keeps_slashes() {
         assert_eq!(encode("nathan/dev/fix#2"), "nathan/dev/fix%232");
-    }
-
-    #[test]
-    fn failed_filter() {
-        assert!(is_failed(Some("failure")));
-        assert!(is_failed(Some("timed_out")));
-        assert!(!is_failed(Some("success")));
-        assert!(!is_failed(None));
     }
 }

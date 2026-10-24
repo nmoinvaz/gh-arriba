@@ -6,10 +6,10 @@ use std::time::{Duration, Instant};
 
 use crate::cli::ChecksArgs;
 use crate::context::{Ctx, PrRef, git};
-use crate::github::Client;
+use crate::github::{Client, is_failed};
 use crate::output;
 use crate::pr::model::str_of;
-use crate::pr::rollup::{self, CheckRun, is_failed, latest};
+use crate::pr::rollup::{self, CheckRun, latest};
 
 /// Outcome of one check, folding check-run conclusions and commit-status states together.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]

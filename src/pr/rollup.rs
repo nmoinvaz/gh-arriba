@@ -146,10 +146,3 @@ pub fn latest(runs: Vec<CheckRun>) -> Vec<CheckRun> {
 fn recency(run: &CheckRun) -> (bool, Option<DateTime<Utc>>) {
     (run.started_at.is_none(), run.started_at)
 }
-
-pub fn is_failed(conclusion: Option<&str>) -> bool {
-    matches!(
-        conclusion,
-        Some("FAILURE" | "CANCELLED" | "TIMED_OUT" | "STARTUP_FAILURE")
-    )
-}

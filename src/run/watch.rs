@@ -5,8 +5,8 @@ use serde_json::Value;
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
-use super::is_failed;
 use crate::context::{Ctx, Repo};
+use crate::github::is_failed;
 use crate::output;
 
 /// How often to poll, how long to keep at it, and which jobs to wait for.
@@ -91,11 +91,7 @@ impl RunState {
     /// is invalid.
     fn failed(&self) -> bool {
         self.jobs.iter().any(|j| is_failed(j.conclusion.as_deref()))
-            || (!self.filtered
-                && matches!(
-                    self.conclusion.as_deref(),
-                    Some("failure" | "cancelled" | "timed_out" | "startup_failure")
-                ))
+            || (!self.filtered && is_failed(self.conclusion.as_deref()))
     }
 }
 
