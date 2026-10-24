@@ -194,8 +194,8 @@ fn logs(ctx: &Ctx, args: LogsArgs) -> Result<()> {
                     Some(log::select(
                         &text,
                         args.grep.as_ref(),
-                        log::CONTEXT,
-                        log::MAX,
+                        args.context,
+                        args.max,
                     ))
                 } else {
                     None
