@@ -72,6 +72,60 @@ pub fn file_at(client: &Client, repo: &Repo, path: &str, oid: &str) -> Result<St
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mockito::{Matcher, Server};
+
+    #[test]
+    fn behind_by_compares_base_to_head() {
+        let mut server = Server::new();
+        server
+            .mock("GET", "/repos/o/r/compare/main...fork:fix")
+            .with_body(r#"{"behind_by": 4, "ahead_by": 1}"#)
+            .create();
+        let client = Client::for_tests(&server.url());
+        let repo = Repo::parse("o/r").unwrap();
+        assert_eq!(
+            behind_by(&client, &repo, "main", "fork:fix").unwrap(),
+            Some(4)
+        );
+    }
+
+    #[test]
+    fn rebase_branch_sends_id_and_expected_head() {
+        let mut server = Server::new();
+        let mock = server
+            .mock("POST", "/graphql")
+            .match_body(Matcher::AllOf(vec![
+                Matcher::Regex("updateMethod: REBASE".into()),
+                Matcher::PartialJson(json!({"variables": {"id": "PR_1", "oid": "old"}})),
+            ]))
+            .with_body(
+                r#"{"data": {"updatePullRequestBranch": {"pullRequest": {"headRefOid": "new"}}}}"#,
+            )
+            .create();
+        let client = Client::for_tests(&server.url());
+        assert_eq!(
+            rebase_branch(&client, "PR_1", "old").unwrap().as_deref(),
+            Some("new")
+        );
+        mock.assert();
+    }
+
+    #[test]
+    fn file_at_encodes_the_path_and_ref() {
+        let mut server = Server::new();
+        server
+            .mock("GET", "/repos/o/r/contents/dir/a%20b.c")
+            .match_query(Matcher::UrlEncoded("ref".into(), "abc".into()))
+            .match_header("accept", "application/vnd.github.raw+json")
+            .with_body("int x;\n")
+            .create();
+        let client = Client::for_tests(&server.url());
+        let repo = Repo::parse("o/r").unwrap();
+        assert_eq!(
+            file_at(&client, &repo, "dir/a b.c", "abc").unwrap(),
+            "int x;\n"
+        );
+    }
 
     #[test]
     fn update_payload_new_head() {

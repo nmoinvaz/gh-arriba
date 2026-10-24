@@ -297,6 +297,118 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mockito::{Matcher, Server};
+
+    fn pr() -> PrRef {
+        PrRef {
+            repo: Repo::parse("o/r").unwrap(),
+            number: 7,
+        }
+    }
+
+    #[test]
+    fn pull_state_reads_rest_state() {
+        let mut server = Server::new();
+        server
+            .mock("GET", "/repos/o/r/pulls/7")
+            .with_body(r#"{"state": "closed", "title": "x"}"#)
+            .create();
+        server
+            .mock("GET", "/repos/o/r/pulls/8")
+            .with_body(r#"{"state": null}"#)
+            .create();
+        let client = Client::for_tests(&server.url());
+        let repo = Repo::parse("o/r").unwrap();
+        assert_eq!(pull_state(&client, &repo, 7).unwrap(), "closed");
+        assert_eq!(pull_state(&client, &repo, 8).unwrap(), "");
+    }
+
+    #[test]
+    fn fetch_pr_sends_the_pr_variables() {
+        let mut server = Server::new();
+        let mock = server
+            .mock("POST", "/graphql")
+            .match_body(Matcher::PartialJson(json!({
+                "variables": { "owner": "o", "repo": "r", "number": 7 }
+            })))
+            .with_body(
+                json!({ "data": { "repository": { "pullRequest": {
+                    "id": "PR_7", "number": 7, "title": "Fix", "url": "u", "state": "OPEN",
+                    "isDraft": false, "body": null, "createdAt": "2026-01-02T03:04:05Z",
+                    "author": { "login": "alice" }, "baseRefName": "main",
+                    "headRefName": "fix", "headRefOid": "abc", "isCrossRepository": false,
+                    "headRepository": null
+                }}}})
+                .to_string(),
+            )
+            .create();
+        let client = Client::for_tests(&server.url());
+        let info = fetch_pr(&client, &pr()).unwrap();
+        mock.assert();
+        assert_eq!(info.author, "alice");
+        assert_eq!(info.body, "");
+        assert_eq!(info.head_repo, None);
+    }
+
+    #[test]
+    fn fetch_pr_missing_is_an_error() {
+        let mut server = Server::new();
+        server
+            .mock("POST", "/graphql")
+            .with_body(r#"{"data": {"repository": {"pullRequest": null}}}"#)
+            .create();
+        let client = Client::for_tests(&server.url());
+        let err = fetch_pr(&client, &pr()).unwrap_err().to_string();
+        assert_eq!(err, "Pull request o/r#7 not found");
+    }
+
+    #[test]
+    fn my_open_prs_pages_and_sorts() {
+        let mut server = Server::new();
+        server
+            .mock("POST", "/graphql")
+            .match_body(Matcher::PartialJson(
+                json!({"query": "query { viewer { login } }"}),
+            ))
+            .with_body(r#"{"data": {"viewer": {"login": "me"}}}"#)
+            .create();
+        let q = "is:pr is:open author:me repo:o/r";
+        server
+            .mock("POST", "/graphql")
+            .match_body(Matcher::PartialJson(
+                json!({"variables": {"q": q, "cursor": null}}),
+            ))
+            .with_body(
+                r#"{"data": {"search": {
+                    "pageInfo": {"hasNextPage": true, "endCursor": "c1"},
+                    "nodes": [{"number": 9}, {}]}}}"#,
+            )
+            .create();
+        server
+            .mock("POST", "/graphql")
+            .match_body(Matcher::PartialJson(
+                json!({"variables": {"q": q, "cursor": "c1"}}),
+            ))
+            .with_body(
+                r#"{"data": {"search": {
+                    "pageInfo": {"hasNextPage": false, "endCursor": null},
+                    "nodes": [{"number": 3}]}}}"#,
+            )
+            .create();
+        let client = Client::for_tests(&server.url());
+        let prs = my_open_prs(&client, &Repo::parse("o/r").unwrap()).unwrap();
+        let numbers: Vec<u64> = prs.iter().map(|p| p.number).collect();
+        assert_eq!(numbers, vec![3, 9]);
+    }
+
+    #[test]
+    fn user_login_falls_back_to_ghost() {
+        assert_eq!(user_login(None), "ghost");
+        let user = User {
+            login: Some("bob".into()),
+        };
+        assert_eq!(user_login(Some(&user)), "bob");
+    }
 
     #[test]
     fn pr_info_from_graphql() {

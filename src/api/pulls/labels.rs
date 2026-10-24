@@ -101,6 +101,100 @@ fn logins(users: Vec<User>) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mockito::{Matcher, Server};
+
+    fn pr() -> PrRef {
+        PrRef {
+            repo: Repo::parse("o/r").unwrap(),
+            number: 7,
+        }
+    }
+
+    #[test]
+    fn labels_of_repo_and_pr() {
+        let mut server = Server::new();
+        server
+            .mock("GET", "/repos/o/r/labels")
+            .match_query(Matcher::Any)
+            .with_body(
+                r#"[{"name": "bug", "description": null}, {"name": "ci", "description": "CI"}]"#,
+            )
+            .create();
+        server
+            .mock("GET", "/repos/o/r/issues/7/labels")
+            .match_query(Matcher::Any)
+            .with_body(r#"[{"name": "ci"}]"#)
+            .create();
+        let client = Client::for_tests(&server.url());
+        let all = repo_labels(&client, &pr().repo).unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].description, "");
+        assert_eq!(all[1].description, "CI");
+        let on_pr = pr_labels(&client, &pr()).unwrap();
+        assert_eq!(on_pr[0].name.as_deref(), Some("ci"));
+    }
+
+    #[test]
+    fn add_and_remove_labels() {
+        let mut server = Server::new();
+        let add = server
+            .mock("POST", "/repos/o/r/issues/7/labels")
+            .match_body(Matcher::Json(json!({"labels": ["bug", "ci"]})))
+            .with_body("[]")
+            .create();
+        let remove = server
+            .mock("DELETE", "/repos/o/r/issues/7/labels/type%3A%20bug")
+            .with_body("[]")
+            .create();
+        let client = Client::for_tests(&server.url());
+        add_labels(&client, &pr(), &["bug", "ci"]).unwrap();
+        remove_label(&client, &pr(), "type: bug").unwrap();
+        add.assert();
+        remove.assert();
+    }
+
+    #[test]
+    fn contributors_request_count_and_tolerate_empty_body() {
+        let mut server = Server::new();
+        server
+            .mock("GET", "/repos/o/r/contributors")
+            .match_query(Matcher::UrlEncoded("per_page".into(), "5".into()))
+            .with_body(r#"[{"login": "alice", "type": "User", "contributions": 3}]"#)
+            .create();
+        server
+            .mock("GET", "/repos/o/empty/contributors")
+            .match_query(Matcher::Any)
+            .with_status(204)
+            .create();
+        let client = Client::for_tests(&server.url());
+        let list = contributors(&client, &pr().repo, 5).unwrap();
+        assert_eq!(list[0].contributions, 3);
+        let empty = contributors(&client, &Repo::parse("o/empty").unwrap(), 5).unwrap();
+        assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn reviewers_requested_and_requesting() {
+        let mut server = Server::new();
+        server
+            .mock("GET", "/repos/o/r/pulls/7/requested_reviewers")
+            .with_body(r#"{"users": [{"login": "bob"}, {"login": null}], "teams": []}"#)
+            .create();
+        let post = server
+            .mock("POST", "/repos/o/r/pulls/7/requested_reviewers")
+            .match_body(Matcher::Json(json!({"reviewers": ["carol"]})))
+            .with_body(
+                r#"{"number": 7, "requested_reviewers": [{"login": "bob"}, {"login": "carol"}]}"#,
+            )
+            .create();
+        let client = Client::for_tests(&server.url());
+        assert_eq!(requested_reviewers(&client, &pr()).unwrap(), vec!["bob"]);
+        assert_eq!(
+            request_reviewers(&client, &pr(), &["carol".to_string()]).unwrap(),
+            vec!["bob", "carol"]
+        );
+        post.assert();
+    }
 
     #[test]
     fn contributors_tolerate_anonymous_and_empty() {

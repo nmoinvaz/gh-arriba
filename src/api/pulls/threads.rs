@@ -431,6 +431,201 @@ pub fn set_thread_resolved(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::Repo;
+    use mockito::{Matcher, Server};
+
+    fn pr() -> PrRef {
+        PrRef {
+            repo: Repo::parse("o/r").unwrap(),
+            number: 7,
+        }
+    }
+
+    fn thread_node(id: &str, db: u64) -> Value {
+        json!({
+            "id": id, "isResolved": false, "isOutdated": false, "path": "a.c",
+            "diffSide": "RIGHT", "line": 1,
+            "comments": { "nodes": [{
+                "id": format!("C_{db}"), "databaseId": db, "body": "b",
+                "createdAt": "2026-01-02T03:04:05Z", "url": "u",
+                "author": { "__typename": "User", "login": "alice" }
+            }]}
+        })
+    }
+
+    #[test]
+    fn fetch_threads_pages_and_keeps_the_first_header() {
+        let mut server = Server::new();
+        server
+            .mock("POST", "/graphql")
+            .match_body(Matcher::PartialJson(json!({"variables": {
+                "owner": "o", "repo": "r", "number": 7, "cursor": null
+            }})))
+            .with_body(
+                json!({"data": {"repository": {"pullRequest": {
+                    "id": "PR_7", "author": {"login": "bob"}, "headRefOid": "abc",
+                    "reviewThreads": {
+                        "pageInfo": {"hasNextPage": true, "endCursor": "c1"},
+                        "nodes": [thread_node("PRRT_1", 1)]
+                    }
+                }}}})
+                .to_string(),
+            )
+            .create();
+        server
+            .mock("POST", "/graphql")
+            .match_body(Matcher::PartialJson(json!({"variables": {"cursor": "c1"}})))
+            .with_body(
+                json!({"data": {"repository": {"pullRequest": {
+                    "id": "PR_other", "author": null, "headRefOid": "def",
+                    "reviewThreads": {
+                        "pageInfo": {"hasNextPage": false, "endCursor": null},
+                        "nodes": [thread_node("PRRT_2", 2)]
+                    }
+                }}}})
+                .to_string(),
+            )
+            .create();
+        let client = Client::for_tests(&server.url());
+        let t = fetch_threads(&client, &pr()).unwrap();
+        assert_eq!(
+            (
+                t.pr_node_id.as_str(),
+                t.author.as_str(),
+                t.head_oid.as_str()
+            ),
+            ("PR_7", "bob", "abc")
+        );
+        let ids: Vec<&str> = t.threads.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, vec!["PRRT_1", "PRRT_2"]);
+    }
+
+    #[test]
+    fn fetch_threads_of_missing_pr() {
+        let mut server = Server::new();
+        server
+            .mock("POST", "/graphql")
+            .with_body(r#"{"data": {"repository": {"pullRequest": null}}}"#)
+            .create();
+        let client = Client::for_tests(&server.url());
+        assert!(fetch_threads(&client, &pr()).is_err());
+    }
+
+    #[test]
+    fn last_review_time_by_author() {
+        let mut server = Server::new();
+        server
+            .mock("POST", "/graphql")
+            .match_body(Matcher::PartialJson(json!({"variables": {"author": "me"}})))
+            .with_body(
+                r#"{"data": {"repository": {"pullRequest": {"reviews": {"nodes": [
+                    {"submittedAt": "2026-03-04T05:06:07Z"}]}}}}}"#,
+            )
+            .create();
+        server
+            .mock("POST", "/graphql")
+            .match_body(Matcher::PartialJson(
+                json!({"variables": {"author": "new"}}),
+            ))
+            .with_body(r#"{"data": {"repository": {"pullRequest": {"reviews": {"nodes": []}}}}}"#)
+            .create();
+        let client = Client::for_tests(&server.url());
+        let t = last_review_time(&client, &pr(), "me").unwrap().unwrap();
+        assert_eq!(t.to_rfc3339(), "2026-03-04T05:06:07+00:00");
+        assert_eq!(last_review_time(&client, &pr(), "new").unwrap(), None);
+    }
+
+    #[test]
+    fn reviews_and_issue_comments_lists() {
+        let mut server = Server::new();
+        server
+            .mock("GET", "/repos/o/r/pulls/7/reviews")
+            .match_query(Matcher::Any)
+            .with_body(
+                r#"[{"id": 1, "user": {"login": "a"}, "state": "APPROVED",
+                    "submitted_at": "2026-01-02T03:04:05Z"}]"#,
+            )
+            .create();
+        server
+            .mock("GET", "/repos/o/r/issues/7/comments")
+            .match_query(Matcher::Any)
+            .with_body(r#"[{"user": null, "created_at": "2026-01-02T03:04:05Z", "body": "hi"}]"#)
+            .create();
+        let client = Client::for_tests(&server.url());
+        assert_eq!(reviews(&client, &pr()).unwrap()[0].state, "APPROVED");
+        let comments = issue_comments(&client, &pr()).unwrap();
+        assert_eq!(comments[0].body, "hi");
+        assert_eq!(comments[0].html_url, "");
+    }
+
+    #[test]
+    fn posting_comments_and_replies() {
+        let mut server = Server::new();
+        let issue = server
+            .mock("POST", "/repos/o/r/issues/7/comments")
+            .match_body(Matcher::Json(json!({"body": "hello"})))
+            .with_body("{}")
+            .create();
+        let reply = server
+            .mock("POST", "/repos/o/r/pulls/7/comments/5/replies")
+            .match_body(Matcher::Json(json!({"body": "thanks"})))
+            .with_body(r#"{"id": 6, "html_url": "https://h/6"}"#)
+            .create();
+        let thread = server
+            .mock("POST", "/graphql")
+            .match_body(Matcher::PartialJson(
+                json!({"variables": {"id": "PRRT_1", "body": "ok"}}),
+            ))
+            .with_body(
+                r#"{"data": {"addPullRequestReviewThreadReply": {
+                    "comment": {"databaseId": 8, "url": "https://h/8"}}}}"#,
+            )
+            .create();
+        let client = Client::for_tests(&server.url());
+        add_issue_comment(&client, &pr(), "hello").unwrap();
+        let posted = reply_to_comment(&client, &pr(), 5, "thanks").unwrap();
+        assert_eq!((posted.id, posted.url.as_str()), (6, "https://h/6"));
+        let posted = reply_to_thread(&client, "PRRT_1", "ok").unwrap();
+        assert_eq!((posted.id, posted.url.as_str()), (8, "https://h/8"));
+        issue.assert();
+        reply.assert();
+        thread.assert();
+    }
+
+    #[test]
+    fn resolve_and_unresolve_pick_the_mutation() {
+        let mut server = Server::new();
+        let resolve = server
+            .mock("POST", "/graphql")
+            .match_body(Matcher::AllOf(vec![
+                Matcher::Regex(" resolveReviewThread".into()),
+                Matcher::PartialJson(json!({"variables": {"id": "PRRT_1"}})),
+            ]))
+            .with_body(
+                r#"{"data": {"resolveReviewThread": {"thread": {
+                    "id": "PRRT_1", "isResolved": true, "path": "a.c"}}}}"#,
+            )
+            .create();
+        let unresolve = server
+            .mock("POST", "/graphql")
+            .match_body(Matcher::Regex("unresolveReviewThread".into()))
+            .with_body(
+                r#"{"data": {"unresolveReviewThread": {"thread": {
+                    "id": "PRRT_1", "isResolved": false, "path": "a.c"}}}}"#,
+            )
+            .create();
+        let client = Client::for_tests(&server.url());
+        let t = set_thread_resolved(&client, "PRRT_1", true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(t.is_resolved, Some(true));
+        let t = set_thread_resolved(&client, "PRRT_1", false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(t.is_resolved, Some(false));
+        resolve.assert();
+        unresolve.assert();
+    }
 
     #[test]
     fn bot_detection() {
