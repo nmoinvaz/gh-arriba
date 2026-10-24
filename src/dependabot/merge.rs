@@ -493,8 +493,333 @@ fn explain(e: &anyhow::Error, repo: &Repo) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::pr;
+    use super::super::tests::{ctx, mock_prs, node, pr};
     use super::*;
+    use mockito::{Matcher, Mock, Server, ServerGuard};
+    use serde_json::Value;
+
+    fn args(prs: &[u64], all_ready: bool, auto: bool) -> DependabotMergeArgs {
+        DependabotMergeArgs {
+            prs: prs.to_vec(),
+            all_ready,
+            auto,
+            comment: None,
+            method: MergeMethod::Rebase,
+        }
+    }
+
+    fn ok(server: &mut ServerGuard, method: &str, path: &str, body: Value) -> Mock {
+        server
+            .mock(method, path)
+            .match_body(Matcher::PartialJson(body))
+            .with_body("{}")
+            .create()
+    }
+
+    fn approve(server: &mut ServerGuard, n: u64) -> Mock {
+        let path = format!("/repos/o/r/pulls/{n}/reviews");
+        ok(server, "POST", &path, json!({ "event": "APPROVE" }))
+    }
+
+    fn merge(server: &mut ServerGuard, n: u64, method: &str, status: usize) -> Mock {
+        server
+            .mock("PUT", format!("/repos/o/r/pulls/{n}/merge").as_str())
+            .match_body(Matcher::Json(json!({ "merge_method": method })))
+            .with_status(status)
+            .with_body(r#"{"message": "Pull Request is not mergeable"}"#)
+            .create()
+    }
+
+    fn delete(server: &mut ServerGuard, n: u64, status: usize) -> Mock {
+        let path = format!("/repos/o/r/git/refs/heads/dependabot/cargo/pr-{n}");
+        server
+            .mock("DELETE", path.as_str())
+            .with_status(status)
+            .with_body(r#"{"message": "Reference does not exist"}"#)
+            .create()
+    }
+
+    /// The auto-merge mutation for PR `n`, answering with `errors` when given.
+    fn auto(server: &mut ServerGuard, n: u64, error: Option<&str>) -> Mock {
+        let body = match error {
+            Some(e) => json!({ "data": null, "errors": [{ "message": e }] }),
+            None => json!({ "data": { "enablePullRequestAutoMerge": null } }),
+        };
+        server
+            .mock("POST", "/graphql")
+            .match_body(Matcher::AllOf(vec![
+                Matcher::Regex("enablePullRequestAutoMerge".into()),
+                Matcher::PartialJson(
+                    json!({ "variables": { "id": format!("PR_{n}"), "method": "REBASE" } }),
+                ),
+            ]))
+            .with_body(body.to_string())
+            .create()
+    }
+
+    fn comment(server: &mut ServerGuard, n: u64, body: &str) -> Mock {
+        let path = format!("/repos/o/r/issues/{n}/comments");
+        ok(server, "POST", &path, json!({ "body": body }))
+    }
+
+    #[test]
+    fn merges_a_chosen_pr_with_comment_and_method() {
+        for json in [false, true] {
+            let mut server = Server::new();
+            mock_prs(
+                &mut server,
+                false,
+                &[
+                    node(
+                        "o/r",
+                        3,
+                        "Bump a from 1.0.0 to 1.0.1",
+                        "MERGEABLE",
+                        "CLEAN",
+                        None,
+                    ),
+                    node(
+                        "o/r",
+                        4,
+                        "Bump b from 1.0.0 to 1.0.1",
+                        "MERGEABLE",
+                        "CLEAN",
+                        None,
+                    ),
+                ],
+            );
+            let mocks = [
+                comment(&mut server, 3, "Thanks!"),
+                approve(&mut server, 3),
+                merge(&mut server, 3, "squash", 200),
+                // The repository deleted the branch itself.
+                delete(&mut server, 3, 422),
+            ];
+            let mut a = args(&[3], false, false);
+            a.comment = Some("Thanks!".into());
+            a.method = MergeMethod::Squash;
+            run(&ctx(&server, json), a).unwrap();
+            for m in mocks {
+                m.assert();
+            }
+        }
+    }
+
+    #[test]
+    fn all_ready_merges_a_lockstep_group_in_order() {
+        for json in [false, true] {
+            let mut server = Server::new();
+            let mut approved = node(
+                "o/r",
+                3,
+                "Bump serde_derive from 1.0.1 to 1.0.2",
+                "CONFLICTING",
+                "DIRTY",
+                Some("SUCCESS"),
+            );
+            approved["reviewDecision"] = json!("APPROVED");
+            mock_prs(
+                &mut server,
+                false,
+                &[
+                    node(
+                        "o/r",
+                        1,
+                        "Bump serde from 1.0.1 to 1.0.2",
+                        "MERGEABLE",
+                        "CLEAN",
+                        None,
+                    ),
+                    node(
+                        "o/r",
+                        2,
+                        "Bump serde_json from 1.0.1 to 1.0.2",
+                        "MERGEABLE",
+                        "CLEAN",
+                        None,
+                    ),
+                    approved,
+                    // Left alone: it needs a rebase and --auto isn't set.
+                    node(
+                        "o/r",
+                        4,
+                        "Bump tokio from 1.0.0 to 1.1.0",
+                        "CONFLICTING",
+                        "DIRTY",
+                        None,
+                    ),
+                    // Left alone and reported: its checks fail.
+                    node(
+                        "o/r",
+                        5,
+                        "Bump pino from 9.0.0 to 10.0.0",
+                        "MERGEABLE",
+                        "UNSTABLE",
+                        Some("FAILURE"),
+                    ),
+                ],
+            );
+            let mocks = [
+                // The first PR merges. A failed branch delete only warns.
+                approve(&mut server, 1),
+                merge(&mut server, 1, "rebase", 200),
+                delete(&mut server, 1, 500),
+                // The second conflicts after the first lands, so it waits for a rebase.
+                approve(&mut server, 2),
+                merge(&mut server, 2, "rebase", 405),
+                auto(&mut server, 2, None),
+                comment(&mut server, 2, "@dependabot rebase"),
+                // The third already conflicted and was approved, so it only waits.
+                auto(&mut server, 3, None),
+                comment(&mut server, 3, "@dependabot rebase"),
+            ];
+            run(&ctx(&server, json), args(&[], true, false)).unwrap();
+            for m in mocks {
+                m.assert();
+            }
+        }
+    }
+
+    #[test]
+    fn auto_merge_falls_back_to_merging_and_reports_failures() {
+        for json in [false, true] {
+            let mut server = Server::new();
+            mock_prs(
+                &mut server,
+                false,
+                &[
+                    // Waiting on a required review, but auto-merge is off for the repo.
+                    node(
+                        "o/r",
+                        1,
+                        "Bump a from 1.0.0 to 1.0.1",
+                        "MERGEABLE",
+                        "BLOCKED",
+                        None,
+                    ),
+                    // Clean PRs can't take auto-merge, so they merge now.
+                    node(
+                        "o/r",
+                        2,
+                        "Bump b from 1.0.0 to 1.0.1",
+                        "MERGEABLE",
+                        "CLEAN",
+                        None,
+                    ),
+                    // Became clean after approval, which GitHub reports as an error.
+                    node(
+                        "o/r",
+                        3,
+                        "Bump c from 1.0.0 to 1.0.1",
+                        "MERGEABLE",
+                        "BLOCKED",
+                        None,
+                    ),
+                ],
+            );
+            let mocks = [
+                approve(&mut server, 1),
+                auto(
+                    &mut server,
+                    1,
+                    Some("Pull request Auto merge is not allowed for this repository"),
+                ),
+                approve(&mut server, 2),
+                merge(&mut server, 2, "rebase", 200),
+                delete(&mut server, 2, 404),
+                approve(&mut server, 3),
+                auto(&mut server, 3, Some("Pull request is in clean status")),
+                merge(&mut server, 3, "rebase", 200),
+                delete(&mut server, 3, 204),
+            ];
+            let err = run(&ctx(&server, json), args(&[1, 2, 3], false, true)).unwrap_err();
+            assert_eq!(err.to_string(), "1 PR(s) were not merged");
+            for m in mocks {
+                m.assert();
+            }
+        }
+    }
+
+    #[test]
+    fn all_ready_with_auto_queues_rebase_work() {
+        let mut server = Server::new();
+        mock_prs(
+            &mut server,
+            false,
+            &[node(
+                "o/r",
+                4,
+                "Bump tokio from 1.0.0 to 1.1.0",
+                "CONFLICTING",
+                "DIRTY",
+                None,
+            )],
+        );
+        let mocks = [
+            approve(&mut server, 4),
+            auto(&mut server, 4, None),
+            comment(&mut server, 4, "@dependabot rebase"),
+        ];
+        run(&ctx(&server, false), args(&[], true, true)).unwrap();
+        for m in mocks {
+            m.assert();
+        }
+    }
+
+    #[test]
+    fn approval_failure_stops_that_pr() {
+        let mut server = Server::new();
+        mock_prs(
+            &mut server,
+            false,
+            &[node(
+                "o/r",
+                1,
+                "Bump a from 1.0.0 to 1.0.1",
+                "MERGEABLE",
+                "CLEAN",
+                None,
+            )],
+        );
+        let approve = server
+            .mock("POST", "/repos/o/r/pulls/1/reviews")
+            .with_status(422)
+            .with_body(r#"{"message": "Can not approve your own pull request"}"#)
+            .create();
+        let merge = merge(&mut server, 1, "rebase", 200).expect(0);
+        let err = run(&ctx(&server, true), args(&[1], false, false)).unwrap_err();
+        assert_eq!(err.to_string(), "1 PR(s) were not merged");
+        approve.assert();
+        merge.assert();
+    }
+
+    #[test]
+    fn nothing_ready_does_nothing() {
+        for json in [false, true] {
+            let mut server = Server::new();
+            mock_prs(
+                &mut server,
+                false,
+                &[node(
+                    "o/r",
+                    5,
+                    "Bump pino from 9.0.0 to 10.0.0",
+                    "MERGEABLE",
+                    "UNSTABLE",
+                    Some("PENDING"),
+                )],
+            );
+            run(&ctx(&server, json), args(&[], true, false)).unwrap();
+        }
+    }
+
+    #[test]
+    fn unknown_numbers_are_rejected_before_acting() {
+        let mut server = Server::new();
+        mock_prs(&mut server, false, &[]);
+        let err = run(&ctx(&server, true), args(&[7], false, false)).unwrap_err();
+        assert_eq!(err.to_string(), "#7 is not an open Dependabot PR in o/r");
+    }
 
     fn overview() -> Overview {
         let mut needs = pr(
