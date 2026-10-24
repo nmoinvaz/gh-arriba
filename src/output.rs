@@ -73,6 +73,31 @@ pub fn duration(seconds: i64) -> String {
     }
 }
 
+/// Byte count with a binary unit, as in `512 B` or `1.5 MB`.
+pub fn size(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["KB", "MB", "GB", "TB"];
+    if bytes < 1024 {
+        return format!("{bytes} B");
+    }
+    let mut value = bytes as f64 / 1024.0;
+    let mut unit = 0;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    format!("{value:.1} {}", UNITS[unit])
+}
+
+/// A span in its largest whole unit, as in `45s`, `12m`, `5h`, or `3d`.
+pub fn age(span: chrono::TimeDelta) -> String {
+    match span.num_seconds().max(0) {
+        s if s < 60 => format!("{s}s"),
+        s if s < 3600 => format!("{}m", s / 60),
+        s if s < 86400 => format!("{}h", s / 3600),
+        s => format!("{}d", s / 86400),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -98,5 +123,14 @@ mod tests {
     fn first_lines_notes_dropped_count() {
         assert_eq!(first_lines("a\nb\nc", 2), "a\nb\n[+1 lines]");
         assert_eq!(first_lines("a\nb", 2), "a\nb");
+    }
+
+    #[test]
+    fn sizes_use_binary_units() {
+        assert_eq!(size(0), "0 B");
+        assert_eq!(size(1023), "1023 B");
+        assert_eq!(size(1536), "1.5 KB");
+        assert_eq!(size(5 * 1024 * 1024), "5.0 MB");
+        assert_eq!(size(3 * 1024 * 1024 * 1024), "3.0 GB");
     }
 }
