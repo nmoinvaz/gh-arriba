@@ -86,8 +86,94 @@ fn select_numbers<'a>(prs: &'a [DepPr], numbers: &[u64]) -> Result<Vec<&'a DepPr
 #[cfg(test)]
 mod tests {
     use super::super::Category;
-    use super::super::tests::pr;
+    use super::super::tests::{ctx, mock_prs, pr, ready};
     use super::*;
+    use mockito::{Matcher, Mock, Server, ServerGuard};
+
+    fn args(prs: &[u64], all: bool) -> DependabotRebaseArgs {
+        DependabotRebaseArgs {
+            prs: prs.to_vec(),
+            all,
+        }
+    }
+
+    fn rebase_comment(server: &mut ServerGuard, n: u64, hits: usize) -> Mock {
+        server
+            .mock("POST", format!("/repos/o/r/issues/{n}/comments").as_str())
+            .match_body(Matcher::Json(json!({ "body": "@dependabot rebase" })))
+            .with_status(201)
+            .with_body("{}")
+            .expect(hits)
+            .create()
+    }
+
+    #[test]
+    fn all_comments_on_every_pr() {
+        for json in [false, true] {
+            let mut server = Server::new();
+            mock_prs(
+                &mut server,
+                false,
+                &[
+                    ready(1, "Bump a from 1.0.0 to 1.0.1"),
+                    ready(2, "Bump b from 1.0.0 to 1.0.1"),
+                ],
+            );
+            let one = rebase_comment(&mut server, 1, 1);
+            let two = rebase_comment(&mut server, 2, 1);
+            run(&ctx(&server, json), args(&[], true)).unwrap();
+            one.assert();
+            two.assert();
+        }
+    }
+
+    #[test]
+    fn numbers_comment_on_those_alone() {
+        let mut server = Server::new();
+        mock_prs(
+            &mut server,
+            false,
+            &[
+                ready(1, "Bump a from 1.0.0 to 1.0.1"),
+                ready(2, "Bump b from 1.0.0 to 1.0.1"),
+            ],
+        );
+        let one = rebase_comment(&mut server, 1, 0);
+        let two = rebase_comment(&mut server, 2, 1);
+        run(&ctx(&server, false), args(&[2], false)).unwrap();
+        one.assert();
+        two.assert();
+
+        let err = run(&ctx(&server, false), args(&[9], false)).unwrap_err();
+        assert_eq!(err.to_string(), "#9 is not an open Dependabot PR");
+    }
+
+    #[test]
+    fn all_with_nothing_open_does_nothing() {
+        let mut server = Server::new();
+        mock_prs(&mut server, false, &[]);
+        run(&ctx(&server, true), args(&[], true)).unwrap();
+    }
+
+    #[test]
+    fn comment_failure_stops_the_run() {
+        let mut server = Server::new();
+        mock_prs(
+            &mut server,
+            false,
+            &[ready(1, "Bump a from 1.0.0 to 1.0.1")],
+        );
+        server
+            .mock("POST", "/repos/o/r/issues/1/comments")
+            .with_status(403)
+            .with_body(r#"{"message": "Resource not accessible"}"#)
+            .create();
+        let err = run(&ctx(&server, true), args(&[], true)).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "GitHub API 403 on POST repos/o/r/issues/1/comments: Resource not accessible"
+        );
+    }
 
     #[test]
     fn numbers_must_be_dependabot_prs() {
