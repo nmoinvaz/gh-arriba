@@ -331,6 +331,176 @@ fn edit(ctx: &Ctx, args: CommentEditArgs) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::Client;
+    use mockito::{Matcher, Server};
+
+    fn ctx(server: &Server, json: bool) -> Ctx {
+        Ctx {
+            client: Client::for_tests(&server.url()),
+            repo_flag: Some("o/r".into()),
+            json,
+            yes: true,
+        }
+    }
+
+    fn show_args(target: &str) -> CommentCommand {
+        CommentCommand::Show(CommentShowArgs {
+            target: target.into(),
+        })
+    }
+
+    fn edit_args(target: &str, body: &str) -> CommentCommand {
+        CommentCommand::Edit(CommentEditArgs {
+            target: target.into(),
+            body: Some(body.into()),
+        })
+    }
+
+    #[test]
+    fn bare_id_falls_back_to_an_issue_comment() {
+        let mut server = Server::new();
+        let review = server
+            .mock("GET", "/repos/o/r/pulls/comments/6")
+            .with_status(404)
+            .with_body(r#"{"message": "Not Found"}"#)
+            .create();
+        let issue = server
+            .mock("GET", "/repos/o/r/issues/comments/6")
+            .with_body(
+                r#"{"id": 6, "user": {"login": "bob"}, "body": "hi",
+                    "issue_url": "https://api.github.com/repos/o/r/issues/42"}"#,
+            )
+            .create();
+        let c = ctx(&server, true);
+        let found = find(&c, &parse_target("6").unwrap()).unwrap();
+        assert!(matches!(found.kind, Kind::IssueComment));
+        assert_eq!(normalize(&found).number, Some(42));
+        review.assert();
+        issue.assert();
+        run(&ctx(&server, false), show_args("6")).unwrap();
+    }
+
+    #[test]
+    fn bare_id_found_nowhere() {
+        let mut server = Server::new();
+        server
+            .mock(
+                "GET",
+                Matcher::Regex("^/repos/o/r/(pulls|issues)/comments/6$".into()),
+            )
+            .with_status(404)
+            .expect(2)
+            .create();
+        let err = run(&ctx(&server, true), show_args("6"))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            err,
+            "No review comment or issue comment 6 in o/r. A review needs its URL \
+             (#pullrequestreview-6)."
+        );
+    }
+
+    #[test]
+    fn urls_go_straight_to_their_endpoint() {
+        let mut server = Server::new();
+        let inline = server
+            .mock("GET", "/repos/a/b/pulls/comments/5")
+            .with_body(
+                r#"{"id": 5, "path": "a.c", "line": 3, "side": "RIGHT",
+                    "pull_request_url": "https://api.github.com/repos/a/b/pulls/42"}"#,
+            )
+            .create();
+        let review = server
+            .mock("GET", "/repos/a/b/pulls/42/reviews/9")
+            .with_body(
+                r#"{"id": 9, "state": "APPROVED", "submitted_at": "2026-01-01T00:00:00Z",
+                    "body": "LGTM"}"#,
+            )
+            .create();
+        let issue = server
+            .mock("GET", "/repos/a/b/issues/comments/8")
+            .with_body(r#"{"id": 8, "body": "hi"}"#)
+            .create();
+        let c = ctx(&server, false);
+        run(
+            &c,
+            show_args("https://github.com/a/b/pull/42#discussion_r5"),
+        )
+        .unwrap();
+        run(
+            &c,
+            show_args("https://github.com/a/b/pull/42#pullrequestreview-9"),
+        )
+        .unwrap();
+        run(
+            &c,
+            show_args("https://github.com/a/b/pull/42#issuecomment-8"),
+        )
+        .unwrap();
+        inline.assert();
+        review.assert();
+        issue.assert();
+    }
+
+    #[test]
+    fn edit_patches_comments_and_puts_reviews() {
+        let mut server = Server::new();
+        server
+            .mock("GET", "/repos/o/r/pulls/comments/5")
+            .with_body(r#"{"id": 5, "body": "old"}"#)
+            .create();
+        let inline = server
+            .mock("PATCH", "/repos/o/r/pulls/comments/5")
+            .match_body(Matcher::Json(json!({"body": "new"})))
+            .with_body(r#"{"id": 5, "body": "new", "html_url": "https://h/5"}"#)
+            .create();
+        server
+            .mock("GET", "/repos/o/r/issues/comments/8")
+            .with_body(r#"{"id": 8, "body": "old"}"#)
+            .create();
+        let issue = server
+            .mock("PATCH", "/repos/o/r/issues/comments/8")
+            .match_body(Matcher::Json(json!({"body": "new"})))
+            .with_body(r#"{"id": 8, "body": "new"}"#)
+            .create();
+        server
+            .mock("GET", "/repos/o/r/pulls/42/reviews/9")
+            .with_body(
+                r#"{"id": 9, "body": "old",
+                    "pull_request_url": "https://api.github.com/repos/o/r/pulls/42"}"#,
+            )
+            .create();
+        let review = server
+            .mock("PUT", "/repos/o/r/pulls/42/reviews/9")
+            .match_body(Matcher::Json(json!({"body": "new"})))
+            .with_body(r#"{"id": 9, "body": "new"}"#)
+            .create();
+        run(&ctx(&server, false), edit_args("5", "new\n")).unwrap();
+        let c = ctx(&server, true);
+        run(
+            &c,
+            edit_args("https://github.com/o/r/pull/42#issuecomment-8", "new"),
+        )
+        .unwrap();
+        run(
+            &c,
+            edit_args("https://github.com/o/r/pull/42#pullrequestreview-9", "new"),
+        )
+        .unwrap();
+        inline.assert();
+        issue.assert();
+        review.assert();
+    }
+
+    #[test]
+    fn edit_refuses_an_empty_body() {
+        let server = Server::new();
+        let err = run(&ctx(&server, true), edit_args("5", " \n"))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(err, "The comment is empty");
+    }
     use serde_json::{Value, json};
 
     fn value(v: Value) -> RestComment {
