@@ -9,7 +9,7 @@ use crate::cli::RunnersArgs;
 use crate::context::{Ctx, Repo};
 use crate::dependabot::{Scope, table};
 use crate::github::Client;
-use crate::output;
+use crate::{output, parallel};
 
 /// A self-hosted runner as the runners API reports it.
 #[derive(Debug, PartialEq, Serialize)]
@@ -172,9 +172,6 @@ fn org_repos(client: &Client, org: &str) -> Result<Vec<Repo>> {
         .collect())
 }
 
-/// Requests in flight at once when scanning several repos or runs.
-const PARALLEL: usize = 8;
-
 /// Run `f` over every item a few at a time. An item that fails is skipped with a warning, so one
 /// repo without Actions doesn't hide the rest.
 fn in_parallel<I: Sync + fmt::Display, T: Send>(
@@ -182,22 +179,10 @@ fn in_parallel<I: Sync + fmt::Display, T: Send>(
     f: impl Fn(&I) -> Result<Vec<T>> + Sync,
 ) -> Vec<T> {
     let mut out = Vec::new();
-    for batch in items.chunks(PARALLEL) {
-        let results: Vec<(&I, Result<Vec<T>>)> = std::thread::scope(|s| {
-            let handles: Vec<_> = batch
-                .iter()
-                .map(|item| {
-                    let f = &f;
-                    s.spawn(move || (item, f(item)))
-                })
-                .collect();
-            handles.into_iter().map(|h| h.join().unwrap()).collect()
-        });
-        for (item, result) in results {
-            match result {
-                Ok(found) => out.extend(found),
-                Err(e) => eprintln!("warning: skipped {item}: {e:#}"),
-            }
+    for (item, result) in items.iter().zip(parallel::map(items, f)) {
+        match result {
+            Ok(found) => out.extend(found),
+            Err(e) => eprintln!("warning: skipped {item}: {e:#}"),
         }
     }
     out

@@ -5,6 +5,7 @@ mod dependabot;
 mod github;
 mod log;
 mod output;
+mod parallel;
 mod pr;
 mod prompt;
 mod release;

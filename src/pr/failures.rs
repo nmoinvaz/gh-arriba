@@ -8,9 +8,9 @@ use crate::cli::FailuresArgs;
 use crate::context::{Ctx, Repo};
 use crate::github::is_failed;
 use crate::log::{self, Excerpt};
-use crate::output;
 use crate::pr::model::fetch_pr;
 use crate::run::{download, name_matches, short_error};
+use crate::{output, parallel};
 
 /// A failed check run from the check-runs API.
 #[derive(Debug, PartialEq)]
@@ -213,21 +213,10 @@ pub fn run(ctx: &Ctx, args: FailuresArgs) -> Result<()> {
         .clone()
         .unwrap_or_else(|| std::env::temp_dir().join("gh-arriba-logs"));
     let actions: Vec<&FailedCheck> = failed.iter().filter(|c| c.actions).collect();
-    let mut jobs = Vec::new();
     // Each job costs a details call and a log download, so fetch a few at a time.
-    for batch in actions.chunks(PARALLEL_JOBS) {
-        let done: Vec<FailedJob> = std::thread::scope(|s| {
-            let handles: Vec<_> = batch
-                .iter()
-                .map(|check| {
-                    let (repo, base, args) = (&pr.repo, &base, &args);
-                    s.spawn(move || inspect(ctx, repo, check, base, args))
-                })
-                .collect();
-            handles.into_iter().map(|h| h.join().unwrap()).collect()
-        });
-        jobs.extend(done);
-    }
+    let jobs = parallel::map(&actions, |check| {
+        inspect(ctx, &pr.repo, check, &base, &args)
+    });
 
     let report = Report {
         pr: pr.to_string(),
@@ -244,9 +233,6 @@ pub fn run(ctx: &Ctx, args: FailuresArgs) -> Result<()> {
     print!("{}", render(&report));
     Ok(())
 }
-
-/// Jobs inspected at once.
-const PARALLEL_JOBS: usize = 8;
 
 fn render(report: &Report) -> String {
     let failed = report.jobs.len() + report.skipped.len();
