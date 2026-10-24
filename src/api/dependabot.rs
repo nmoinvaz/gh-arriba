@@ -318,9 +318,187 @@ pub fn enable_auto_merge(client: &Client, node_id: &str, method: &str) -> Result
     Ok(())
 }
 
+/// A Dependabot security alert from REST. Org listings carry the repository, repo listings don't.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct Alert {
+    pub number: u64,
+    pub state: String,
+    pub html_url: String,
+    pub dependency: Dependency,
+    pub security_advisory: Option<Advisory>,
+    pub security_vulnerability: Option<Vulnerability>,
+    pub repository: Option<AlertRepo>,
+}
+
+impl Alert {
+    /// The advisory's severity, falling back to the vulnerability's, then `unknown`.
+    pub fn severity(&self) -> &str {
+        self.security_advisory
+            .as_ref()
+            .and_then(|a| a.severity.as_deref())
+            .or_else(|| {
+                self.security_vulnerability
+                    .as_ref()
+                    .and_then(|v| v.severity.as_deref())
+            })
+            .unwrap_or("unknown")
+    }
+
+    /// First version that fixes the vulnerability, when one exists.
+    pub fn patched(&self) -> Option<&str> {
+        self.security_vulnerability
+            .as_ref()
+            .and_then(|v| v.first_patched_version.as_ref())
+            .and_then(|p| p.identifier.as_deref())
+    }
+
+    pub fn advisory(&self) -> Advisory {
+        self.security_advisory.clone().unwrap_or_default()
+    }
+
+    /// OWNER/REPO from an org listing, empty in a repo listing.
+    pub fn repo(&self) -> &str {
+        self.repository
+            .as_ref()
+            .map(|r| r.full_name.as_str())
+            .unwrap_or_default()
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct Dependency {
+    pub package: Option<Package>,
+    pub manifest_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct Package {
+    pub ecosystem: Option<String>,
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct Advisory {
+    pub ghsa_id: Option<String>,
+    pub cve_id: Option<String>,
+    pub summary: Option<String>,
+    pub severity: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct Vulnerability {
+    pub severity: Option<String>,
+    pub first_patched_version: Option<PatchedVersion>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct PatchedVersion {
+    pub identifier: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct AlertRepo {
+    pub full_name: String,
+}
+
+fn parse_alerts(items: Vec<Value>) -> Result<Vec<Alert>> {
+    items
+        .into_iter()
+        .map(|a| serde_json::from_value(a).context("Failed to parse Dependabot alert"))
+        .collect()
+}
+
+/// Every open alert in a repository.
+pub fn repo_alerts(client: &Client, repo: &Repo) -> Result<Vec<Alert>> {
+    parse_alerts(client.get_all(&format!("{}/dependabot/alerts?state=open", repo.api()))?)
+}
+
+/// Every open alert in an organization's repositories.
+pub fn org_alerts(client: &Client, org: &str) -> Result<Vec<Alert>> {
+    parse_alerts(client.get_all(&format!("orgs/{org}/dependabot/alerts?state=open"))?)
+}
+
+/// One alert by number.
+pub fn get_alert(client: &Client, repo: &Repo, number: u64) -> Result<Alert> {
+    let value = client.get(&format!("{}/dependabot/alerts/{number}", repo.api()))?;
+    serde_json::from_value(value).context("Failed to parse Dependabot alert")
+}
+
+/// Dismiss an alert with one of GitHub's reasons and an optional comment.
+pub fn dismiss_alert(
+    client: &Client,
+    repo: &Repo,
+    number: u64,
+    reason: &str,
+    comment: Option<&str>,
+) -> Result<()> {
+    let mut body = json!({ "state": "dismissed", "dismissed_reason": reason });
+    if let Some(c) = comment {
+        body["dismissed_comment"] = json!(c);
+    }
+    client.patch(&format!("{}/dependabot/alerts/{number}", repo.api()), &body)?;
+    Ok(())
+}
+
+#[cfg(test)]
+pub(crate) fn alert_fixture() -> Value {
+    json!({
+        "number": 7,
+        "state": "open",
+        "html_url": "https://github.com/o/r/security/dependabot/7",
+        "dependency": {
+            "package": { "ecosystem": "npm", "name": "Lodash" },
+            "manifest_path": "package-lock.json"
+        },
+        "security_advisory": {
+            "ghsa_id": "GHSA-35jh-r3h4-6jhm",
+            "cve_id": "CVE-2021-23337",
+            "summary": "Command Injection in lodash",
+            "severity": "high"
+        },
+        "security_vulnerability": {
+            "severity": "high",
+            "first_patched_version": { "identifier": "4.17.21" }
+        },
+        "repository": { "full_name": "o/r" }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn alerts_parse_with_nulls() {
+        let a: Alert = serde_json::from_value(alert_fixture()).unwrap();
+        assert_eq!(a.number, 7);
+        assert_eq!(a.repo(), "o/r");
+        assert_eq!(a.severity(), "high");
+        assert_eq!(a.patched(), Some("4.17.21"));
+        assert_eq!(a.advisory().cve_id.as_deref(), Some("CVE-2021-23337"));
+
+        let mut v = alert_fixture();
+        v["security_advisory"]["cve_id"] = Value::Null;
+        v["security_advisory"]["severity"] = Value::Null;
+        v["security_vulnerability"]["severity"] = json!("low");
+        v["security_vulnerability"]["first_patched_version"] = Value::Null;
+        v.as_object_mut().unwrap().remove("repository");
+        let a: Alert = serde_json::from_value(v).unwrap();
+        assert_eq!(a.advisory().cve_id, None);
+        assert_eq!(a.severity(), "low");
+        assert_eq!(a.patched(), None);
+        assert_eq!(a.repo(), "");
+
+        let a: Alert = serde_json::from_value(json!({ "security_vulnerability": null })).unwrap();
+        assert_eq!(a.severity(), "unknown");
+    }
 
     #[test]
     fn details_query_aliases_each_pr() {
