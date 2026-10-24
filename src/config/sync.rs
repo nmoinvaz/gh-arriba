@@ -674,3 +674,790 @@ pub fn do_open(gist_id: Option<&str>) -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::Client;
+    use mockito::{Mock, Server, ServerGuard};
+    use serde_json::{Value, json};
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
+
+    const OTHER_OS: &str = "plan9-test";
+
+    /// A scratch project root, removed on drop.
+    struct Root(PathBuf);
+
+    impl Root {
+        fn new(tag: &str) -> Self {
+            let dir =
+                std::env::temp_dir().join(format!("arriba-sync-{}-{tag}", std::process::id()));
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+
+        fn config(&self) -> ProjectConfig {
+            ProjectConfig {
+                root: self.0.clone(),
+                name: "proj".to_string(),
+                public: true,
+            }
+        }
+
+        /// Write a file and, when given, pin its mtime.
+        fn write(&self, path: &str, content: &str, mtime: Option<DateTime<Utc>>) {
+            let full = self.0.join(path);
+            fs::create_dir_all(full.parent().unwrap()).unwrap();
+            fs::write(&full, content).unwrap();
+            if let Some(t) = mtime {
+                set_local_mtime(&full, t).unwrap();
+            }
+        }
+
+        fn read(&self, path: &str) -> Option<String> {
+            fs::read_to_string(self.0.join(path)).ok()
+        }
+
+        fn mtime(&self, path: &str) -> Option<DateTime<Utc>> {
+            local_mtime(&self.config(), path)
+        }
+    }
+
+    impl Drop for Root {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn ts(offset: i64) -> DateTime<Utc> {
+        DateTime::<Utc>::from_timestamp(1_700_000_000 + offset, 0).unwrap()
+    }
+
+    fn entry(c: &ProjectConfig, path: &str, platform: Option<&str>, at: i64) -> ManifestFile {
+        Manifest::entry(c, path, platform, ts(at))
+    }
+
+    /// A gist response holding the manifest and the given files.
+    fn gist_json(c: &ProjectConfig, entries: &[ManifestFile], files: &[(&str, &str)]) -> String {
+        let mut map = serde_json::Map::new();
+        map.insert(
+            c.manifest_name(),
+            json!({ "content": Manifest::new(c, entries).to_yaml() }),
+        );
+        for (name, content) in files {
+            map.insert(name.to_string(), json!({ "content": content }));
+        }
+        json!({ "id": "g1", "public": false, "files": map }).to_string()
+    }
+
+    fn serve_gist(server: &mut ServerGuard, body: String) -> Mock {
+        server.mock("GET", "/gists/g1").with_body(body).create()
+    }
+
+    /// Mock a write and record each request body it receives.
+    fn capture(
+        server: &mut ServerGuard,
+        method: &str,
+        path: &str,
+    ) -> (Mock, Arc<Mutex<Vec<Value>>>) {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        let mock = server
+            .mock(method, path)
+            .match_request(move |req| {
+                let body = req.utf8_lossy_body().unwrap();
+                sink.lock()
+                    .unwrap()
+                    .push(serde_json::from_str(&body).unwrap_or(Value::Null));
+                true
+            })
+            .with_body(r#"{"id": "new"}"#)
+            .create();
+        (mock, seen)
+    }
+
+    /// The `files` map of the last captured body.
+    fn sent_files(seen: &Arc<Mutex<Vec<Value>>>) -> BTreeMap<String, Value> {
+        let bodies = seen.lock().unwrap();
+        let last = bodies.last().expect("no request captured");
+        serde_json::from_value(last["files"].clone()).unwrap()
+    }
+
+    fn sent_manifest(c: &ProjectConfig, files: &BTreeMap<String, Value>) -> Manifest {
+        let yaml = files[&c.manifest_name()]["content"].as_str().unwrap();
+        Manifest::from_yaml(yaml).unwrap()
+    }
+
+    fn plan_labels(
+        c: &ProjectConfig,
+        m: &Manifest,
+        focus: &Option<HashSet<String>>,
+    ) -> Vec<String> {
+        build_plan(c, m, focus)
+            .into_iter()
+            .map(|(idx, action)| {
+                let label = match action {
+                    Action::Push(_) => "push",
+                    Action::Pull => "pull",
+                    Action::InSync => "in-sync",
+                };
+                format!("{} {label}", m.files[idx].path)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn plan_compares_local_mtime_with_manifest_within_tolerance() {
+        let root = Root::new("plan");
+        let c = root.config();
+        root.write("newer", "x", Some(ts(10)));
+        root.write("older", "x", Some(ts(-10)));
+        root.write("ahead-1s", "x", Some(ts(1)));
+        root.write("behind-1s", "x", Some(ts(-1)));
+        root.write("elsewhere", "x", Some(ts(10)));
+        root.write("mine", "x", Some(ts(10)));
+        let m = Manifest::new(
+            &c,
+            &[
+                entry(&c, "newer", None, 0),
+                entry(&c, "older", None, 0),
+                entry(&c, "ahead-1s", None, 0),
+                entry(&c, "behind-1s", None, 0),
+                entry(&c, "missing", None, 0),
+                entry(&c, "elsewhere", Some(OTHER_OS), 0),
+                entry(&c, "mine", Some(current_platform()), 0),
+            ],
+        );
+        assert_eq!(
+            plan_labels(&c, &m, &None),
+            vec![
+                "newer push",
+                "older pull",
+                "ahead-1s in-sync",
+                "behind-1s in-sync",
+                "missing pull",
+                "mine push",
+            ]
+        );
+
+        let focus = Some(HashSet::from(["older".to_string()]));
+        assert_eq!(plan_labels(&c, &m, &focus), vec!["older pull"]);
+    }
+
+    #[test]
+    fn focus_accepts_tracked_paths_in_any_spelling() {
+        let root = Root::new("focus");
+        let c = root.config();
+        let m = Manifest::new(&c, &[entry(&c, ".vscode/settings.json", None, 0)]);
+
+        assert!(parse_focus(&c, &m, &[]).unwrap().is_none());
+
+        let absolute = format!("{}/.vscode/settings.json", c.root.display());
+        let focus = parse_focus(&c, &m, &["./.vscode/settings.json".into(), absolute])
+            .unwrap()
+            .unwrap();
+        assert_eq!(focus, HashSet::from([".vscode/settings.json".to_string()]));
+
+        let err = parse_focus(&c, &m, &["other.json".into()]).unwrap_err();
+        assert!(
+            err.to_string().contains("other.json is not tracked"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn sync_pulls_pushes_and_leaves_the_rest_alone() {
+        let root = Root::new("sync");
+        let c = root.config();
+        root.write("push.txt", "local push", Some(ts(100)));
+        root.write("pull.txt", "stale local", Some(ts(-100)));
+        root.write("same.txt", "local same", Some(ts(0)));
+        let entries = [
+            entry(&c, "push.txt", None, 0),
+            entry(&c, "pull.txt", None, 0),
+            entry(&c, "same.txt", None, 0),
+            entry(&c, ".vscode/settings.json", None, 0),
+            entry(&c, "other.txt", Some(OTHER_OS), 0),
+        ];
+        let mut server = Server::new();
+        serve_gist(
+            &mut server,
+            gist_json(
+                &c,
+                &entries,
+                &[
+                    ("proj_push.txt", "remote push"),
+                    ("proj_pull.txt", "remote pull"),
+                    ("proj_same.txt", "remote same"),
+                    ("proj_.vscode_settings.json", "{}"),
+                    ("proj_other[plan9-test].txt", "other"),
+                ],
+            ),
+        );
+        let (patch, seen) = capture(&mut server, "PATCH", "/gists/g1");
+        let patch = patch.expect(1);
+        let client = Client::for_tests(&server.url());
+
+        do_sync(&GistClient::new(&client), &c, &[], Some("g1")).unwrap();
+        patch.assert();
+
+        // Pulled files get the gist content and the manifest's timestamp.
+        assert_eq!(root.read("pull.txt").as_deref(), Some("remote pull\n"));
+        assert_eq!(root.mtime("pull.txt"), Some(ts(0)));
+        assert_eq!(root.read(".vscode/settings.json").as_deref(), Some("{}\n"));
+        assert_eq!(root.mtime(".vscode/settings.json"), Some(ts(0)));
+        // In-sync and other-platform files are untouched.
+        assert_eq!(root.read("same.txt").as_deref(), Some("local same"));
+        assert_eq!(root.read("other.txt"), None);
+
+        // Only the newer file and the manifest are uploaded.
+        let files = sent_files(&seen);
+        let names: Vec<&str> = files.keys().map(String::as_str).collect();
+        assert_eq!(names, vec![".proj-config-sync.yaml", "proj_push.txt"]);
+        assert_eq!(files["proj_push.txt"]["content"], "local push");
+        let manifest = sent_manifest(&c, &files);
+        let stamps: Vec<(String, DateTime<Utc>)> = manifest
+            .files
+            .iter()
+            .map(|f| (f.path.clone(), f.updated_at))
+            .collect();
+        assert_eq!(
+            stamps,
+            vec![
+                ("push.txt".to_string(), ts(100)),
+                ("pull.txt".to_string(), ts(0)),
+                ("same.txt".to_string(), ts(0)),
+                (".vscode/settings.json".to_string(), ts(0)),
+                ("other.txt".to_string(), ts(0)),
+            ]
+        );
+        assert_eq!(manifest.files[4].platform.as_deref(), Some(OTHER_OS));
+    }
+
+    #[test]
+    fn sync_sends_nothing_when_nothing_is_newer_locally() {
+        let root = Root::new("sync-quiet");
+        let c = root.config();
+        root.write("a.txt", "a", Some(ts(0)));
+        let entries = [entry(&c, "a.txt", None, 0), entry(&c, "gone.txt", None, 0)];
+        let mut server = Server::new();
+        // gone.txt is in the manifest but not the gist: warn and carry on.
+        serve_gist(&mut server, gist_json(&c, &entries, &[("proj_a.txt", "a")]));
+        let patch = server.mock("PATCH", "/gists/g1").expect(0).create();
+        let client = Client::for_tests(&server.url());
+
+        do_sync(&GistClient::new(&client), &c, &[], Some("g1")).unwrap();
+        patch.assert();
+        assert_eq!(root.read("gone.txt"), None);
+    }
+
+    #[test]
+    fn sync_refuses_to_push_secrets() {
+        let root = Root::new("sync-secret");
+        let c = root.config();
+        root.write("env", "KEY=AKIAQWERTYUIOPASDFGH\n", Some(ts(100)));
+        let entries = [entry(&c, "env", None, 0)];
+        let mut server = Server::new();
+        serve_gist(&mut server, gist_json(&c, &entries, &[("proj_env", "")]));
+        let patch = server.mock("PATCH", "/gists/g1").expect(0).create();
+        let client = Client::for_tests(&server.url());
+
+        let err = do_sync(&GistClient::new(&client), &c, &[], Some("g1")).unwrap_err();
+        assert!(err.to_string().contains("potential secret"), "{err}");
+        patch.assert();
+    }
+
+    #[test]
+    fn sync_needs_a_manifest_and_tracked_focus_files() {
+        let root = Root::new("sync-errors");
+        let c = root.config();
+        let mut server = Server::new();
+        let mock = server
+            .mock("GET", "/gists/g1")
+            .with_body(r#"{"id": "g1", "files": {"unrelated.txt": {"content": "x"}}}"#)
+            .create();
+        let client = Client::for_tests(&server.url());
+        let gists = GistClient::new(&client);
+        let err = do_sync(&gists, &c, &[], Some("g1")).unwrap_err();
+        assert_eq!(err.to_string(), "No manifest found in gist");
+        mock.remove();
+
+        serve_gist(&mut server, gist_json(&c, &[entry(&c, "a", None, 0)], &[]));
+        let err = do_sync(&gists, &c, &["b".into()], Some("g1")).unwrap_err();
+        assert!(err.to_string().contains("b is not tracked"), "{err}");
+    }
+
+    #[test]
+    fn first_sync_creates_a_gist_from_the_named_files() {
+        let root = Root::new("create");
+        let c = root.config();
+        root.write(".vscode/settings.json", "{\"a\": 1}", Some(ts(5)));
+        let mut server = Server::new();
+        let (post, seen) = capture(&mut server, "POST", "/gists");
+        let post = post.expect(1);
+        let client = Client::for_tests(&server.url());
+
+        let arg = format!("{}/.vscode/settings.json", c.root.display());
+        do_sync(&GistClient::new(&client), &c, &[arg], None).unwrap();
+        post.assert();
+
+        let body = seen.lock().unwrap().last().cloned().unwrap();
+        assert_eq!(body["description"], "proj config-sync");
+        assert_eq!(body["public"], true);
+        let files = sent_files(&seen);
+        assert_eq!(files["proj_.vscode_settings.json"]["content"], "{\"a\": 1}");
+        let manifest = sent_manifest(&c, &files);
+        assert_eq!(manifest.name, "proj");
+        assert_eq!(manifest.files.len(), 1);
+        assert_eq!(manifest.files[0].path, ".vscode/settings.json");
+        assert_eq!(manifest.files[0].gist, "proj_.vscode_settings.json");
+        assert_eq!(manifest.files[0].updated_at, ts(5));
+    }
+
+    #[test]
+    fn first_sync_without_local_files_creates_nothing() {
+        let root = Root::new("create-empty");
+        let c = root.config();
+        let mut server = Server::new();
+        let post = server.mock("POST", "/gists").expect(0).create();
+        let client = Client::for_tests(&server.url());
+        let gists = GistClient::new(&client);
+
+        let err = do_sync(&gists, &c, &[], None).unwrap_err();
+        assert_eq!(err.to_string(), "No files specified and no manifest found.");
+        do_sync(&gists, &c, &["missing.txt".into()], None).unwrap();
+        post.assert();
+    }
+
+    #[test]
+    fn status_changes_nothing() {
+        let root = Root::new("status");
+        let c = root.config();
+        root.write("newer.txt", "local", Some(ts(100)));
+        root.write("older.txt", "local", Some(ts(-100)));
+        let entries = [
+            entry(&c, "newer.txt", None, 0),
+            entry(&c, "older.txt", None, 0),
+            entry(&c, "missing.txt", None, 0),
+        ];
+        let mut server = Server::new();
+        serve_gist(
+            &mut server,
+            gist_json(
+                &c,
+                &entries,
+                &[("proj_older.txt", "remote"), ("stale", "x")],
+            ),
+        );
+        let patch = server.mock("PATCH", "/gists/g1").expect(0).create();
+        let client = Client::for_tests(&server.url());
+        let gists = GistClient::new(&client);
+
+        do_status(&gists, &c, &[], Some("g1")).unwrap();
+        do_status(&gists, &c, &["older.txt".into()], Some("g1")).unwrap();
+        assert!(do_status(&gists, &c, &["nope".into()], Some("g1")).is_err());
+        patch.assert();
+        assert_eq!(root.read("older.txt").as_deref(), Some("local"));
+        assert_eq!(root.read("missing.txt"), None);
+
+        // Without a gist there is nothing to fetch.
+        let get = server.mock("GET", "/gists/none").expect(0).create();
+        do_status(&gists, &c, &[], None).unwrap();
+        get.assert();
+    }
+
+    #[test]
+    fn restore_overwrites_files_that_differ_from_the_manifest_time() {
+        let root = Root::new("restore");
+        let c = root.config();
+        root.write("newer.txt", "local edits", Some(ts(100)));
+        root.write("same.txt", "local same", Some(ts(0)));
+        let entries = [
+            entry(&c, "newer.txt", None, 0),
+            entry(&c, "same.txt", None, 0),
+            entry(&c, "dir/missing.txt", None, 0),
+            entry(&c, "nogist.txt", None, 0),
+            entry(&c, "other.txt", Some(OTHER_OS), 0),
+        ];
+        let mut server = Server::new();
+        serve_gist(
+            &mut server,
+            gist_json(
+                &c,
+                &entries,
+                &[
+                    ("proj_newer.txt", "remote newer"),
+                    ("proj_same.txt", "remote same"),
+                    ("proj_dir_missing.txt", "remote missing"),
+                    ("proj_other[plan9-test].txt", "other"),
+                ],
+            ),
+        );
+        let client = Client::for_tests(&server.url());
+        let gists = GistClient::new(&client);
+
+        do_restore(&gists, &c, &[], Some("g1")).unwrap();
+        // Unlike sync, restore overwrites local changes.
+        assert_eq!(root.read("newer.txt").as_deref(), Some("remote newer\n"));
+        assert_eq!(root.mtime("newer.txt"), Some(ts(0)));
+        assert_eq!(
+            root.read("dir/missing.txt").as_deref(),
+            Some("remote missing\n")
+        );
+        assert_eq!(root.read("same.txt").as_deref(), Some("local same"));
+        assert_eq!(root.read("nogist.txt"), None);
+        assert_eq!(root.read("other.txt"), None);
+    }
+
+    #[test]
+    fn restore_limits_itself_to_the_focus_files() {
+        let root = Root::new("restore-focus");
+        let c = root.config();
+        let entries = [entry(&c, "a", None, 0), entry(&c, "b", None, 0)];
+        let mut server = Server::new();
+        serve_gist(
+            &mut server,
+            gist_json(&c, &entries, &[("proj_a", "A"), ("proj_b", "B")]),
+        );
+        let client = Client::for_tests(&server.url());
+        let gists = GistClient::new(&client);
+
+        do_restore(&gists, &c, &["./b".into()], Some("g1")).unwrap();
+        assert_eq!(root.read("a"), None);
+        assert_eq!(root.read("b").as_deref(), Some("B\n"));
+
+        let err = do_restore(&gists, &c, &[], None).unwrap_err();
+        assert_eq!(err.to_string(), "No gist found for this project");
+    }
+
+    #[test]
+    fn restore_with_only_other_platform_files_does_nothing() {
+        let root = Root::new("restore-none");
+        let c = root.config();
+        let entries = [entry(&c, "a", Some(OTHER_OS), 0)];
+        let mut server = Server::new();
+        serve_gist(
+            &mut server,
+            gist_json(&c, &entries, &[("proj_a[plan9-test]", "A")]),
+        );
+        let client = Client::for_tests(&server.url());
+        do_restore(&GistClient::new(&client), &c, &[], Some("g1")).unwrap();
+        assert_eq!(root.read("a"), None);
+    }
+
+    #[test]
+    fn add_appends_entries_and_uploads_their_content() {
+        let root = Root::new("add");
+        let c = root.config();
+        root.write("new.txt", "new", Some(ts(7)));
+        root.write("old.txt", "old", Some(ts(0)));
+        let entries = [entry(&c, "old.txt", None, 0)];
+        let mut server = Server::new();
+        serve_gist(
+            &mut server,
+            gist_json(&c, &entries, &[("proj_old.txt", "old")]),
+        );
+        let (patch, seen) = capture(&mut server, "PATCH", "/gists/g1");
+        let patch = patch.expect(1);
+        let client = Client::for_tests(&server.url());
+
+        let args = ["old.txt".into(), "./new.txt".into(), "later.txt".into()];
+        do_add(&GistClient::new(&client), &c, &args, false, Some("g1")).unwrap();
+        patch.assert();
+
+        let files = sent_files(&seen);
+        let names: Vec<&str> = files.keys().map(String::as_str).collect();
+        // later.txt is tracked but has no content to upload yet.
+        assert_eq!(names, vec![".proj-config-sync.yaml", "proj_new.txt"]);
+        assert_eq!(files["proj_new.txt"]["content"], "new");
+        let manifest = sent_manifest(&c, &files);
+        let paths: Vec<&str> = manifest.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, vec!["old.txt", "new.txt", "later.txt"]);
+        assert_eq!(manifest.files[1].updated_at, ts(7));
+    }
+
+    #[test]
+    fn add_with_platform_tags_the_gist_name() {
+        let root = Root::new("add-platform");
+        let c = root.config();
+        root.write("cfg.yaml", "x: 1", Some(ts(0)));
+        let entries = [entry(&c, "cfg.yaml", Some(OTHER_OS), 0)];
+        let mut server = Server::new();
+        serve_gist(&mut server, gist_json(&c, &entries, &[]));
+        let (_patch, seen) = capture(&mut server, "PATCH", "/gists/g1");
+        let client = Client::for_tests(&server.url());
+
+        do_add(
+            &GistClient::new(&client),
+            &c,
+            &["cfg.yaml".into()],
+            true,
+            Some("g1"),
+        )
+        .unwrap();
+
+        let files = sent_files(&seen);
+        let tagged = format!("proj_cfg[{}].yaml", current_platform());
+        assert_eq!(files[&tagged]["content"], "x: 1");
+        let manifest = sent_manifest(&c, &files);
+        let variants: Vec<(Option<&str>, &str)> = manifest
+            .files
+            .iter()
+            .map(|f| (f.platform.as_deref(), f.gist.as_str()))
+            .collect();
+        assert_eq!(
+            variants,
+            vec![
+                (Some(OTHER_OS), "proj_cfg[plan9-test].yaml"),
+                (Some(current_platform()), tagged.as_str()),
+            ]
+        );
+    }
+
+    #[test]
+    fn add_skips_tracked_files_and_rejects_mixed_platform_scopes() {
+        let root = Root::new("add-skip");
+        let c = root.config();
+        root.write("a", "a", None);
+        let entries = [entry(&c, "a", None, 0)];
+        let mut server = Server::new();
+        serve_gist(&mut server, gist_json(&c, &entries, &[("proj_a", "a")]));
+        let patch = server.mock("PATCH", "/gists/g1").expect(0).create();
+        let client = Client::for_tests(&server.url());
+        let gists = GistClient::new(&client);
+
+        do_add(&gists, &c, &["a".into()], false, Some("g1")).unwrap();
+        let err = do_add(&gists, &c, &["a".into()], true, Some("g1")).unwrap_err();
+        assert!(
+            err.to_string().contains("different platform scope"),
+            "{err}"
+        );
+        let err = do_add(&gists, &c, &[], false, Some("g1")).unwrap_err();
+        assert!(err.to_string().starts_with("Usage:"), "{err}");
+        patch.assert();
+    }
+
+    #[test]
+    fn add_without_a_gist_creates_one() {
+        let root = Root::new("add-create");
+        let c = ProjectConfig {
+            public: false,
+            ..root.config()
+        };
+        root.write("a.txt", "a", Some(ts(3)));
+        let mut server = Server::new();
+        let (post, seen) = capture(&mut server, "POST", "/gists");
+        let post = post.expect(1);
+        let client = Client::for_tests(&server.url());
+
+        do_add(
+            &GistClient::new(&client),
+            &c,
+            &["a.txt".into()],
+            false,
+            None,
+        )
+        .unwrap();
+        post.assert();
+        let body = seen.lock().unwrap().last().cloned().unwrap();
+        assert_eq!(body["public"], false);
+        let files = sent_files(&seen);
+        assert_eq!(files["proj_a.txt"]["content"], "a");
+        assert_eq!(sent_manifest(&c, &files).files[0].updated_at, ts(3));
+    }
+
+    #[test]
+    fn add_refuses_secrets() {
+        let root = Root::new("add-secret");
+        let c = root.config();
+        root.write("token", "ghp_abcdefghijklmnopqrstuvwxyz0123456789AB", None);
+        let mut server = Server::new();
+        let post = server.mock("POST", "/gists").expect(0).create();
+        let client = Client::for_tests(&server.url());
+        let err = do_add(
+            &GistClient::new(&client),
+            &c,
+            &["token".into()],
+            false,
+            None,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("potential secret"), "{err}");
+        post.assert();
+    }
+
+    fn platform_variants(c: &ProjectConfig) -> Vec<ManifestFile> {
+        vec![
+            entry(c, "cfg.yaml", Some(current_platform()), 0),
+            entry(c, "cfg.yaml", Some(OTHER_OS), 0),
+            entry(c, "keep.txt", None, 0),
+        ]
+    }
+
+    #[test]
+    fn remove_by_path_drops_every_platform_variant() {
+        let root = Root::new("remove");
+        let c = root.config();
+        let mut server = Server::new();
+        serve_gist(&mut server, gist_json(&c, &platform_variants(&c), &[]));
+        let (_patch, seen) = capture(&mut server, "PATCH", "/gists/g1");
+        let client = Client::for_tests(&server.url());
+
+        do_remove(
+            &GistClient::new(&client),
+            &c,
+            &["cfg.yaml".into()],
+            false,
+            Some("g1"),
+        )
+        .unwrap();
+
+        let files = sent_files(&seen);
+        assert_eq!(
+            files[&format!("proj_cfg[{}].yaml", current_platform())],
+            Value::Null
+        );
+        assert_eq!(files["proj_cfg[plan9-test].yaml"], Value::Null);
+        let manifest = sent_manifest(&c, &files);
+        let paths: Vec<&str> = manifest.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, vec!["keep.txt"]);
+    }
+
+    #[test]
+    fn remove_with_platform_drops_only_this_platform() {
+        let root = Root::new("remove-platform");
+        let c = root.config();
+        let mut server = Server::new();
+        serve_gist(&mut server, gist_json(&c, &platform_variants(&c), &[]));
+        let (_patch, seen) = capture(&mut server, "PATCH", "/gists/g1");
+        let client = Client::for_tests(&server.url());
+
+        do_remove(
+            &GistClient::new(&client),
+            &c,
+            &["cfg.yaml".into()],
+            true,
+            Some("g1"),
+        )
+        .unwrap();
+
+        let files = sent_files(&seen);
+        assert_eq!(files.len(), 2);
+        assert_eq!(
+            files[&format!("proj_cfg[{}].yaml", current_platform())],
+            Value::Null
+        );
+        let manifest = sent_manifest(&c, &files);
+        let left: Vec<Option<&str>> = manifest
+            .files
+            .iter()
+            .map(|f| f.platform.as_deref())
+            .collect();
+        assert_eq!(left, vec![Some(OTHER_OS), None]);
+    }
+
+    #[test]
+    fn remove_fails_for_untracked_files() {
+        let root = Root::new("remove-errors");
+        let c = root.config();
+        let mut server = Server::new();
+        serve_gist(
+            &mut server,
+            gist_json(&c, &[entry(&c, "keep.txt", None, 0)], &[]),
+        );
+        let patch = server.mock("PATCH", "/gists/g1").expect(0).create();
+        let client = Client::for_tests(&server.url());
+        let gists = GistClient::new(&client);
+
+        let err = do_remove(&gists, &c, &["x".into()], false, Some("g1")).unwrap_err();
+        assert_eq!(err.to_string(), "None of the given files are tracked.");
+        // keep.txt is tracked, but not for this platform specifically.
+        let err = do_remove(&gists, &c, &["keep.txt".into()], true, Some("g1")).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "None of the given files are tracked for {}.",
+                current_platform()
+            )
+        );
+        assert_eq!(
+            do_remove(&gists, &c, &["x".into()], false, None)
+                .unwrap_err()
+                .to_string(),
+            "No gist found"
+        );
+        assert!(do_remove(&gists, &c, &[], false, Some("g1")).is_err());
+        patch.assert();
+    }
+
+    #[test]
+    fn cleanup_deletes_only_files_missing_from_the_manifest() {
+        let root = Root::new("cleanup");
+        let c = root.config();
+        let entries = [entry(&c, "a", None, 0)];
+        let mut server = Server::new();
+        serve_gist(
+            &mut server,
+            gist_json(
+                &c,
+                &entries,
+                &[("proj_a", "a"), ("old", "x"), ("proj_b", "b")],
+            ),
+        );
+        let (patch, seen) = capture(&mut server, "PATCH", "/gists/g1");
+        let patch = patch.expect(1);
+        let client = Client::for_tests(&server.url());
+
+        do_cleanup(&GistClient::new(&client), &c, Some("g1")).unwrap();
+        patch.assert();
+        let files = sent_files(&seen);
+        assert_eq!(
+            files,
+            BTreeMap::from([
+                ("old".to_string(), Value::Null),
+                ("proj_b".to_string(), Value::Null)
+            ])
+        );
+    }
+
+    #[test]
+    fn cleanup_with_nothing_stale_sends_nothing() {
+        let root = Root::new("cleanup-none");
+        let c = root.config();
+        let entries = [entry(&c, "a", None, 0)];
+        let mut server = Server::new();
+        serve_gist(&mut server, gist_json(&c, &entries, &[("proj_a", "a")]));
+        let patch = server.mock("PATCH", "/gists/g1").expect(0).create();
+        let client = Client::for_tests(&server.url());
+        let gists = GistClient::new(&client);
+
+        do_cleanup(&gists, &c, Some("g1")).unwrap();
+        patch.assert();
+        assert_eq!(
+            do_cleanup(&gists, &c, None).unwrap_err().to_string(),
+            "No gist found"
+        );
+    }
+
+    #[test]
+    fn delete_removes_the_gist() {
+        let mut server = Server::new();
+        let mock = server
+            .mock("DELETE", "/gists/g1")
+            .with_status(204)
+            .expect(1)
+            .create();
+        let client = Client::for_tests(&server.url());
+        let gists = GistClient::new(&client);
+        do_delete(&gists, Some("g1")).unwrap();
+        mock.assert();
+        assert_eq!(
+            do_delete(&gists, None).unwrap_err().to_string(),
+            "No gist found"
+        );
+        assert_eq!(do_open(None).unwrap_err().to_string(), "No gist found");
+    }
+}
