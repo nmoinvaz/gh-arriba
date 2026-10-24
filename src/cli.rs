@@ -377,6 +377,8 @@ pub enum RunCommand {
     Watch(WatchArgs),
     /// Dispatch a workflow and print the run it starts
     Dispatch(DispatchArgs),
+    /// List the artifacts of runs with their size and expiry
+    Artifacts(ArtifactsArgs),
 }
 
 #[derive(Args)]
@@ -459,6 +461,29 @@ pub struct DispatchArgs {
 
     #[command(flatten)]
     pub wait: WaitArgs,
+}
+
+#[derive(Args)]
+pub struct ArtifactsArgs {
+    /// Run IDs, job IDs, or Actions URLs (default: every run for the local HEAD commit)
+    #[arg(value_name = "RUN")]
+    pub runs: Vec<String>,
+
+    /// Runs for this commit
+    #[arg(long, conflicts_with_all = ["runs", "branch", "pr"])]
+    pub sha: Option<String>,
+
+    /// Runs for the newest commit with runs on this branch
+    #[arg(long, conflicts_with_all = ["runs", "pr"])]
+    pub branch: Option<String>,
+
+    /// Runs for the head commit of this PR, as a number, URL, or branch
+    #[arg(long, value_name = "PR", conflicts_with = "runs")]
+    pub pr: Option<String>,
+
+    /// Only runs of this workflow, by name or file
+    #[arg(short, long, value_name = "NAME", conflicts_with = "runs")]
+    pub workflow: Option<String>,
 }
 
 #[derive(Args)]

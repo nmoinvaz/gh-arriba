@@ -63,6 +63,7 @@ gh arriba [options] <command>
 | `run logs <RUN_OR_JOB>` | Download job logs to files for searching, picking jobs by name with `--job` and printing error lines with `--errors` or matches with `--grep` |
 | `run watch [RUN]...` | Follow runs until their jobs finish, by default every run for the local HEAD |
 | `run dispatch <WORKFLOW>` | Dispatch any workflow with `-f` inputs, printing its run and following it with `--watch` |
+| `run artifacts [RUN]...` | List artifacts with size and expiry for runs, a commit, a branch, or a PR |
 | `release` | Dispatch the repo's release workflow with a version bump, previewing with `--dry-run` |
 
 ### Dependabot
@@ -187,6 +188,12 @@ Dispatch a workflow on a branch and follow the run it starts:
 
 ```
 gh arriba run dispatch release.yaml --ref feature/self-update -f version=99.0.16 --watch
+```
+
+List the artifacts a PR's head commit produced, with their size and when they expire:
+
+```
+gh arriba run artifacts --pr 42
 ```
 
 Cut a minor release through the repo's Release workflow:
