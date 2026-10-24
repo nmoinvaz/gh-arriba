@@ -98,6 +98,7 @@ pub fn dispatch_workflow(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mockito::{Matcher, Server};
 
     #[test]
     fn listing_keeps_fields_and_state() {
@@ -110,5 +111,78 @@ mod tests {
         assert_eq!((w.workflow.id, w.workflow.name.as_str()), (7, "CI"));
         assert_eq!(w.workflow.file(), "ci.yaml");
         assert_eq!(w.workflow.stem(), "ci");
+    }
+
+    #[test]
+    fn workflow_paths() {
+        assert_eq!(file_name(".github/workflows/ci.yml"), "ci.yml");
+        assert_eq!(file_name("ci.yml"), "ci.yml");
+        assert_eq!(file_stem(".github/workflows/release.yaml"), "release");
+        assert_eq!(file_stem("build.json"), "build.json");
+    }
+
+    #[test]
+    fn listing_keeps_only_active_workflows() {
+        let mut server = Server::new();
+        server
+            .mock("GET", "/repos/o/r/actions/workflows")
+            .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
+            .with_body(
+                r#"{"total_count": 3, "workflows": [
+                    {"id": 1, "name": "CI", "path": ".github/workflows/ci.yml", "state": "active"},
+                    {"id": 2, "name": "Old", "path": ".github/workflows/old.yml",
+                     "state": "disabled_manually"},
+                    {"id": 3, "name": "Dynamic", "path": "dynamic/pages", "state": null}
+                ]}"#,
+            )
+            .create();
+        let client = Client::for_tests(&server.url());
+        let listed = workflows(&client, &Repo::parse("o/r").unwrap()).unwrap();
+        let names: Vec<&str> = listed.iter().map(|w| w.name.as_str()).collect();
+        assert_eq!(names, vec!["CI"]);
+    }
+
+    #[test]
+    fn file_runs_and_dispatch() {
+        let mut server = Server::new();
+        let file = server
+            .mock("GET", "/repos/o/r/contents/.github/workflows/ci.yml")
+            .match_query(Matcher::UrlEncoded("ref".into(), "main".into()))
+            .match_header("accept", "application/vnd.github.raw+json")
+            .with_body("on: workflow_dispatch\n")
+            .create();
+        let runs = server
+            .mock("GET", "/repos/o/r/actions/workflows/7/runs")
+            .match_query(Matcher::AllOf(vec![
+                Matcher::UrlEncoded("event".into(), "workflow_dispatch".into()),
+                Matcher::UrlEncoded("per_page".into(), "10".into()),
+            ]))
+            .with_body(r#"{"workflow_runs": [{"id": 5}, {"id": 4}]}"#)
+            .create();
+        let dispatch = server
+            .mock("POST", "/repos/o/r/actions/workflows/7/dispatches")
+            .match_body(Matcher::Json(
+                json!({"ref": "main", "inputs": {"level": "debug"}}),
+            ))
+            .with_status(204)
+            .create();
+        let client = Client::for_tests(&server.url());
+        let repo = Repo::parse("o/r").unwrap();
+        assert_eq!(
+            workflow_file(&client, &repo, ".github/workflows/ci.yml", "main").unwrap(),
+            "on: workflow_dispatch\n"
+        );
+        let ids: Vec<u64> = workflow_dispatch_runs(&client, &repo, 7)
+            .unwrap()
+            .iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(ids, vec![5, 4]);
+        let mut inputs = Map::new();
+        inputs.insert("level".into(), json!("debug"));
+        dispatch_workflow(&client, &repo, 7, "main", inputs).unwrap();
+        for m in [file, runs, dispatch] {
+            m.assert();
+        }
     }
 }
