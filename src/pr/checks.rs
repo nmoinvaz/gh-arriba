@@ -420,7 +420,7 @@ fn progress(status: &PrStatus, seen: &mut Option<Seen>, full_ref: bool, tag: boo
         if c.state != State::Pending && !prev.done.contains(&c.key()) {
             let took = c
                 .seconds
-                .map(|s| format!(" ({})", duration(s)))
+                .map(|s| format!(" ({})", output::duration(s)))
                 .unwrap_or_default();
             lines.push(format!("{tag}{:<8} {}{took}", c.state.label(), c.name));
         }
@@ -440,16 +440,6 @@ fn is_settled(status: &PrStatus, waited: Duration) -> bool {
     }
     let open = matches!(status.state.as_str(), "open" | "draft");
     !status.checks.is_empty() && !(open && status.mergeable == "unknown")
-}
-
-/// Compact duration such as `45s`, `4m12s`, or `1h3m`.
-fn duration(seconds: i64) -> String {
-    let s = seconds.max(0);
-    match (s / 3600, s / 60 % 60, s % 60) {
-        (0, 0, sec) => format!("{sec}s"),
-        (0, min, sec) => format!("{min}m{sec}s"),
-        (h, min, _) => format!("{h}h{min}m"),
-    }
 }
 
 #[cfg(test)]
@@ -633,13 +623,5 @@ mod tests {
         assert_eq!(as_sha("abc"), None);
         assert_eq!(as_sha("HEAD"), None);
         assert_eq!(as_sha(&"a".repeat(41)), None);
-    }
-
-    #[test]
-    fn durations_are_compact() {
-        assert_eq!(duration(45), "45s");
-        assert_eq!(duration(252), "4m12s");
-        assert_eq!(duration(3780), "1h3m");
-        assert_eq!(duration(-3), "0s");
     }
 }

@@ -28,9 +28,30 @@ pub fn first_lines(text: &str, max: usize) -> String {
     )
 }
 
+/// A run time such as `45s`, `3m12s`, or `1h05m`. Negative spans, from clock skew, read as `0s`.
+pub fn duration(seconds: i64) -> String {
+    let s = seconds.max(0);
+    let (h, m, s) = (s / 3600, s % 3600 / 60, s % 60);
+    if h > 0 {
+        format!("{h}h{m:02}m")
+    } else if m > 0 {
+        format!("{m}m{s:02}s")
+    } else {
+        format!("{s}s")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn durations_read_naturally() {
+        assert_eq!(duration(45), "45s");
+        assert_eq!(duration(192), "3m12s");
+        assert_eq!(duration(3900), "1h05m");
+        assert_eq!(duration(-3), "0s");
+    }
 
     #[test]
     fn first_lines_notes_dropped_count() {
