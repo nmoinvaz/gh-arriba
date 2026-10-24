@@ -1,4 +1,5 @@
 mod apply;
+mod comment;
 mod dump;
 pub mod model;
 mod rebase;
@@ -17,6 +18,7 @@ pub fn run(ctx: &Ctx, cmd: PrCommand) -> Result<()> {
         PrCommand::Threads(args) => threads::run_threads(ctx, args),
         PrCommand::Reply(args) => threads::run_reply(ctx, args),
         PrCommand::Resolve(args) => threads::run_resolve(ctx, args),
+        PrCommand::Comment(cmd) => comment::run(ctx, cmd),
         PrCommand::Review(cmd) => review::run(ctx, cmd),
         PrCommand::Apply(args) => apply::run(ctx, args),
         PrCommand::Dump(args) => dump::run(ctx, args),
