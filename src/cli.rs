@@ -401,6 +401,14 @@ pub struct LogsArgs {
     #[arg(long, value_name = "REGEX", value_parser = parse_regex, conflicts_with = "errors")]
     pub grep: Option<regex::Regex>,
 
+    /// Lines of log to show before each error or match
+    #[arg(long, value_name = "N", default_value_t = crate::log::CONTEXT)]
+    pub context: usize,
+
+    /// Error or match blocks to show per job
+    #[arg(long, value_name = "N", default_value_t = crate::log::MAX)]
+    pub max: usize,
+
     /// Download logs again even when a saved copy exists
     #[arg(long)]
     pub refresh: bool,
