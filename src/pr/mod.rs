@@ -9,6 +9,7 @@ mod rebase;
 mod retry;
 mod review;
 mod reviewers;
+mod rollup;
 mod threads;
 
 use anyhow::Result;
