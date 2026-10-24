@@ -444,6 +444,10 @@ pub struct RunnersArgs {
     /// Runners registered to an organization instead of the repo
     #[arg(long, value_name = "ORG")]
     pub org: Option<String>,
+
+    /// List queued jobs even when no runner is busy, scanning every repo of an org
+    #[arg(long)]
+    pub queued: bool,
 }
 
 // -------------------------------------------------------------------------
