@@ -1,3 +1,4 @@
+pub mod artifacts;
 pub mod watch;
 
 use anyhow::{Context, Result};
@@ -19,6 +20,7 @@ pub fn run(ctx: &Ctx, cmd: RunCommand) -> Result<()> {
         RunCommand::Logs(args) => logs(ctx, args),
         RunCommand::Watch(args) => watch_runs(ctx, args),
         RunCommand::Dispatch(args) => dispatch(ctx, args),
+        RunCommand::Artifacts(args) => artifacts::run(ctx, args),
     }
 }
 
@@ -278,7 +280,7 @@ fn watch_runs(ctx: &Ctx, args: WatchArgs) -> Result<()> {
             (None, Some(branch)) => Commit::Branch(branch.clone()),
             (None, None) => Commit::Sha(git(&["rev-parse", "HEAD"])?),
         };
-        find_runs(ctx, &repo, &commit, args.workflow.as_deref(), &wait)?
+        find_runs(ctx, &repo, &commit, args.workflow.as_deref(), Some(&wait))?
             .into_iter()
             .map(|id| (repo.clone(), id))
             .collect()
@@ -293,7 +295,7 @@ fn watch_runs(ctx: &Ctx, args: WatchArgs) -> Result<()> {
 }
 
 /// Which commit's runs to watch.
-enum Commit {
+pub(crate) enum Commit {
     Sha(String),
     /// The newest commit on the branch that has runs.
     Branch(String),
@@ -302,13 +304,14 @@ enum Commit {
 /// How long to wait for runs to show up after a push.
 const RUNS_GRACE: Duration = Duration::from_secs(120);
 
-/// Run IDs for a commit, polling for a while since runs appear some seconds after a push.
-fn find_runs(
+/// Run IDs for a commit. With `wait`, polls for a while since runs appear some seconds after a
+/// push; without it, looks once.
+pub(crate) fn find_runs(
     ctx: &Ctx,
     repo: &Repo,
     commit: &Commit,
     workflow: Option<&str>,
-    wait: &watch::Wait,
+    wait: Option<&watch::Wait>,
 ) -> Result<Vec<u64>> {
     let (path, what) = match commit {
         Commit::Sha(sha) => (
@@ -327,7 +330,7 @@ fn find_runs(
     let for_workflow = workflow
         .map(|w| format!(" for workflow {w}"))
         .unwrap_or_default();
-    let deadline = Instant::now() + RUNS_GRACE;
+    let deadline = Instant::now() + wait.map_or(Duration::ZERO, |_| RUNS_GRACE);
     let mut announced = false;
     loop {
         let runs = match commit {
@@ -355,7 +358,8 @@ fn find_runs(
             watch::progress(ctx, &format!("Waiting for runs{for_workflow} on {what}..."));
             announced = true;
         }
-        std::thread::sleep(wait.interval.min(Duration::from_secs(10)));
+        let interval = wait.map_or(Duration::ZERO, |w| w.interval);
+        std::thread::sleep(interval.min(Duration::from_secs(10)));
     }
 }
 
@@ -386,7 +390,7 @@ fn select_runs(runs: &[Value], workflow: Option<&str>) -> Vec<u64> {
 }
 
 /// The repository and run a RUN argument names. A job ID or URL stands for the run it belongs to.
-fn resolve_run(ctx: &Ctx, s: &str) -> Result<(Repo, u64)> {
+pub(crate) fn resolve_run(ctx: &Ctx, s: &str) -> Result<(Repo, u64)> {
     let (url_repo, target) = parse_target(s)?;
     let repo = ctx.repo_or(url_repo)?;
     let job_run = |id: u64| -> Result<Option<u64>> {
