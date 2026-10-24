@@ -73,9 +73,10 @@ gh arriba [options] <command>
 | `runners` | List the repo's self-hosted runners with status, labels, and the job each busy one runs |
 | `runners --org <ORG>` | List the organization's runners, scanning its repos for their jobs |
 | `runners --queued` | Also list jobs waiting for a runner and how long they have waited |
+| `runners --from-jobs` | Infer runners from the jobs of recent runs, without admin access |
 
 Listing runners needs admin access: for an organization, an org admin token with the `admin:org`
-scope (`gh auth refresh -s admin:org`).
+scope (`gh auth refresh -s admin:org`). Without it, `runners` falls back to `--from-jobs`.
 
 ### Config sync
 

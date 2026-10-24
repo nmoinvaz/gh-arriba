@@ -448,6 +448,18 @@ pub struct RunnersArgs {
     /// List queued jobs even when no runner is busy, scanning every repo of an org
     #[arg(long)]
     pub queued: bool,
+
+    /// Infer runners from recent jobs instead of the runners API, which needs admin access
+    #[arg(long)]
+    pub from_jobs: bool,
+
+    /// Recent runs per repo to read when inferring runners from jobs
+    #[arg(long, default_value_t = 30, value_name = "N")]
+    pub runs: usize,
+
+    /// Most recently pushed org repos to read when inferring runners from jobs
+    #[arg(long, default_value_t = 10, value_name = "N")]
+    pub repos: usize,
 }
 
 // -------------------------------------------------------------------------
