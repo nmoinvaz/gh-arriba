@@ -117,6 +117,7 @@ pub fn parse_pr_ref(s: &str) -> Option<PrRef> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mockito::Server;
 
     fn repo(owner: &str, name: &str) -> Repo {
         Repo {
@@ -166,5 +167,36 @@ mod tests {
         assert_eq!(parse_pr_ref("42"), None);
         assert_eq!(parse_pr_ref("#42"), None);
         assert_eq!(parse_pr_ref("feature/branch"), None);
+    }
+
+    #[test]
+    fn pr_paths_and_display() {
+        let pr = PrRef {
+            repo: repo("o", "r"),
+            number: 4,
+        };
+        assert_eq!(pr.api(), "repos/o/r/pulls/4");
+        assert_eq!(pr.issue_api(), "repos/o/r/issues/4");
+        assert_eq!(pr.to_string(), "o/r#4");
+        assert_eq!(repo("o", "r").to_string(), "o/r");
+        assert_eq!(parse_pr_ref("https://github.com/o/r/issues/4"), None);
+        assert_eq!(parse_pr_ref("o/r#x"), None);
+    }
+
+    #[test]
+    fn default_branch_from_the_repository() {
+        let mut server = Server::new();
+        server
+            .mock("GET", "/repos/o/r")
+            .with_body(r#"{"default_branch": "develop"}"#)
+            .create();
+        server
+            .mock("GET", "/repos/o/empty")
+            .with_body(r#"{"default_branch": null}"#)
+            .create();
+        let client = Client::for_tests(&server.url());
+        assert_eq!(default_branch(&client, &repo("o", "r")).unwrap(), "develop");
+        let err = default_branch(&client, &repo("o", "empty")).unwrap_err();
+        assert_eq!(err.to_string(), "Repository has no default branch");
     }
 }
