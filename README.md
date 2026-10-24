@@ -196,6 +196,12 @@ List the artifacts a PR's head commit produced, with their size and when they ex
 gh arriba run artifacts --pr 42
 ```
 
+Or those of the latest green build of the default branch, skipping runs that uploaded none:
+
+```
+gh arriba run artifacts --success -w build
+```
+
 Cut a minor release through the repo's Release workflow:
 
 ```

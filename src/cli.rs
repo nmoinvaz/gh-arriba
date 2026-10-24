@@ -484,6 +484,10 @@ pub struct ArtifactsArgs {
     /// Only runs of this workflow, by name or file
     #[arg(short, long, value_name = "NAME", conflicts_with = "runs")]
     pub workflow: Option<String>,
+
+    /// The newest successful run with artifacts on --branch (default: the default branch)
+    #[arg(long, conflicts_with_all = ["runs", "sha", "pr"])]
+    pub success: bool,
 }
 
 #[derive(Args)]
