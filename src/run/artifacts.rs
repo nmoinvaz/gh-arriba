@@ -475,6 +475,8 @@ fn expiry(a: &Artifact, now: DateTime<Utc>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::Client;
+    use mockito::{Matcher, Server, ServerGuard};
     use serde_json::json;
 
     fn repo() -> Repo {
@@ -637,5 +639,372 @@ mod tests {
              o/r run 8\n  \
              no artifacts\n"
         );
+    }
+
+    fn ctx(server: &ServerGuard, json: bool) -> Ctx {
+        Ctx {
+            client: Client::for_tests(&server.url()),
+            repo_flag: Some("o/r".into()),
+            json,
+            yes: true,
+        }
+    }
+
+    fn args(runs: &[&str]) -> ArtifactsArgs {
+        ArtifactsArgs {
+            runs: runs.iter().map(|r| r.to_string()).collect(),
+            sha: None,
+            branch: None,
+            pr: None,
+            workflow: None,
+            success: false,
+            names: Vec::new(),
+            patterns: Vec::new(),
+            download: false,
+            dir: PathBuf::from("."),
+            prune: false,
+            older_than: TimeDelta::days(7),
+            keep_latest: 1,
+            dry_run: false,
+        }
+    }
+
+    fn zip_bytes(entries: &[(&str, &str)]) -> Vec<u8> {
+        use std::io::Write;
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default();
+        for (name, body) in entries {
+            writer.start_file(*name, options).unwrap();
+            writer.write_all(body.as_bytes()).unwrap();
+        }
+        writer.finish().unwrap().into_inner()
+    }
+
+    fn serve_artifacts(server: &mut ServerGuard, run: u64, artifacts: serde_json::Value) {
+        server
+            .mock(
+                "GET",
+                format!("/repos/o/r/actions/runs/{run}/artifacts").as_str(),
+            )
+            .match_query(Matcher::Any)
+            .with_body(json!({ "artifacts": artifacts }).to_string())
+            .create();
+    }
+
+    #[test]
+    fn lists_the_artifacts_of_named_runs() {
+        let mut server = Server::new();
+        let lookup = server
+            .mock("GET", "/repos/o/r/actions/runs/9")
+            .with_body(r#"{"id": 9}"#)
+            .expect(2)
+            .create();
+        serve_artifacts(
+            &mut server,
+            9,
+            json!([{"id": 1, "name": "linux-x64"}, {"id": 2, "name": "logs"}]),
+        );
+        let mut a = args(&["9"]);
+        a.patterns = vec!["linux-*".to_string()];
+        run(&ctx(&server, true), a).unwrap();
+        run(&ctx(&server, false), args(&["9"])).unwrap();
+        lookup.assert();
+        assert!(wanted(&args(&[]), "anything"));
+        let mut a = args(&[]);
+        a.names = vec!["logs".to_string()];
+        assert!(wanted(&a, "logs"));
+        assert!(!wanted(&a, "logs-2"));
+    }
+
+    #[test]
+    fn downloads_one_artifact_into_the_dir_and_several_beside_each_other() {
+        let mut server = Server::new();
+        serve_artifacts(
+            &mut server,
+            9,
+            json!([
+                {"id": 1, "name": "linux", "size_in_bytes": 3},
+                {"id": 2, "name": "macos", "size_in_bytes": 3},
+                {"id": 3, "name": "old", "expired": true}
+            ]),
+        );
+        server
+            .mock("GET", "/repos/o/r/actions/artifacts/1/zip")
+            .with_body(zip_bytes(&[("bin/tool", "elf"), ("README", "hi")]))
+            .expect(2)
+            .create();
+        server
+            .mock("GET", "/repos/o/r/actions/artifacts/2/zip")
+            .with_body(zip_bytes(&[("tool", "macho")]))
+            .create();
+        let expired = server
+            .mock("GET", "/repos/o/r/actions/artifacts/3/zip")
+            .expect(0)
+            .create();
+        let dir = std::env::temp_dir().join(format!("gh-arriba-dl-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let url = "https://github.com/o/r/actions/runs/9";
+
+        let mut a = args(&[url]);
+        a.download = true;
+        a.dir = dir.join("all");
+        run(&ctx(&server, true), a).unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.join("all/linux/bin/tool")).unwrap(),
+            "elf"
+        );
+        assert_eq!(
+            fs::read_to_string(dir.join("all/macos/tool")).unwrap(),
+            "macho"
+        );
+        assert!(!dir.join("all/old").exists());
+        // The zips are removed once extracted.
+        let left: Vec<_> = fs::read_dir(dir.join("all")).unwrap().collect();
+        assert_eq!(left.len(), 2);
+
+        let mut a = args(&[url]);
+        a.download = true;
+        a.dir = dir.join("one");
+        a.names = vec!["linux".to_string()];
+        run(&ctx(&server, false), a).unwrap();
+        assert_eq!(fs::read_to_string(dir.join("one/README")).unwrap(), "hi");
+
+        let mut a = args(&[url]);
+        a.download = true;
+        a.dir = dir.join("none");
+        a.names = vec!["old".to_string()];
+        let err = run(&ctx(&server, true), a).unwrap_err().to_string();
+        assert_eq!(err, "No artifacts to download");
+        expired.assert();
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn download_refuses_same_name_from_two_runs_and_bad_zips() {
+        let mut server = Server::new();
+        serve_artifacts(&mut server, 8, json!([{"id": 1, "name": "build"}]));
+        serve_artifacts(&mut server, 9, json!([{"id": 2, "name": "build"}]));
+        server
+            .mock("GET", "/repos/o/r/actions/artifacts/2/zip")
+            .with_body("not a zip")
+            .create();
+        let dir = std::env::temp_dir().join(format!("gh-arriba-dl-bad-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let mut a = args(&[
+            "https://github.com/o/r/actions/runs/8",
+            "https://github.com/o/r/actions/runs/9",
+        ]);
+        a.download = true;
+        a.dir = dir.clone();
+        let err = run(&ctx(&server, true), a).unwrap_err().to_string();
+        assert_eq!(
+            err,
+            "Several runs uploaded an artifact named build (8, 9). Pass one run, or -w to pick a workflow."
+        );
+
+        let mut a = args(&["https://github.com/o/r/actions/runs/9"]);
+        a.download = true;
+        a.dir = dir.clone();
+        let err = run(&ctx(&server, true), a).unwrap_err();
+        assert_eq!(err.to_string(), "Failed to download build");
+        assert!(!dir.join(".build-2.zip.part").exists());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn success_skips_runs_without_wanted_artifacts() {
+        let mut server = Server::new();
+        server
+            .mock("GET", "/repos/o/r")
+            .with_body(r#"{"default_branch": "main"}"#)
+            .create();
+        server
+            .mock("GET", "/repos/o/r/actions/runs")
+            .match_query(Matcher::AllOf(vec![
+                Matcher::UrlEncoded("branch".into(), "main".into()),
+                Matcher::UrlEncoded("status".into(), "success".into()),
+            ]))
+            .with_body(
+                r#"{"workflow_runs": [
+                    {"id": 30, "name": "Lint", "conclusion": "success"},
+                    {"id": 20, "name": "Build", "conclusion": "success"}
+                ]}"#,
+            )
+            .create();
+        serve_artifacts(&mut server, 30, json!([{"id": 3, "name": "lint-report"}]));
+        serve_artifacts(&mut server, 20, json!([{"id": 2, "name": "linux-x64"}]));
+        let ctx = ctx(&server, true);
+
+        let mut a = args(&[]);
+        a.success = true;
+        a.patterns = vec!["linux-*".to_string()];
+        let ((repo, id), found) = latest_success(&ctx, &a).unwrap();
+        assert_eq!(
+            (repo.to_string(), id, found[0].run_id),
+            ("o/r".to_string(), 20, 20)
+        );
+        run(&ctx, a).unwrap();
+
+        let mut a = args(&[]);
+        a.success = true;
+        a.names = vec!["docs".to_string()];
+        a.workflow = Some("Build".to_string());
+        assert_eq!(
+            latest_success(&ctx, &a).unwrap_err().to_string(),
+            "No successful run of Build with artifacts among the newest on main in o/r"
+        );
+    }
+
+    /// Artifacts of o/r: two old builds, a fresh build, and old logs from another run.
+    fn serve_repo_artifacts(server: &mut ServerGuard) {
+        let old = (Utc::now() - TimeDelta::days(30)).to_rfc3339();
+        let older = (Utc::now() - TimeDelta::days(40)).to_rfc3339();
+        let new = (Utc::now() - TimeDelta::hours(1)).to_rfc3339();
+        server
+            .mock("GET", "/repos/o/r/actions/artifacts")
+            .match_query(Matcher::Any)
+            .with_body(
+                json!({"artifacts": [
+                    {"id": 1, "name": "build", "size_in_bytes": 100, "created_at": older,
+                     "workflow_run": {"id": 8}},
+                    {"id": 2, "name": "build", "size_in_bytes": 200, "created_at": old,
+                     "workflow_run": {"id": 9}},
+                    {"id": 3, "name": "build", "size_in_bytes": 300, "created_at": new,
+                     "workflow_run": {"id": 10}},
+                    {"id": 4, "name": "logs", "size_in_bytes": 400, "created_at": older,
+                     "workflow_run": {"id": 9}},
+                    {"id": 5, "name": "logs", "size_in_bytes": 500, "created_at": old,
+                     "workflow_run": {"id": 10}},
+                    {"id": 6, "name": "gone", "expired": true, "created_at": older}
+                ]})
+                .to_string(),
+            )
+            .create();
+    }
+
+    fn prune_args(runs: &[&str]) -> ArtifactsArgs {
+        let mut a = args(runs);
+        a.prune = true;
+        a
+    }
+
+    #[test]
+    fn prune_dry_run_deletes_nothing() {
+        let mut server = Server::new();
+        serve_repo_artifacts(&mut server);
+        let deletes = server
+            .mock(
+                "DELETE",
+                Matcher::Regex("^/repos/o/r/actions/artifacts/".into()),
+            )
+            .expect(0)
+            .create();
+        let mut a = prune_args(&[]);
+        a.dry_run = true;
+        run(&ctx(&server, true), a).unwrap();
+        let mut a = prune_args(&[]);
+        a.dry_run = true;
+        a.older_than = TimeDelta::days(365);
+        run(&ctx(&server, false), a).unwrap();
+        deletes.assert();
+    }
+
+    #[test]
+    fn prune_deletes_the_plan_and_reports_failures() {
+        let mut server = Server::new();
+        serve_repo_artifacts(&mut server);
+        // Repo-wide with the newest of each name kept: builds 1 and 2, logs 4.
+        let ok: Vec<_> = [1, 2]
+            .iter()
+            .map(|id| {
+                server
+                    .mock(
+                        "DELETE",
+                        format!("/repos/o/r/actions/artifacts/{id}").as_str(),
+                    )
+                    .with_status(204)
+                    .expect(1)
+                    .create()
+            })
+            .collect();
+        let failing = server
+            .mock("DELETE", "/repos/o/r/actions/artifacts/4")
+            .with_status(403)
+            .with_body(r#"{"message": "Forbidden"}"#)
+            .create();
+        let err = run(&ctx(&server, false), prune_args(&[]))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(err, "1 artifacts could not be deleted");
+        for m in ok {
+            m.assert();
+        }
+        failing.assert();
+    }
+
+    #[test]
+    fn prune_scoped_to_runs() {
+        let mut server = Server::new();
+        serve_repo_artifacts(&mut server);
+        // Only run 9's artifacts are candidates, and with nothing kept both go.
+        let deletes: Vec<_> = [2, 4]
+            .iter()
+            .map(|id| {
+                server
+                    .mock(
+                        "DELETE",
+                        format!("/repos/o/r/actions/artifacts/{id}").as_str(),
+                    )
+                    .with_status(204)
+                    .create()
+            })
+            .collect();
+        let mut a = prune_args(&["https://github.com/o/r/actions/runs/9"]);
+        a.keep_latest = 0;
+        run(&ctx(&server, true), a).unwrap();
+        for m in deletes {
+            m.assert();
+        }
+
+        let a = prune_args(&[
+            "https://github.com/o/r/actions/runs/9",
+            "https://github.com/o/other/actions/runs/9",
+        ]);
+        assert_eq!(
+            run(&ctx(&server, true), a).unwrap_err().to_string(),
+            "--prune works on one repository at a time"
+        );
+    }
+
+    #[test]
+    fn runs_of_a_commit_or_pr() {
+        let mut server = Server::new();
+        server
+            .mock("GET", "/repos/o/r/actions/runs")
+            .match_query(Matcher::UrlEncoded("head_sha".into(), "abc".into()))
+            .with_body(r#"{"workflow_runs": [{"id": 9, "head_sha": "abc"}]}"#)
+            .create();
+        server
+            .mock("POST", "/graphql")
+            .match_body(Matcher::PartialJson(
+                json!({"variables": {"owner": "o", "repo": "r", "number": 5}}),
+            ))
+            .with_body(
+                r#"{"data": {"repository": {"pullRequest": {
+                    "id": "PR_1", "number": 5, "title": "t", "url": "u", "state": "OPEN",
+                    "isDraft": false, "body": "", "createdAt": "2026-01-01T00:00:00Z",
+                    "author": {"login": "a"}, "baseRefName": "main", "headRefName": "f",
+                    "headRefOid": "abc", "isCrossRepository": false,
+                    "headRepository": {"nameWithOwner": "o/r"}}}}}"#,
+            )
+            .create();
+        let ctx = ctx(&server, true);
+        let o_r = Repo::parse("o/r").unwrap();
+        let mut a = args(&[]);
+        a.sha = Some("abc".to_string());
+        assert_eq!(select(&ctx, &a).unwrap(), vec![(o_r.clone(), 9)]);
+        let mut a = args(&[]);
+        a.pr = Some("o/r#5".to_string());
+        assert_eq!(select(&ctx, &a).unwrap(), vec![(o_r, 9)]);
     }
 }
