@@ -564,6 +564,235 @@ pub fn build_groups(prs: &[DepPr]) -> Vec<LockStep> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::cli::DependabotListArgs;
+    use mockito::{Matcher, Mock, Server, ServerGuard};
+    use serde_json::{Value, json};
+
+    /// A context against the test server, scoped to o/r and answering yes to every prompt.
+    pub fn ctx(server: &ServerGuard, json: bool) -> Ctx {
+        Ctx {
+            client: Client::for_tests(&server.url()),
+            repo_flag: Some("o/r".into()),
+            json,
+            yes: true,
+        }
+    }
+
+    /// A Dependabot PR as the details query returns it.
+    pub fn node(
+        repo: &str,
+        number: u64,
+        title: &str,
+        mergeable: &str,
+        merge_state: &str,
+        checks: Option<&str>,
+    ) -> Value {
+        json!({
+            "id": format!("PR_{number}"), "number": number, "title": title,
+            "url": format!("https://github.com/{repo}/pull/{number}"),
+            "createdAt": "2026-01-02T03:04:05Z",
+            "headRefName": format!("dependabot/cargo/pr-{number}"),
+            "mergeable": mergeable, "mergeStateStatus": merge_state, "reviewDecision": null,
+            "additions": 2, "deletions": 1, "changedFiles": 1,
+            "author": { "login": "dependabot" },
+            "repository": { "nameWithOwner": repo },
+            "commits": { "nodes": [ { "commit": {
+                "statusCheckRollup": checks.map(|s| json!({ "state": s }))
+            } } ] }
+        })
+    }
+
+    /// A ready PR in o/r.
+    pub fn ready(number: u64, title: &str) -> Value {
+        node("o/r", number, title, "MERGEABLE", "CLEAN", Some("SUCCESS"))
+    }
+
+    /// Mock the cheap listing (the repo query, or the org search with `org`) and the details
+    /// query for `nodes`, which Dependabot authored.
+    pub fn mock_prs(server: &mut ServerGuard, org: bool, nodes: &[Value]) -> (Mock, Mock) {
+        let summaries: Vec<Value> = nodes
+            .iter()
+            .map(|n| {
+                json!({
+                    "number": n["number"], "title": n["title"], "url": n["url"],
+                    "author": { "login": "dependabot" }, "repository": n["repository"]
+                })
+            })
+            .collect();
+        let page = json!({ "pageInfo": { "hasNextPage": false }, "nodes": summaries });
+        let (pattern, data) = if org {
+            (r"search\(query", json!({ "search": page }))
+        } else {
+            (
+                r"pullRequests\(states: OPEN",
+                json!({ "repository": { "pullRequests": page } }),
+            )
+        };
+        let light = server
+            .mock("POST", "/graphql")
+            .match_body(Matcher::Regex(pattern.into()))
+            .with_body(json!({ "data": data }).to_string())
+            .create();
+        let aliased: serde_json::Map<String, Value> = nodes
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (format!("p{i}"), json!({ "pullRequest": n })))
+            .collect();
+        let details = server
+            .mock("POST", "/graphql")
+            .match_body(Matcher::Regex("fragment Dep on PullRequest".into()))
+            .with_body(json!({ "data": aliased }).to_string())
+            .create();
+        (light, details)
+    }
+
+    #[test]
+    fn fetch_light_keeps_dependabot_prs() {
+        let mut server = Server::new();
+        let author = |n: u64, login: &str| {
+            json!({ "number": n, "title": "t", "url": "u", "author": { "login": login },
+                    "repository": { "nameWithOwner": "o/r" } })
+        };
+        server
+            .mock("POST", "/graphql")
+            .with_body(
+                json!({ "data": { "repository": { "pullRequests": {
+                    "pageInfo": { "hasNextPage": false },
+                    "nodes": [author(1, "dependabot"), author(2, "someone"),
+                              author(3, "dependabot[bot]"), { "number": 4, "author": null }]
+                } } } })
+                .to_string(),
+            )
+            .create();
+        let client = Client::for_tests(&server.url());
+        let scope = Scope::Repo(Repo::parse("o/r").unwrap());
+        let numbers: Vec<u64> = fetch_light(&client, &scope)
+            .unwrap()
+            .iter()
+            .map(|n| n.number)
+            .collect();
+        assert_eq!(numbers, vec![1, 3]);
+    }
+
+    #[test]
+    fn fetch_light_reports_missing_scope() {
+        let mut server = Server::new();
+        server
+            .mock("POST", "/graphql")
+            .match_body(Matcher::Regex(r"pullRequests\(states".into()))
+            .with_body(r#"{"data": {"repository": null}}"#)
+            .create();
+        server
+            .mock("POST", "/graphql")
+            .match_body(Matcher::Regex(r"search\(query".into()))
+            .with_body(r#"{"data": {"search": null}}"#)
+            .create();
+        let client = Client::for_tests(&server.url());
+        let repo = Scope::Repo(Repo::parse("o/gone").unwrap());
+        let err = fetch_light(&client, &repo).unwrap_err();
+        assert_eq!(err.to_string(), "o/gone not found");
+        let err = fetch_light(&client, &Scope::Org("acme".into())).unwrap_err();
+        assert_eq!(err.to_string(), "acme not found");
+    }
+
+    #[test]
+    fn fetch_prs_classifies_details() {
+        let mut server = Server::new();
+        let (light, details) = mock_prs(
+            &mut server,
+            false,
+            &[
+                ready(1, "Bump serde from 1.0.1 to 1.0.2"),
+                node(
+                    "o/r",
+                    2,
+                    "Bump tokio from 1.0.0 to 1.1.0",
+                    "CONFLICTING",
+                    "DIRTY",
+                    Some("SUCCESS"),
+                ),
+                node(
+                    "o/r",
+                    3,
+                    "Bump pino from 9.0.0 to 10.0.0",
+                    "MERGEABLE",
+                    "UNSTABLE",
+                    Some("FAILURE"),
+                ),
+                node("o/r", 4, "Bump the dev group", "MERGEABLE", "CLEAN", None),
+            ],
+        );
+        let client = Client::for_tests(&server.url());
+        let scope = Scope::Repo(Repo::parse("o/r").unwrap());
+        // Nothing has unknown mergeability, so settling fetches no second time.
+        let o = Overview::load(&client, &scope).unwrap();
+        light.assert();
+        details.assert();
+
+        let got: Vec<(u64, Category, Option<&str>)> = o
+            .prs
+            .iter()
+            .map(|p| (p.number, p.category, p.reason.as_deref()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (1, Category::Ready, None),
+                (2, Category::NeedsRebase, None),
+                (3, Category::Blocked, Some("failing checks")),
+                (4, Category::Ready, None),
+            ]
+        );
+        let p = o.get("o/r", 1).unwrap();
+        assert_eq!(p.node_id, "PR_1");
+        assert_eq!(p.head_ref, "dependabot/cargo/pr-1");
+        assert_eq!(p.checks.as_deref(), Some("SUCCESS"));
+        assert_eq!(p.update.package, "serde");
+        assert_eq!(p.size(), "1 file (+2 -1)");
+        assert_eq!(p.label(true), "o/r#1");
+        assert_eq!(o.get("o/r", 4).unwrap().checks, None);
+        assert!(o.get("x/y", 1).is_none());
+    }
+
+    #[test]
+    fn scopes_and_labels() {
+        let server = Server::new();
+        let c = ctx(&server, false);
+        let s = Scope::new(&c, None).unwrap();
+        assert!(!s.is_org());
+        assert_eq!(s.to_string(), "o/r");
+        let s = Scope::new(&c, Some("acme".into())).unwrap();
+        assert!(s.is_org());
+        assert_eq!(s.to_string(), "acme");
+
+        assert_eq!(Category::NeedsRebase.label(), "needs rebase 🔄");
+        assert_eq!(Change::Patch.badge(), "🟢 patch");
+        assert!(Change::Other.risk().contains("semver"));
+        assert!(is_dependabot(Some("app/dependabot")));
+        assert!(!is_dependabot(None));
+
+        let mut p = pr("o/r", 2, "Bump a from 1 to 2", Category::Ready);
+        p.changed_files = 3;
+        assert_eq!(p.size(), "3 files (+1 -1)");
+        assert_eq!(p.label(false), "#2");
+        assert_eq!(p.update.name(), "a");
+        assert_eq!(
+            parse_title("Bump the dev group across 1 directory").name(),
+            "dev group"
+        );
+    }
+
+    #[test]
+    fn run_dispatches_to_subcommands() {
+        let mut server = Server::new();
+        let (light, _) = mock_prs(&mut server, false, &[]);
+        let args = DependabotListArgs {
+            org: None,
+            security: false,
+        };
+        run(&ctx(&server, true), DependabotCommand::List(args)).unwrap();
+        light.assert();
+    }
 
     /// A PR for tests, parsed from a title with the given state.
     pub fn pr(repo: &str, number: u64, title: &str, category: Category) -> DepPr {
