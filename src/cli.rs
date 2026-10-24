@@ -359,6 +359,10 @@ pub struct LabelsArgs {
     /// Remove a label, matched loosely against the repo's labels, repeatable
     #[arg(long, value_name = "NAME")]
     pub remove: Vec<String>,
+
+    /// Rank labels by words shared with the PR's title, body, branch, and files
+    #[arg(long, conflicts_with_all = ["add", "remove"])]
+    pub suggest: bool,
 }
 
 // -------------------------------------------------------------------------
