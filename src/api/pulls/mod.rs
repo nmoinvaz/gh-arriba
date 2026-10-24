@@ -9,12 +9,14 @@ use serde_json::{Value, json};
 
 use crate::api::{Client, PrRef, Repo};
 
+mod branch;
 mod comments;
 mod labels;
 mod pending;
 mod rollup;
 mod threads;
 
+pub use branch::{behind_by, file_at, rebase_branch};
 pub use comments::{
     RestComment, edit_issue_comment, edit_review, edit_review_comment, find_issue_comment,
     find_review_comment, issue_comment, review, review_comment,
@@ -31,8 +33,9 @@ pub use rollup::{CheckRun, StatusContext, StatusFields, checks_with_status, chec
 #[cfg(test)]
 pub use threads::Comment;
 pub use threads::{
-    IssueComment, PrThreads, ResolvedThread, Review, Thread, fetch_threads, is_bot, issue_comments,
-    last_review_time, reply_to_comment, reply_to_thread, reviews, set_thread_resolved,
+    IssueComment, PrThreads, ResolvedThread, Review, Thread, add_issue_comment, fetch_threads,
+    is_bot, issue_comments, last_review_time, reply_to_comment, reply_to_thread, reviews,
+    set_thread_resolved,
 };
 
 /// Pull request metadata most commands need.
@@ -135,14 +138,14 @@ pub fn fetch_pr(client: &Client, pr: &PrRef) -> Result<PrInfo> {
 
 /// A GraphQL user, bot, or other actor. Null for deleted accounts.
 #[derive(Clone, Debug, Deserialize)]
-pub struct Actor {
+struct Actor {
     #[serde(rename = "__typename")]
     pub typename: Option<String>,
     pub login: Option<String>,
 }
 
 /// Login of an actor, or "ghost" for deleted accounts.
-pub fn login_or_ghost(actor: Option<&Actor>) -> String {
+fn login_or_ghost(actor: Option<&Actor>) -> String {
     actor
         .and_then(|a| a.login.clone())
         .unwrap_or_else(|| "ghost".to_string())
@@ -263,7 +266,7 @@ fn query<T: DeserializeOwned>(client: &Client, query: &str, variables: Value) ->
 }
 
 /// Variables naming a pull request, as every PR query takes them.
-pub fn vars(pr: &PrRef) -> Value {
+fn vars(pr: &PrRef) -> Value {
     json!({
         "owner": pr.repo.owner,
         "repo": pr.repo.name,
