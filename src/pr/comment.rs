@@ -5,9 +5,9 @@ use serde_json::{Value, json};
 use std::sync::LazyLock;
 
 use crate::api::Repo;
+use crate::api::json::{login_of, str_of};
 use crate::cli::{CommentCommand, CommentEditArgs, CommentShowArgs};
 use crate::context::Ctx;
-use crate::json::{login_of, str_of};
 use crate::output::{indent, print_json};
 use crate::prompt;
 

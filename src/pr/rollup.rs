@@ -3,8 +3,8 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 use std::collections::HashMap;
 
+use crate::api::json::{opt_time_of, str_of};
 use crate::api::{Client, PrRef};
-use crate::json::{opt_time_of, str_of};
 use crate::pr::model::vars;
 
 /// One check run on the PR's head commit.

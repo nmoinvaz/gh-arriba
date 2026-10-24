@@ -2,6 +2,7 @@
 //! shape its requests and read its responses.
 
 mod client;
+pub mod json;
 mod repo;
 
 pub use client::{Client, encode_path, encode_segment, is_failed};

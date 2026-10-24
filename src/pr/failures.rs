@@ -4,10 +4,10 @@ use serde_json::Value;
 use std::fs;
 use std::path::PathBuf;
 
+use crate::api::json::str_of;
 use crate::api::{Repo, is_failed};
 use crate::cli::FailuresArgs;
 use crate::context::Ctx;
-use crate::json::str_of;
 use crate::log::{self, Excerpt};
 use crate::pr::model::fetch_pr;
 use crate::run::{download, name_matches, short_error};

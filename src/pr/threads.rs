@@ -7,10 +7,10 @@ use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::sync::LazyLock;
 
+use crate::api::json::{str_of, time_of};
 use crate::api::{Client, PrRef, Repo};
 use crate::cli::{ReplyArgs, ResolveArgs, ThreadsArgs};
 use crate::context::Ctx;
-use crate::json::{str_of, time_of};
 use crate::output::{first_lines, indent, print_json};
 use crate::pr::comment::{self, Kind};
 use crate::pr::model::{PrThreads, Thread, fetch_pr, fetch_threads, vars};

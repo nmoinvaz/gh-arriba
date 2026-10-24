@@ -3,9 +3,9 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::{Value, json};
 
+use crate::api::json::{login_of, time_of};
 use crate::cli::DumpArgs;
 use crate::context::Ctx;
-use crate::json::{login_of, time_of};
 use crate::pr::model::{PrInfo, Thread, fetch_pr, fetch_threads};
 use crate::pr::threads::line_span;
 
