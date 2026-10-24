@@ -37,6 +37,7 @@ gh arriba [options] <command>
 | `pr reply <ID> [BODY]` | Reply to a review comment or thread, body from stdin with `-` |
 | `pr resolve <ID>...` | Resolve or unresolve (`--undo`) review threads |
 | `pr comment show <URL\|ID>` | Print one review comment, issue comment, or review by its link or ID |
+| `pr comment edit <URL\|ID> [BODY]` | Replace the body of a comment or review you posted, body from stdin with `-` |
 | `pr review lines [PR]` | Print the diff line ranges that accept inline comments |
 | `pr review add <PATH:LINE[-END]> [BODY]` | Add an inline comment to your pending review |
 | `pr review show [PR]` | Print the comments in your pending review |
