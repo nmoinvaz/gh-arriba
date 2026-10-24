@@ -72,6 +72,8 @@ struct FailedJob {
     url: String,
     failed_steps: Vec<String>,
     log_path: Option<PathBuf>,
+    /// Whether the log was saved by an earlier call instead of downloaded now.
+    cached: bool,
     excerpt: Option<Excerpt>,
     /// Why the log is missing, such as a job cancelled before it started.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -115,6 +117,7 @@ fn inspect(
     base: &std::path::Path,
     context: usize,
     max: usize,
+    refresh: bool,
 ) -> FailedJob {
     let mut job = FailedJob {
         job_id: check.id,
@@ -125,6 +128,7 @@ fn inspect(
         url: check.url.clone(),
         failed_steps: Vec::new(),
         log_path: None,
+        cached: false,
         excerpt: None,
         error: None,
     };
@@ -148,16 +152,18 @@ fn inspect(
     let dir = base.join(job.run_id.to_string());
     let saved = fs::create_dir_all(&dir)
         .with_context(|| format!("Failed to create {}", dir.display()))
-        .and_then(|_| download(ctx, repo, check.id, &dir, &check.name))
-        .and_then(|path| {
+        // A failed job has finished, so its saved log is complete.
+        .and_then(|_| download(ctx, repo, check.id, &dir, &check.name, !refresh))
+        .and_then(|(path, cached)| {
             let text = fs::read_to_string(&path)
                 .with_context(|| format!("Failed to read {}", path.display()))?;
-            Ok((path, text))
+            Ok((path, cached, text))
         });
     match saved {
-        Ok((path, text)) => {
+        Ok((path, cached, text)) => {
             job.excerpt = Some(log::excerpt(&text, context, max));
             job.log_path = Some(path);
+            job.cached = cached;
         }
         Err(e) => job.error = Some(short_error(&e)),
     }
@@ -215,7 +221,9 @@ pub fn run(ctx: &Ctx, args: FailuresArgs) -> Result<()> {
                 .iter()
                 .map(|check| {
                     let (repo, base) = (&pr.repo, &base);
-                    s.spawn(move || inspect(ctx, repo, check, base, args.context, args.max))
+                    s.spawn(move || {
+                        inspect(ctx, repo, check, base, args.context, args.max, args.refresh)
+                    })
                 })
                 .collect();
             handles.into_iter().map(|h| h.join().unwrap()).collect()
@@ -264,7 +272,8 @@ fn render(report: &Report) -> String {
             out.push_str(&format!("  failed step: {}\n", job.failed_steps.join(", ")));
         }
         if let Some(path) = &job.log_path {
-            out.push_str(&format!("  log: {}\n", path.display()));
+            let note = if job.cached { " (saved earlier)" } else { "" };
+            out.push_str(&format!("  log: {}{note}\n", path.display()));
         }
         if let Some(e) = &job.error {
             out.push_str(&format!("  {e}\n"));
@@ -371,6 +380,7 @@ mod tests {
                 url: "https://github.com/o/r/actions/runs/10/job/1".to_string(),
                 failed_steps: vec!["Build".to_string()],
                 log_path: Some(PathBuf::from("/tmp/l/10/Ubuntu-1.log")),
+                cached: true,
                 excerpt: Some(log::excerpt("ok\n##[error]boom", 1, 5)),
                 error: None,
             }],
@@ -387,7 +397,7 @@ mod tests {
              CI / Ubuntu (failure)\n  \
              https://github.com/o/r/actions/runs/10/job/1\n  \
              failed step: Build\n  \
-             log: /tmp/l/10/Ubuntu-1.log\n  \
+             log: /tmp/l/10/Ubuntu-1.log (saved earlier)\n  \
              line 1:\n    \
              ok\n    \
              ##[error]boom\n\

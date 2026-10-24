@@ -75,6 +75,8 @@ struct Downloaded {
     name: String,
     conclusion: Option<String>,
     path: PathBuf,
+    /// Whether the log was saved by an earlier call instead of downloaded now.
+    cached: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     excerpt: Option<Excerpt>,
 }
@@ -176,10 +178,11 @@ fn logs(ctx: &Ctx, args: LogsArgs) -> Result<()> {
     let dir = base.join(run_id.to_string());
     fs::create_dir_all(&dir).with_context(|| format!("Failed to create {}", dir.display()))?;
 
+    let refresh = args.refresh;
     let mut downloaded = Vec::new();
     // Each log is a redirect to blob storage, so fetch a few at a time.
     for batch in jobs.chunks(PARALLEL_DOWNLOADS) {
-        let results: Vec<(&Value, Result<PathBuf>)> = std::thread::scope(|s| {
+        let results: Vec<(&Value, Result<(PathBuf, bool)>)> = std::thread::scope(|s| {
             let handles: Vec<_> = batch
                 .iter()
                 .map(|job| {
@@ -187,7 +190,9 @@ fn logs(ctx: &Ctx, args: LogsArgs) -> Result<()> {
                     s.spawn(move || {
                         let id = job["id"].as_u64().unwrap_or(0);
                         let name = job["name"].as_str().unwrap_or("job");
-                        (job, download(ctx, repo, id, dir, name))
+                        // A running job's log is still growing, so only finished ones are reused.
+                        let reuse = !refresh && job["status"].as_str() == Some("completed");
+                        (job, download(ctx, repo, id, dir, name, reuse))
                     })
                 })
                 .collect();
@@ -199,7 +204,7 @@ fn logs(ctx: &Ctx, args: LogsArgs) -> Result<()> {
             let name = job["name"].as_str().unwrap_or("job").to_string();
             let conclusion = job["conclusion"].as_str().map(str::to_string);
             match result {
-                Ok(path) => {
+                Ok((path, cached)) => {
                     let excerpt = if args.errors {
                         let text = fs::read_to_string(&path)
                             .with_context(|| format!("Failed to read {}", path.display()))?;
@@ -209,7 +214,8 @@ fn logs(ctx: &Ctx, args: LogsArgs) -> Result<()> {
                     };
                     if !ctx.json {
                         let label = conclusion.as_deref().unwrap_or("running");
-                        println!("{label:<10} {}", path.display());
+                        let note = if cached { " (saved earlier)" } else { "" };
+                        println!("{label:<10} {}{note}", path.display());
                         match &excerpt {
                             Some(x) if x.blocks.is_empty() => println!("  no error lines found"),
                             Some(x) => print!("{}", log::render(x, "  ")),
@@ -221,6 +227,7 @@ fn logs(ctx: &Ctx, args: LogsArgs) -> Result<()> {
                         name,
                         conclusion,
                         path,
+                        cached,
                         excerpt,
                     });
                 }
@@ -251,20 +258,35 @@ pub(crate) fn short_error(e: &anyhow::Error) -> String {
     }
 }
 
+/// Save a job's log under `dir` and return its path, plus whether a copy saved earlier was used.
+/// A finished job's log never changes and a rerun gets a new job ID, so with `reuse` set an
+/// existing file is kept instead of downloading it again.
 pub(crate) fn download(
     ctx: &Ctx,
     repo: &Repo,
     job_id: u64,
     dir: &Path,
     name: &str,
-) -> Result<PathBuf> {
+    reuse: bool,
+) -> Result<(PathBuf, bool)> {
+    let path = dir.join(format!("{}-{job_id}.log", sanitize(name)));
+    if reuse && has_saved_copy(&path) {
+        return Ok((path, true));
+    }
     // The endpoint redirects to blob storage, and reqwest drops the token on that hop.
     let text = ctx
         .client
         .get_text(&format!("{}/actions/jobs/{job_id}/logs", repo.api()))?;
-    let path = dir.join(format!("{}-{job_id}.log", sanitize(name)));
-    fs::write(&path, text).with_context(|| format!("Failed to write {}", path.display()))?;
-    Ok(path)
+    // Write beside the final name and rename, so an interrupted download is never reused.
+    let part = path.with_extension("log.part");
+    fs::write(&part, text).with_context(|| format!("Failed to write {}", part.display()))?;
+    fs::rename(&part, &path).with_context(|| format!("Failed to write {}", path.display()))?;
+    Ok((path, false))
+}
+
+/// Whether a non-empty log was saved at `path` by an earlier download.
+fn has_saved_copy(path: &Path) -> bool {
+    fs::metadata(path).is_ok_and(|m| m.is_file() && m.len() > 0)
 }
 
 fn watch_runs(ctx: &Ctx, args: WatchArgs) -> Result<()> {
@@ -555,6 +577,20 @@ mod tests {
         );
         assert_eq!(sanitize("build (x86_64, 1.2)"), "build-x86_64-1.2");
         assert_eq!(sanitize("///"), "job");
+    }
+
+    #[test]
+    fn saved_copy_needs_a_non_empty_file() {
+        let dir = std::env::temp_dir().join(format!("gh-arriba-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("build-1.log");
+        assert!(!has_saved_copy(&path));
+        fs::write(&path, "").unwrap();
+        assert!(!has_saved_copy(&path));
+        fs::write(&path, "log").unwrap();
+        assert!(has_saved_copy(&path));
+        assert!(!has_saved_copy(&dir));
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

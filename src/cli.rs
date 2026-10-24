@@ -309,6 +309,10 @@ pub struct FailuresArgs {
     /// Error blocks to show per job
     #[arg(long, value_name = "N", default_value_t = crate::log::MAX)]
     pub max: usize,
+
+    /// Download logs again even when a saved copy exists
+    #[arg(long)]
+    pub refresh: bool,
 }
 
 #[derive(Args)]
@@ -392,6 +396,10 @@ pub struct LogsArgs {
     /// Print each job's error lines after saving its log
     #[arg(long)]
     pub errors: bool,
+
+    /// Download logs again even when a saved copy exists
+    #[arg(long)]
+    pub refresh: bool,
 }
 
 #[derive(Args)]
