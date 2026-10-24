@@ -1,11 +1,11 @@
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use serde_json::Value;
-use std::process::Command;
 
 use crate::cli::{Bump, ReleaseArgs};
 use crate::context::{Ctx, Repo};
 use crate::github::Client;
+use crate::run::watch;
 use crate::workflow::{self, Input, Workflow};
 use crate::{output, prompt};
 
@@ -388,20 +388,12 @@ pub fn run(ctx: &Ctx, args: ReleaseArgs) -> Result<()> {
         let id = plan
             .run_id
             .context("Can't watch, the dispatched run did not appear in time")?;
-        let status = Command::new("gh")
-            .args([
-                "run",
-                "watch",
-                &id.to_string(),
-                "--repo",
-                &plan.repo,
-                "--exit-status",
-            ])
-            .status()
-            .context("Failed to run gh run watch")?;
-        if !status.success() {
-            bail!("Release run {id} did not succeed");
+        let states = watch::watch(ctx, &[(repo, id)], &watch::Wait::default())?;
+        // With --json the plan is the document on stdout, so the summary stays human-only.
+        if !ctx.json {
+            print!("{}", watch::render(&states));
         }
+        watch::check(&states).with_context(|| format!("Release run {id} did not succeed"))?;
     }
     Ok(())
 }
