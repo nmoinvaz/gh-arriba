@@ -365,12 +365,15 @@ const STOP_WORDS: &[&str] = &[
 
 /// One label per line, applied ones marked with `*`.
 fn render(labels: &[Label]) -> String {
-    let width = labels.iter().map(|l| l.name.len()).max().unwrap_or(0);
-    let mut out = String::new();
-    for l in labels {
-        let mark = if l.applied { "*" } else { " " };
-        let line = format!("{mark} {:<width$}  {}", l.name, l.description);
-        out.push_str(line.trim_end());
+    let rows: Vec<Vec<String>> = labels
+        .iter()
+        .map(|l| {
+            let mark = if l.applied { "*" } else { " " };
+            vec![format!("{mark} {}", l.name), l.description.clone()]
+        })
+        .collect();
+    let mut out = output::table(&rows, "");
+    if !out.is_empty() {
         out.push('\n');
     }
     out

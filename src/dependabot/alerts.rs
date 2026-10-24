@@ -4,11 +4,12 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use std::collections::HashSet;
 
-use super::{Scope, fetch_light, parse_title, table};
+use super::{Scope, fetch_light, parse_title};
 use crate::cli::{DependabotAlertsArgs, DependabotDismissArgs};
 use crate::context::Ctx;
 use crate::github::Client;
 use crate::output::print_json;
+use crate::output::table;
 use crate::pr::model::str_of;
 use crate::prompt;
 

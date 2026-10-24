@@ -7,8 +7,9 @@ use std::fmt;
 
 use crate::cli::RunnersArgs;
 use crate::context::{Ctx, Repo};
-use crate::dependabot::{Scope, table};
+use crate::dependabot::Scope;
 use crate::github::Client;
+use crate::output::table;
 use crate::{output, parallel};
 
 /// A self-hosted runner as the runners API reports it.

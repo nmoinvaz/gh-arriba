@@ -2,10 +2,11 @@ use anyhow::Result;
 use serde::Serialize;
 use std::collections::BTreeSet;
 
-use super::{Category, DepPr, LockStep, Overview, Scope, alerts, table};
+use super::{Category, DepPr, LockStep, Overview, Scope, alerts};
 use crate::cli::DependabotListArgs;
 use crate::context::Ctx;
 use crate::output::print_json;
+use crate::output::table;
 
 pub fn run(ctx: &Ctx, args: DependabotListArgs) -> Result<()> {
     let scope = Scope::new(ctx, args.org)?;
