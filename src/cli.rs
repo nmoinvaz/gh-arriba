@@ -310,6 +310,10 @@ pub struct FailuresArgs {
     #[arg(long, value_name = "N", default_value_t = crate::log::MAX)]
     pub max: usize,
 
+    /// Show the lines matching this regex instead of the error lines
+    #[arg(long, value_name = "REGEX", value_parser = parse_regex)]
+    pub grep: Option<regex::Regex>,
+
     /// Download logs again even when a saved copy exists
     #[arg(long)]
     pub refresh: bool,
@@ -396,6 +400,10 @@ pub struct LogsArgs {
     /// Print each job's error lines after saving its log
     #[arg(long)]
     pub errors: bool,
+
+    /// Print the lines matching this regex instead of the error lines
+    #[arg(long, value_name = "REGEX", value_parser = parse_regex, conflicts_with = "errors")]
+    pub grep: Option<regex::Regex>,
 
     /// Download logs again even when a saved copy exists
     #[arg(long)]
@@ -680,4 +688,9 @@ pub enum ConfigCommand {
     Delete,
     /// Open the project's gist in a web browser
     Open,
+}
+
+/// Parse a `--grep` pattern, reporting a bad one as a usage error.
+fn parse_regex(s: &str) -> Result<regex::Regex, String> {
+    regex::Regex::new(s).map_err(|e| e.to_string())
 }

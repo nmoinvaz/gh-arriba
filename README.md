@@ -47,7 +47,7 @@ gh arriba [options] <command>
 | `pr dump [PR]` | Write the whole discussion as grep-friendly text |
 | `pr checks [PR]...` | Summarize state, mergeability, reviews, and checks, failing when a check failed |
 | `pr retry [PR]` | Rerun failed and cancelled checks on a PR, or all your PRs with `--mine` |
-| `pr failures [PR]` | Show failed checks with their failed steps and error lines, saving full logs |
+| `pr failures [PR]` | Show failed checks with their failed steps and error lines, or `--grep` matches, saving full logs |
 | `pr rebase [PR]` | Rebase onto the base branch, signed locally or server-side with `--remote` |
 | `pr reviewers [PR]` | Suggest reviewers from top contributors and request one with `--add` |
 | `pr labels [PR]` | List the repo's labels, `--suggest` some for the PR, and `--add` or `--remove` them by close match |
@@ -60,7 +60,7 @@ gh arriba [options] <command>
 
 | Command | Description |
 |---------|-------------|
-| `run logs <RUN_OR_JOB>` | Download job logs to files for searching, picking jobs by name with `--job` and printing error lines with `--errors` |
+| `run logs <RUN_OR_JOB>` | Download job logs to files for searching, picking jobs by name with `--job` and printing error lines with `--errors` or matches with `--grep` |
 | `run watch [RUN]...` | Follow runs until their jobs finish, by default every run for the local HEAD |
 | `run dispatch <WORKFLOW>` | Dispatch any workflow with `-f` inputs, printing its run and following it with `--watch` |
 | `release` | Dispatch the repo's release workflow with a version bump, previewing with `--dry-run` |
@@ -157,6 +157,13 @@ Download only the failed job logs from a run and search them:
 ```
 gh arriba run logs https://github.com/owner/repo/actions/runs/123456 --failed -o logs
 grep -rn "error:" logs
+```
+
+Or search them in place with `--grep`, which matches the lines without their timestamps and escape
+codes and labels each match with its line in the saved log. `pr failures` takes it too:
+
+```
+gh arriba pr failures --grep 'undefined reference|LNK2019'
 ```
 
 Logs of finished jobs are saved once, and later `run logs` and `pr failures` calls read the saved copy

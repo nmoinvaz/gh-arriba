@@ -55,8 +55,38 @@ pub fn excerpt(raw: &str, context: usize, max: usize) -> Excerpt {
             .filter(|&i| FALLBACK.is_match(&lines[i]))
             .collect();
     }
+    blocks(&lines, hits, context, max)
+}
 
-    // Merge windows that overlap or touch, so shared context prints once.
+/// Lines of a job log matching `pattern`, with `context` lines before each, keeping the first
+/// `max` blocks. Matching runs on cleaned lines, so timestamps and escape codes never match.
+pub fn grep(raw: &str, pattern: &Regex, context: usize, max: usize) -> Excerpt {
+    let lines: Vec<String> = raw.lines().map(clean_line).collect();
+    let hits = (0..lines.len())
+        .filter(|&i| pattern.is_match(&lines[i]))
+        .collect();
+    blocks(&lines, hits, context, max)
+}
+
+/// The excerpt a caller asked for: lines matching `pattern` when given, errors otherwise.
+pub fn select(raw: &str, pattern: Option<&Regex>, context: usize, max: usize) -> Excerpt {
+    match pattern {
+        Some(re) => grep(raw, re, context, max),
+        None => excerpt(raw, context, max),
+    }
+}
+
+/// What to say when [`select`] found nothing.
+pub fn nothing_found(pattern: Option<&str>) -> String {
+    match pattern {
+        Some(re) => format!("no lines match {re}"),
+        None => "no error lines found".to_string(),
+    }
+}
+
+/// Cut windows of `context` lines ending at each hit, merging windows that overlap or touch so
+/// shared context prints once.
+fn blocks(lines: &[String], hits: Vec<usize>, context: usize, max: usize) -> Excerpt {
     let mut windows: Vec<(usize, usize)> = Vec::new();
     for i in hits {
         let start = i.saturating_sub(context);
@@ -176,5 +206,23 @@ mod tests {
             render(&e, ""),
             "line 2:\n  error[E0308]: mismatched types\n...\nline 4:\n  test foo ... FAILED\n"
         );
+    }
+
+    #[test]
+    fn grep_matches_cleaned_lines() {
+        let pattern = Regex::new(r"(?i)abort_on_error|second").unwrap();
+        assert_eq!(
+            grep(LOG, &pattern, 0, 10).blocks,
+            vec![Block {
+                line: 8,
+                lines: vec![
+                    "ASAN_OPTIONS=abort_on_error=1".to_string(),
+                    "##[error]Second failure".to_string(),
+                ],
+            }]
+        );
+        // The timestamp is stripped before matching.
+        let stamp = Regex::new("2026-01-01").unwrap();
+        assert!(grep(LOG, &stamp, 0, 10).blocks.is_empty());
     }
 }

@@ -205,10 +205,15 @@ fn logs(ctx: &Ctx, args: LogsArgs) -> Result<()> {
             let conclusion = job["conclusion"].as_str().map(str::to_string);
             match result {
                 Ok((path, cached)) => {
-                    let excerpt = if args.errors {
+                    let excerpt = if args.errors || args.grep.is_some() {
                         let text = fs::read_to_string(&path)
                             .with_context(|| format!("Failed to read {}", path.display()))?;
-                        Some(log::excerpt(&text, log::CONTEXT, log::MAX))
+                        Some(log::select(
+                            &text,
+                            args.grep.as_ref(),
+                            log::CONTEXT,
+                            log::MAX,
+                        ))
                     } else {
                         None
                     };
@@ -217,7 +222,12 @@ fn logs(ctx: &Ctx, args: LogsArgs) -> Result<()> {
                         let note = if cached { " (saved earlier)" } else { "" };
                         println!("{label:<10} {}{note}", path.display());
                         match &excerpt {
-                            Some(x) if x.blocks.is_empty() => println!("  no error lines found"),
+                            Some(x) if x.blocks.is_empty() => {
+                                println!(
+                                    "  {}",
+                                    log::nothing_found(args.grep.as_ref().map(|re| re.as_str()))
+                                )
+                            }
                             Some(x) => print!("{}", log::render(x, "  ")),
                             None => {}
                         }
