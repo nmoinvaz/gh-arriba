@@ -183,17 +183,16 @@ struct Candidate {
 fn fetch_candidates(client: &Client, scope: &Scope) -> Result<Vec<Candidate>> {
     let nodes = fetch_light(client, scope)?;
     Ok(nodes
-        .iter()
+        .into_iter()
         .map(|n| {
-            let title = str_of(n, "title");
-            let update = parse_title(&title);
+            let update = parse_title(&n.title);
             Candidate {
-                repo: str_of(&n["repository"], "nameWithOwner"),
+                repo: n.repository.name_with_owner,
                 package: (!update.group).then_some(update.package),
                 pr: FixPr {
-                    number: n["number"].as_u64().unwrap_or(0),
-                    title,
-                    url: str_of(n, "url"),
+                    number: n.number,
+                    title: n.title,
+                    url: n.url,
                 },
             }
         })

@@ -2,6 +2,7 @@
 //! shape its requests and read its responses.
 
 mod client;
+pub mod dependabot;
 pub mod json;
 mod repo;
 
