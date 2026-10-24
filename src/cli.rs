@@ -431,6 +431,10 @@ pub struct WaitArgs {
     /// Minutes to wait before giving up
     #[arg(long, value_name = "MINS", default_value_t = 60)]
     pub timeout: u64,
+
+    /// Only wait for jobs whose name contains this, ignoring case
+    #[arg(long, value_name = "PATTERN")]
+    pub job: Option<String>,
 }
 
 // -------------------------------------------------------------------------
