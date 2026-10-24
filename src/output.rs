@@ -28,6 +28,38 @@ pub fn first_lines(text: &str, max: usize) -> String {
     )
 }
 
+/// Align rows into columns separated by two spaces. The last column is left unpadded.
+pub fn table(rows: &[Vec<String>], indent: &str) -> String {
+    let cols = rows.iter().map(Vec::len).max().unwrap_or(0);
+    let widths: Vec<usize> = (0..cols)
+        .map(|c| {
+            rows.iter()
+                .filter_map(|r| r.get(c))
+                .map(|s| s.chars().count())
+                .max()
+                .unwrap_or(0)
+        })
+        .collect();
+    rows.iter()
+        .map(|row| {
+            let cells: Vec<String> = row
+                .iter()
+                .enumerate()
+                .map(|(i, cell)| {
+                    if i + 1 == row.len() {
+                        cell.clone()
+                    } else {
+                        let pad = widths[i] - cell.chars().count();
+                        format!("{cell}{}", " ".repeat(pad))
+                    }
+                })
+                .collect();
+            format!("{indent}{}", cells.join("  ").trim_end())
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// A run time such as `45s`, `3m12s`, or `1h05m`. Negative spans, from clock skew, read as `0s`.
 pub fn duration(seconds: i64) -> String {
     let s = seconds.max(0);
@@ -44,6 +76,15 @@ pub fn duration(seconds: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn table_aligns_columns() {
+        let rows = vec![
+            vec!["#3".to_string(), "a".to_string(), "x".to_string()],
+            vec!["#12".to_string(), "bbb".to_string(), "y".to_string()],
+        ];
+        assert_eq!(table(&rows, "  "), "  #3   a    x\n  #12  bbb  y");
+    }
 
     #[test]
     fn durations_read_naturally() {

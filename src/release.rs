@@ -264,17 +264,22 @@ fn render(plan: &Plan) -> String {
     );
     if !plan.inputs.is_empty() {
         out.push_str("Inputs:\n");
-        let width = plan.inputs.iter().map(|i| i.name.len()).max().unwrap_or(0);
-        for i in &plan.inputs {
-            let value = i.value.as_deref().unwrap_or("");
-            let note = match i.source.as_str() {
-                "default" => "  (default)",
-                "unset" => "  (unset)",
-                "missing" => "  (required, no value)",
-                _ => "",
-            };
-            out.push_str(&format!("  {:<width$}  {value}{note}\n", i.name));
-        }
+        let rows: Vec<Vec<String>> = plan
+            .inputs
+            .iter()
+            .map(|i| {
+                let value = i.value.as_deref().unwrap_or("");
+                let note = match i.source.as_str() {
+                    "default" => "  (default)",
+                    "unset" => "  (unset)",
+                    "missing" => "  (required, no value)",
+                    _ => "",
+                };
+                vec![i.name.clone(), format!("{value}{note}")]
+            })
+            .collect();
+        out.push_str(&output::table(&rows, "  "));
+        out.push('\n');
     }
     out
 }

@@ -3,10 +3,11 @@ use serde::Serialize;
 use serde_json::json;
 
 use super::list::print_group;
-use super::{Category, DepPr, LockStep, Overview, REBASE_COMMENT, Scope, table};
+use super::{Category, DepPr, LockStep, Overview, REBASE_COMMENT, Scope};
 use crate::cli::{DependabotMergeArgs, MergeMethod};
 use crate::context::{Ctx, Repo};
 use crate::output::print_json;
+use crate::output::table;
 use crate::prompt;
 
 /// How one PR gets merged.
