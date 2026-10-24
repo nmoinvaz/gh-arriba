@@ -75,6 +75,12 @@ fn is_failed(conclusion: Option<&str>) -> bool {
     matches!(conclusion, Some("failure" | "cancelled" | "timed_out"))
 }
 
+/// Whether a job name contains any of `patterns`, ignoring case. No patterns keeps every job.
+pub(crate) fn name_matches(name: &str, patterns: &[String]) -> bool {
+    let name = name.to_lowercase();
+    patterns.is_empty() || patterns.iter().any(|p| name.contains(&p.to_lowercase()))
+}
+
 /// Turn a job name into a file name, keeping it readable.
 fn sanitize(name: &str) -> String {
     let mut out = String::new();
@@ -140,10 +146,19 @@ fn logs(ctx: &Ctx, args: LogsArgs) -> Result<()> {
         }
         Target::Unknown(_) => unreachable!("resolved above"),
     };
+    let jobs: Vec<Value> = jobs
+        .into_iter()
+        .filter(|j| name_matches(j["name"].as_str().unwrap_or_default(), &args.jobs))
+        .collect();
 
     if jobs.is_empty() {
         let what = if args.failed { "failed jobs" } else { "jobs" };
-        anyhow::bail!("No {what} in run {run_id}");
+        let named = if args.jobs.is_empty() {
+            String::new()
+        } else {
+            format!(" matching {}", args.jobs.join(", "))
+        };
+        anyhow::bail!("No {what}{named} in run {run_id}");
     }
 
     let base = args
@@ -283,6 +298,15 @@ mod tests {
         );
         assert_eq!(sanitize("build (x86_64, 1.2)"), "build-x86_64-1.2");
         assert_eq!(sanitize("///"), "job");
+    }
+
+    #[test]
+    fn job_name_filter() {
+        let patterns = vec!["windows".to_string(), "Lint".to_string()];
+        assert!(name_matches("Build Windows MSVC", &patterns));
+        assert!(name_matches("lint", &patterns));
+        assert!(!name_matches("Ubuntu GCC", &patterns));
+        assert!(name_matches("anything", &[]));
     }
 
     #[test]
