@@ -66,6 +66,8 @@ pub enum PrCommand {
     Apply(ApplyArgs),
     /// Write the whole discussion as grep-friendly text
     Dump(DumpArgs),
+    /// Summarize a PR's state and checks, failing when a check failed
+    Checks(ChecksArgs),
     /// Rerun failed and cancelled checks on a PR or all your PRs
     Retry(RetryArgs),
     /// Show failed checks with their failed steps and error lines
@@ -246,6 +248,13 @@ pub struct DumpArgs {
     /// Write to this file instead of stdout
     #[arg(short, long, value_name = "FILE")]
     pub out: Option<PathBuf>,
+}
+
+#[derive(Args)]
+pub struct ChecksArgs {
+    /// Numbers, URLs, owner/repo#N, or branches (default: PR for the current branch)
+    #[arg(value_name = "PR")]
+    pub prs: Vec<String>,
 }
 
 #[derive(Args)]

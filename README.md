@@ -45,6 +45,7 @@ gh arriba [options] <command>
 | `pr review discard [PR]` | Delete your pending review |
 | `pr apply [PR]` | Apply reviewers' suggestion blocks to the working tree |
 | `pr dump [PR]` | Write the whole discussion as grep-friendly text |
+| `pr checks [PR]...` | Summarize state, mergeability, reviews, and checks, failing when a check failed |
 | `pr retry [PR]` | Rerun failed and cancelled checks on a PR, or all your PRs with `--mine` |
 | `pr failures [PR]` | Show failed checks with their failed steps and error lines, saving full logs |
 | `pr rebase [PR]` | Rebase onto the base branch, signed locally or server-side with `--remote` |
