@@ -2,7 +2,8 @@ use anyhow::{Result, bail};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
+use std::fmt;
 
 use crate::cli::RunnersArgs;
 use crate::context::{Ctx, Repo};
@@ -87,7 +88,7 @@ fn access_hint(scope: &Scope) -> String {
 //  jobs
 // -------------------------------------------------------------------------
 
-/// A workflow job that is running or waiting for a runner.
+/// A workflow job, usually one running or waiting for a runner.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 struct Job {
     repo: String,
@@ -95,7 +96,7 @@ struct Job {
     name: String,
     run_id: u64,
     job_id: u64,
-    /// "in_progress" or "queued".
+    /// "in_progress", "queued", or "completed".
     status: String,
     /// Runner the job was assigned to, absent while queued.
     runner: Option<String>,
@@ -103,6 +104,8 @@ struct Job {
     labels: Vec<String>,
     created_at: Option<DateTime<Utc>>,
     started_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    completed_at: Option<DateTime<Utc>>,
     url: String,
 }
 
@@ -132,6 +135,7 @@ fn parse_job(v: &Value, repo: &Repo, workflow: &str) -> Job {
             .collect(),
         created_at: time("created_at"),
         started_at: time("started_at"),
+        completed_at: time("completed_at"),
         url: v["html_url"].as_str().unwrap_or_default().to_string(),
     }
 }
@@ -176,28 +180,31 @@ fn org_repos(client: &Client, org: &str) -> Result<Vec<Repo>> {
         .collect())
 }
 
-/// Requests in flight at once when scanning an organization.
-const PARALLEL_REPOS: usize = 8;
+/// Requests in flight at once when scanning several repos or runs.
+const PARALLEL: usize = 8;
 
-/// Run `f` over every repo a few at a time. A repo that fails is skipped with a warning, so one
+/// Run `f` over every item a few at a time. An item that fails is skipped with a warning, so one
 /// repo without Actions doesn't hide the rest.
-fn each_repo<T: Send>(repos: &[Repo], f: impl Fn(&Repo) -> Result<Vec<T>> + Sync) -> Vec<T> {
+fn in_parallel<I: Sync + fmt::Display, T: Send>(
+    items: &[I],
+    f: impl Fn(&I) -> Result<Vec<T>> + Sync,
+) -> Vec<T> {
     let mut out = Vec::new();
-    for batch in repos.chunks(PARALLEL_REPOS) {
-        let results: Vec<(&Repo, Result<Vec<T>>)> = std::thread::scope(|s| {
+    for batch in items.chunks(PARALLEL) {
+        let results: Vec<(&I, Result<Vec<T>>)> = std::thread::scope(|s| {
             let handles: Vec<_> = batch
                 .iter()
-                .map(|repo| {
+                .map(|item| {
                     let f = &f;
-                    s.spawn(move || (repo, f(repo)))
+                    s.spawn(move || (item, f(item)))
                 })
                 .collect();
             handles.into_iter().map(|h| h.join().unwrap()).collect()
         });
-        for (repo, result) in results {
+        for (item, result) in results {
             match result {
-                Ok(items) => out.extend(items),
-                Err(e) => eprintln!("warning: skipped {repo}: {e:#}"),
+                Ok(found) => out.extend(found),
+                Err(e) => eprintln!("warning: skipped {item}: {e:#}"),
             }
         }
     }
@@ -224,6 +231,177 @@ fn assign(runners: &mut [Runner], jobs: Vec<Job>) -> Vec<Job> {
 }
 
 // -------------------------------------------------------------------------
+//  inferred from jobs
+// -------------------------------------------------------------------------
+
+/// A workflow run whose jobs show which runners picked them up.
+struct RunRef {
+    repo: Repo,
+    id: u64,
+    workflow: String,
+}
+
+impl fmt::Display for RunRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} run {}", self.repo, self.id)
+    }
+}
+
+/// A self-hosted runner seen in recent jobs, for tokens the runners API refuses.
+#[derive(Debug, PartialEq, Serialize)]
+struct SeenRunner {
+    name: String,
+    /// Labels its jobs asked for, which may be fewer than the runner has.
+    labels: Vec<String>,
+    /// Whether one of its jobs is in progress.
+    running: bool,
+    last_seen: Option<DateTime<Utc>>,
+    last_job: Job,
+}
+
+/// The most recent `runs` runs of a repo.
+fn recent_runs(client: &Client, repo: &Repo, runs: usize) -> Result<Vec<RunRef>> {
+    let page = client.get(&format!(
+        "{}/actions/runs?per_page={}",
+        repo.api(),
+        runs.clamp(1, 100)
+    ))?;
+    Ok(page["workflow_runs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|r| {
+            Some(RunRef {
+                repo: repo.clone(),
+                id: r["id"].as_u64()?,
+                workflow: r["name"].as_str().unwrap_or_default().to_string(),
+            })
+        })
+        .collect())
+}
+
+/// The `limit` most recently pushed repositories of an organization.
+fn recent_org_repos(client: &Client, org: &str, limit: usize) -> Result<Vec<Repo>> {
+    let page = client.get(&format!(
+        "orgs/{org}/repos?type=all&sort=pushed&direction=desc&per_page=100"
+    ))?;
+    Ok(page
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|r| r["archived"].as_bool() != Some(true))
+        .filter_map(|r| Repo::parse(r["full_name"].as_str()?).ok())
+        .take(limit)
+        .collect())
+}
+
+/// Every job of the recent runs in `repos`.
+fn recent_jobs(client: &Client, repos: &[Repo], runs: usize) -> Vec<Job> {
+    let refs = in_parallel(repos, |repo| recent_runs(client, repo, runs));
+    in_parallel(&refs, |run| {
+        let path = format!(
+            "{}/actions/runs/{}/jobs?filter=latest",
+            run.repo.api(),
+            run.id
+        );
+        Ok(client
+            .get_all_in(&path, "jobs")?
+            .iter()
+            .map(|j| parse_job(j, &run.repo, &run.workflow))
+            .collect())
+    })
+}
+
+/// GitHub-hosted runners are named `GitHub Actions N` and aren't worth listing.
+fn is_hosted(runner: &str) -> bool {
+    runner.starts_with("GitHub Actions ")
+}
+
+/// When a job last showed its runner was alive.
+fn seen_at(job: &Job) -> Option<DateTime<Utc>> {
+    job.completed_at.or(job.started_at)
+}
+
+/// Group jobs by the self-hosted runner that ran them, keeping each runner's latest job.
+fn infer(jobs: &[Job]) -> Vec<SeenRunner> {
+    let mut by_name: BTreeMap<String, SeenRunner> = BTreeMap::new();
+    for job in jobs {
+        let Some(name) = job.runner.as_deref().filter(|n| !is_hosted(n)) else {
+            continue;
+        };
+        let seen = by_name
+            .entry(name.to_string())
+            .or_insert_with(|| SeenRunner {
+                name: name.to_string(),
+                labels: Vec::new(),
+                running: false,
+                last_seen: None,
+                last_job: job.clone(),
+            });
+        for label in &job.labels {
+            if !seen.labels.contains(label) {
+                seen.labels.push(label.clone());
+            }
+        }
+        // A running job is the most recent one a runner can have.
+        let running = job.status == "in_progress";
+        if running || (!seen.running && seen_at(job) >= seen.last_seen) {
+            seen.last_job = job.clone();
+            seen.last_seen = seen_at(job);
+        }
+        seen.running |= running;
+    }
+    by_name.into_values().collect()
+}
+
+#[derive(Serialize)]
+struct InferredReport {
+    scope: String,
+    /// Always true, so scripts can tell this from the runners API listing.
+    inferred: bool,
+    runners: Vec<SeenRunner>,
+    queued: Vec<Job>,
+}
+
+/// Runners seen in recent jobs, then the jobs still queued among them.
+fn render_inferred(report: &InferredReport, runs: usize, now: DateTime<Utc>) -> String {
+    let mut out = format!(
+        "Inferred from the jobs of the last {runs} runs, not the runners API, so idle and offline runners look alike.\n"
+    );
+    if report.runners.is_empty() {
+        out.push_str(&format!(
+            "No self-hosted runners ran those jobs in {}.\n",
+            report.scope
+        ));
+    } else {
+        let mut rows = vec![vec![
+            "NAME".to_string(),
+            "LAST SEEN".to_string(),
+            "LAST JOB".to_string(),
+            "LABELS".to_string(),
+        ]];
+        for r in &report.runners {
+            let seen = match (r.running, r.last_seen) {
+                (true, _) => "running".to_string(),
+                (false, Some(t)) => format!("{} ago", elapsed(t, now)),
+                (false, None) => "unknown".to_string(),
+            };
+            let j = &r.last_job;
+            rows.push(vec![
+                r.name.clone(),
+                seen,
+                format!("{}  {} / {}", j.repo, j.workflow, j.name),
+                r.labels.join(", "),
+            ]);
+        }
+        out.push_str(&table(&rows, ""));
+        out.push('\n');
+    }
+    out.push_str(&render_queue(&report.queued, now));
+    out
+}
+
+// -------------------------------------------------------------------------
 //  run
 // -------------------------------------------------------------------------
 
@@ -238,10 +416,19 @@ struct Report {
 
 pub fn run(ctx: &Ctx, args: RunnersArgs) -> Result<()> {
     let client = &ctx.client;
-    let scope = Scope::new(ctx, args.org)?;
+    let scope = Scope::new(ctx, args.org.clone())?;
+    if args.from_jobs {
+        return run_inferred(ctx, &scope, &args);
+    }
     let mut runners: Vec<Runner> = match client.get_all_in(&runners_path(&scope), "runners") {
         Ok(list) => list.iter().map(parse_runner).collect(),
-        Err(e) if is_forbidden(&e) => bail!("{}\n{e:#}", access_hint(&scope)),
+        Err(e) if is_forbidden(&e) => {
+            eprintln!(
+                "warning: {} Falling back to recent jobs.",
+                access_hint(&scope)
+            );
+            return run_inferred(ctx, &scope, &args);
+        }
         Err(e) => return Err(e),
     };
     runners.sort_by_key(|r| r.name.to_lowercase());
@@ -252,7 +439,7 @@ pub fn run(ctx: &Ctx, args: RunnersArgs) -> Result<()> {
         Scope::Repo(repo) => Some(active_jobs(client, repo)?),
         Scope::Org(org) if args.queued || runners.iter().any(|r| r.busy) => {
             let repos = org_repos(client, org)?;
-            Some(each_repo(&repos, |repo| active_jobs(client, repo)))
+            Some(in_parallel(&repos, |repo| active_jobs(client, repo)))
         }
         Scope::Org(_) => None,
     };
@@ -267,6 +454,36 @@ pub fn run(ctx: &Ctx, args: RunnersArgs) -> Result<()> {
         return output::print_json(&report);
     }
     print!("{}", render(&report, &scope, Utc::now()));
+    Ok(())
+}
+
+/// List runners from the jobs of recent runs, for tokens without admin access.
+fn run_inferred(ctx: &Ctx, scope: &Scope, args: &RunnersArgs) -> Result<()> {
+    let client = &ctx.client;
+    let repos = match scope {
+        Scope::Repo(r) => vec![r.clone()],
+        Scope::Org(o) => recent_org_repos(client, o, args.repos)?,
+    };
+    if repos.is_empty() {
+        bail!("No repositories to scan in {scope}");
+    }
+    let jobs = recent_jobs(client, &repos, args.runs);
+    let mut queued: Vec<Job> = jobs
+        .iter()
+        .filter(|j| j.status == "queued")
+        .cloned()
+        .collect();
+    queued.sort_by_key(|j| j.created_at);
+    let report = InferredReport {
+        scope: scope.to_string(),
+        inferred: true,
+        runners: infer(&jobs),
+        queued,
+    };
+    if ctx.json {
+        return output::print_json(&report);
+    }
+    print!("{}", render_inferred(&report, args.runs, Utc::now()));
     Ok(())
 }
 
@@ -334,26 +551,30 @@ fn render(report: &Report, scope: &Scope, now: DateTime<Utc>) -> String {
         out.push_str(&table(&rows, "  "));
         out.push('\n');
     }
-    if !queued.is_empty() {
-        out.push_str(&format!("\nQueued ({}):\n", queued.len()));
-        let rows: Vec<Vec<String>> = queued
-            .iter()
-            .map(|j| {
-                let waited = j
-                    .created_at
-                    .map(|t| format!("waiting {}", elapsed(t, now)))
-                    .unwrap_or_else(|| "waiting".to_string());
-                vec![
-                    j.repo.clone(),
-                    format!("{} / {}", j.workflow, j.name),
-                    format!("{waited} for {}", j.labels.join(", ")),
-                ]
-            })
-            .collect();
-        out.push_str(&table(&rows, "  "));
-        out.push('\n');
-    }
+    out.push_str(&render_queue(queued, now));
     out
+}
+
+/// Jobs waiting for a runner, with how long they've waited and the labels they asked for.
+fn render_queue(queued: &[Job], now: DateTime<Utc>) -> String {
+    if queued.is_empty() {
+        return String::new();
+    }
+    let rows: Vec<Vec<String>> = queued
+        .iter()
+        .map(|j| {
+            let waited = j
+                .created_at
+                .map(|t| format!("waiting {}", elapsed(t, now)))
+                .unwrap_or_else(|| "waiting".to_string());
+            vec![
+                j.repo.clone(),
+                format!("{} / {}", j.workflow, j.name),
+                format!("{waited} for {}", j.labels.join(", ")),
+            ]
+        })
+        .collect();
+    format!("\nQueued ({}):\n{}\n", queued.len(), table(&rows, "  "))
 }
 
 /// Counts line, as `12 runners: 9 online (4 busy), 3 offline`.
@@ -534,6 +755,67 @@ mod tests {
             queued: Some(Vec::new()),
         };
         assert!(render(&empty, &scope, Utc::now()).contains("--org ORG"));
+    }
+
+    fn done(name: &str, runner: &str, labels: &[&str], at: &str) -> Job {
+        let mut j = job(name, "completed", Some(runner), at);
+        j.labels = labels.iter().map(|l| l.to_string()).collect();
+        j.completed_at = j.started_at;
+        j
+    }
+
+    #[test]
+    fn infer_groups_by_runner_and_prefers_running_jobs() {
+        let jobs = vec![
+            done("Old", "box-1", &["self-hosted"], "2026-01-01T00:00:00Z"),
+            done(
+                "New",
+                "box-1",
+                &["self-hosted", "windows"],
+                "2026-01-01T01:00:00Z",
+            ),
+            job("Live", "in_progress", Some("box-2"), "2026-01-01T00:30:00Z"),
+            done("Later", "box-2", &["self-hosted"], "2026-01-01T02:00:00Z"),
+            done(
+                "Hosted",
+                "GitHub Actions 12",
+                &["ubuntu-latest"],
+                "2026-01-01T00:00:00Z",
+            ),
+            job("Waiting", "queued", None, "2026-01-01T00:00:00Z"),
+        ];
+        let seen = infer(&jobs);
+        let summary: Vec<(&str, bool, &str)> = seen
+            .iter()
+            .map(|r| (r.name.as_str(), r.running, r.last_job.name.as_str()))
+            .collect();
+        assert_eq!(
+            summary,
+            vec![("box-1", false, "New"), ("box-2", true, "Live")]
+        );
+        assert_eq!(seen[0].labels, vec!["self-hosted", "windows"]);
+        assert_eq!(seen[0].last_seen, Some(at("2026-01-01T01:00:00Z")));
+    }
+
+    #[test]
+    fn render_inferred_marks_running_and_age() {
+        let jobs = vec![
+            done("Build", "box-1", &["self-hosted"], "2026-01-01T00:00:00Z"),
+            job("Test", "in_progress", Some("box-2"), "2026-01-01T00:50:00Z"),
+        ];
+        let report = InferredReport {
+            scope: "a/b".to_string(),
+            inferred: true,
+            runners: infer(&jobs),
+            queued: Vec::new(),
+        };
+        assert_eq!(
+            render_inferred(&report, 30, at("2026-01-01T01:00:00Z")),
+            "Inferred from the jobs of the last 30 runs, not the runners API, so idle and offline runners look alike.\n\
+             NAME   LAST SEEN  LAST JOB         LABELS\n\
+             box-1  1h 0m ago  a/b  CI / Build  self-hosted\n\
+             box-2  running    a/b  CI / Test   self-hosted, windows\n"
+        );
     }
 
     #[test]
