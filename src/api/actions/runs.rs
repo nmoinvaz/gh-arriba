@@ -66,6 +66,12 @@ pub struct Job {
     pub labels: Vec<String>,
     #[serde(default, deserialize_with = "null_default")]
     pub html_url: String,
+    /// Name of the run's workflow, which older servers leave out.
+    #[serde(default)]
+    pub workflow_name: Option<String>,
+    /// Runner the job was assigned to, null or empty while queued.
+    #[serde(default)]
+    pub runner_name: Option<String>,
     #[serde(default, deserialize_with = "opt_time")]
     pub created_at: Option<DateTime<Utc>>,
     #[serde(default, deserialize_with = "opt_time")]
@@ -131,6 +137,30 @@ pub fn successful_branch_runs(
             "{}/actions/runs?branch={}&status=success&per_page=100",
             repo.api(),
             encode_path(branch)
+        ))?,
+        "workflow runs",
+    )?;
+    Ok(page.workflow_runs)
+}
+
+/// Every run in the repository with a status such as "in_progress" or "queued".
+pub fn runs_with_status(client: &Client, repo: &Repo, status: &str) -> Result<Vec<WorkflowRun>> {
+    parse_all(
+        client.get_all_in(
+            &format!("{}/actions/runs?status={status}", repo.api()),
+            "workflow_runs",
+        )?,
+        "workflow run",
+    )
+}
+
+/// The `count` most recent runs of a repository, at most 100.
+pub fn recent_runs(client: &Client, repo: &Repo, count: usize) -> Result<Vec<WorkflowRun>> {
+    let page: RunsPage = parse(
+        client.get(&format!(
+            "{}/actions/runs?per_page={}",
+            repo.api(),
+            count.clamp(1, 100)
         ))?,
         "workflow runs",
     )?;
