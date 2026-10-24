@@ -165,8 +165,172 @@ impl<'a> ListJson<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::pr;
+    use super::super::tests::{ctx, mock_prs, node, pr, ready};
     use super::*;
+    use crate::api::Repo;
+    use crate::api::dependabot::alert_fixture;
+    use mockito::{Matcher, Server};
+    use serde_json::{Value, json};
+
+    fn args(org: Option<&str>, security: bool) -> DependabotListArgs {
+        DependabotListArgs {
+            org: org.map(str::to_string),
+            security,
+        }
+    }
+
+    /// A serde lock-step pair, a lone ready PR, one that needs a rebase, and one that's blocked.
+    fn nodes(repo: &str) -> Vec<Value> {
+        vec![
+            node(
+                repo,
+                1,
+                "Bump serde from 1.0.1 to 1.0.2",
+                "MERGEABLE",
+                "CLEAN",
+                Some("SUCCESS"),
+            ),
+            node(
+                repo,
+                2,
+                "Bump serde_json from 1.0.1 to 1.0.2",
+                "MERGEABLE",
+                "CLEAN",
+                Some("SUCCESS"),
+            ),
+            node(
+                repo,
+                3,
+                "Bump lodash from 4.17.20 to 4.17.21",
+                "MERGEABLE",
+                "CLEAN",
+                Some("SUCCESS"),
+            ),
+            node(
+                repo,
+                4,
+                "Bump tokio from 1.0.0 to 1.1.0",
+                "CONFLICTING",
+                "DIRTY",
+                None,
+            ),
+            node(
+                repo,
+                5,
+                "Bump pino from 9.0.0 to 10.0.0",
+                "MERGEABLE",
+                "UNSTABLE",
+                Some("PENDING"),
+            ),
+        ]
+    }
+
+    #[test]
+    fn json_sorts_prs_into_groups_and_sections() {
+        let o = Overview::new(vec![
+            pr("o/r", 1, "Bump serde from 1.0.1 to 1.0.2", Category::Ready),
+            pr(
+                "o/r",
+                2,
+                "Bump serde_json from 1.0.1 to 1.0.2",
+                Category::Ready,
+            ),
+            pr(
+                "o/r",
+                3,
+                "Bump lodash from 4.17.20 to 4.17.21",
+                Category::Ready,
+            ),
+            pr(
+                "o/r",
+                4,
+                "Bump tokio from 1.0.0 to 1.1.0",
+                Category::NeedsRebase,
+            ),
+            pr(
+                "o/r",
+                5,
+                "Bump pino from 9.0.0 to 10.0.0",
+                Category::Blocked,
+            ),
+        ]);
+        let scope = Scope::Repo(Repo::parse("o/r").unwrap());
+        let v = serde_json::to_value(ListJson::new(&scope, &o)).unwrap();
+        assert_eq!(v["scope"], "o/r");
+        assert_eq!(
+            v["counts"],
+            json!({ "total": 5, "ready": 3, "needs_rebase": 1, "blocked": 1 })
+        );
+        let group = &v["groups"][0];
+        assert_eq!(group["prefix"], "serde");
+        assert_eq!(group["prs"], json!([1, 2]));
+        assert_eq!(group["status"], "ready");
+        assert_eq!(group["change"], "patch");
+        assert_eq!(group["members"][1]["number"], 2);
+        let numbers = |key: &str| -> Vec<u64> {
+            v[key]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|p| p["number"].as_u64().unwrap())
+                .collect()
+        };
+        assert_eq!(numbers("ready"), vec![3]);
+        assert_eq!(numbers("needs_rebase"), vec![4]);
+        assert_eq!(numbers("blocked"), vec![5]);
+    }
+
+    #[test]
+    fn lists_a_repo_as_text_and_json() {
+        for json in [false, true] {
+            let mut server = Server::new();
+            let (light, details) = mock_prs(&mut server, false, &nodes("o/r"));
+            run(&ctx(&server, json), args(None, false)).unwrap();
+            light.assert();
+            details.assert();
+        }
+    }
+
+    #[test]
+    fn lists_an_org_through_search() {
+        let mut server = Server::new();
+        let mut prs = nodes("o/a");
+        prs.push(ready(9, "Bump serde from 1.0.1 to 1.0.2"));
+        prs[5]["repository"]["nameWithOwner"] = json!("o/b");
+        let (light, details) = mock_prs(&mut server, true, &prs);
+        run(&ctx(&server, false), args(Some("acme"), false)).unwrap();
+        light.assert();
+        details.assert();
+    }
+
+    #[test]
+    fn security_reads_alerts_and_fails_without_access() {
+        for json in [false, true] {
+            let mut server = Server::new();
+            mock_prs(&mut server, false, &nodes("o/r"));
+            let alerts = server
+                .mock("GET", "/repos/o/r/dependabot/alerts")
+                .match_query(Matcher::UrlEncoded("state".into(), "open".into()))
+                .with_body(json!([alert_fixture()]).to_string())
+                .create();
+            run(&ctx(&server, json), args(None, true)).unwrap();
+            alerts.assert();
+        }
+
+        let mut server = Server::new();
+        mock_prs(&mut server, false, &nodes("o/r"));
+        server
+            .mock("GET", "/repos/o/r/dependabot/alerts")
+            .match_query(Matcher::Any)
+            .with_status(403)
+            .with_body(r#"{"message": "Resource not accessible by integration"}"#)
+            .create();
+        let err = run(&ctx(&server, true), args(None, true)).unwrap_err();
+        assert!(
+            err.to_string()
+                .starts_with("Dependabot alerts are disabled for o/r")
+        );
+    }
 
     #[test]
     fn row_shows_reason_for_blocked() {
