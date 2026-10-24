@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use crate::context::{Ctx, Repo};
 use crate::github::is_failed;
+use crate::json::{opt_time_of, str_of};
 use crate::output;
 
 /// How often to poll, how long to keep at it, and which jobs to wait for.
@@ -95,27 +96,16 @@ impl RunState {
     }
 }
 
-fn time(v: &Value, key: &str) -> Option<DateTime<Utc>> {
-    v[key]
-        .as_str()
-        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-        .map(|t| t.with_timezone(&Utc))
-}
-
-fn text(v: &Value, key: &str) -> String {
-    v[key].as_str().unwrap_or_default().to_string()
-}
-
 fn parse_job(job: &Value) -> JobState {
-    let started = time(job, "started_at");
-    let seconds = match (started, time(job, "completed_at")) {
+    let started = opt_time_of(job, "started_at");
+    let seconds = match (started, opt_time_of(job, "completed_at")) {
         (Some(s), Some(c)) => Some((c - s).num_seconds().max(0)),
         _ => None,
     };
     JobState {
         id: job["id"].as_u64().unwrap_or(0),
-        name: text(job, "name"),
-        status: text(job, "status"),
+        name: str_of(job, "name"),
+        status: str_of(job, "status"),
         conclusion: job["conclusion"].as_str().map(str::to_string),
         seconds,
         labels: job["labels"]
@@ -124,8 +114,8 @@ fn parse_job(job: &Value) -> JobState {
             .flatten()
             .filter_map(|l| l.as_str().map(str::to_string))
             .collect(),
-        url: text(job, "html_url"),
-        queued_at: time(job, "created_at").or(started),
+        url: str_of(job, "html_url"),
+        queued_at: opt_time_of(job, "created_at").or(started),
     }
 }
 
@@ -133,10 +123,10 @@ fn parse_run(repo: &Repo, run: &Value, jobs: &[Value]) -> RunState {
     RunState {
         repo: repo.to_string(),
         id: run["id"].as_u64().unwrap_or(0),
-        workflow: text(run, "name"),
-        title: text(run, "display_title"),
-        url: text(run, "html_url"),
-        status: text(run, "status"),
+        workflow: str_of(run, "name"),
+        title: str_of(run, "display_title"),
+        url: str_of(run, "html_url"),
+        status: str_of(run, "status"),
         conclusion: run["conclusion"].as_str().map(str::to_string),
         jobs: jobs.iter().map(parse_job).collect(),
         filtered: false,

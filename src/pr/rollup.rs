@@ -5,6 +5,7 @@ use std::collections::HashMap;
 
 use crate::context::PrRef;
 use crate::github::Client;
+use crate::json::{opt_time_of, str_of};
 use crate::pr::model::vars;
 
 /// One check run on the PR's head commit.
@@ -104,23 +105,14 @@ pub fn fetch(client: &Client, pr: &PrRef, fields: &str) -> Result<Rollup> {
 pub fn parse_check_run(node: &Value) -> CheckRun {
     let run = &node["checkSuite"]["workflowRun"];
     CheckRun {
-        name: node["name"].as_str().unwrap_or_default().to_string(),
-        workflow: run["workflow"]["name"]
-            .as_str()
-            .unwrap_or_default()
-            .to_string(),
-        event: run["event"].as_str().unwrap_or_default().to_string(),
+        name: str_of(node, "name"),
+        workflow: str_of(&run["workflow"], "name"),
+        event: str_of(run, "event"),
         run_id: run["databaseId"].as_u64(),
-        status: node["status"].as_str().unwrap_or_default().to_string(),
+        status: str_of(node, "status"),
         conclusion: node["conclusion"].as_str().map(str::to_string),
-        started_at: node["startedAt"]
-            .as_str()
-            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-            .map(|t| t.with_timezone(&Utc)),
-        completed_at: node["completedAt"]
-            .as_str()
-            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-            .map(|t| t.with_timezone(&Utc)),
+        started_at: opt_time_of(node, "startedAt"),
+        completed_at: opt_time_of(node, "completedAt"),
         url: node["detailsUrl"].as_str().map(str::to_string),
     }
 }
