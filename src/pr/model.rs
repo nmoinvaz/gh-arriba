@@ -1,69 +1,12 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use crate::api::json::{login_of, str_of, time_of};
 use crate::api::{Client, PrRef};
 
-/// Pull request metadata most commands need.
-#[derive(Clone, Debug, Serialize)]
-pub struct PrInfo {
-    pub node_id: String,
-    pub number: u64,
-    pub title: String,
-    pub url: String,
-    pub state: String,
-    pub draft: bool,
-    pub body: String,
-    pub author: String,
-    pub created_at: DateTime<Utc>,
-    pub base_ref: String,
-    pub head_ref: String,
-    pub head_oid: String,
-    /// OWNER/REPO the head branch lives in, which differs from the base for forks.
-    pub head_repo: Option<String>,
-    pub cross_repository: bool,
-}
-
-const PR_QUERY: &str = r#"
-query($owner: String!, $repo: String!, $number: Int!) {
-  repository(owner: $owner, name: $repo) {
-    pullRequest(number: $number) {
-      id number title url state isDraft body createdAt
-      author { login }
-      baseRefName headRefName headRefOid
-      isCrossRepository
-      headRepository { nameWithOwner }
-    }
-  }
-}"#;
-
-pub fn fetch_pr(client: &Client, pr: &PrRef) -> Result<PrInfo> {
-    let data = client.graphql(PR_QUERY, vars(pr))?;
-    let p = &data["repository"]["pullRequest"];
-    if p.is_null() {
-        anyhow::bail!("Pull request {pr} not found");
-    }
-    Ok(PrInfo {
-        node_id: str_of(p, "id"),
-        number: p["number"].as_u64().unwrap_or(pr.number),
-        title: str_of(p, "title"),
-        url: str_of(p, "url"),
-        state: str_of(p, "state"),
-        draft: p["isDraft"].as_bool().unwrap_or(false),
-        body: str_of(p, "body"),
-        author: login_of(&p["author"]),
-        created_at: time_of(p, "createdAt")?,
-        base_ref: str_of(p, "baseRefName"),
-        head_ref: str_of(p, "headRefName"),
-        head_oid: str_of(p, "headRefOid"),
-        head_repo: p["headRepository"]["nameWithOwner"]
-            .as_str()
-            .map(str::to_string),
-        cross_repository: p["isCrossRepository"].as_bool().unwrap_or(false),
-    })
-}
+pub use crate::api::pulls::{PrInfo, fetch_pr, vars};
 
 #[derive(Clone, Debug, Serialize)]
 pub struct Comment {
@@ -222,17 +165,10 @@ pub fn is_bot(typename: Option<&str>, login: &str) -> bool {
         )
 }
 
-pub fn vars(pr: &PrRef) -> Value {
-    json!({
-        "owner": pr.repo.owner,
-        "repo": pr.repo.name,
-        "number": pr.number,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn bot_detection() {
