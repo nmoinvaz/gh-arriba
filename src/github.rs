@@ -263,6 +263,16 @@ fn parse_next_link(header: &str) -> Option<String> {
     })
 }
 
+/// Whether a check run, job, step, or workflow run conclusion counts as failed. REST spells
+/// conclusions in lowercase and GraphQL in uppercase, so either is accepted.
+pub fn is_failed(conclusion: Option<&str>) -> bool {
+    conclusion.is_some_and(|c| {
+        ["failure", "cancelled", "timed_out", "startup_failure"]
+            .iter()
+            .any(|f| c.eq_ignore_ascii_case(f))
+    })
+}
+
 pub fn get_github_token(host: &str) -> Result<String> {
     // Try gh auth token first.
     if let Ok(output) = Command::new("gh")
@@ -291,6 +301,17 @@ pub fn get_github_token(host: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_conclusions_in_either_case() {
+        assert!(is_failed(Some("failure")));
+        assert!(is_failed(Some("timed_out")));
+        assert!(is_failed(Some("STARTUP_FAILURE")));
+        assert!(is_failed(Some("CANCELLED")));
+        assert!(!is_failed(Some("success")));
+        assert!(!is_failed(Some("ACTION_REQUIRED")));
+        assert!(!is_failed(None));
+    }
 
     #[test]
     fn next_link_found_among_rels() {

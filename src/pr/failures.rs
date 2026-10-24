@@ -6,18 +6,11 @@ use std::path::PathBuf;
 
 use crate::cli::FailuresArgs;
 use crate::context::{Ctx, Repo};
+use crate::github::is_failed;
 use crate::log::{self, Excerpt};
 use crate::output;
 use crate::pr::model::fetch_pr;
 use crate::run::{download, name_matches, short_error};
-
-/// Check run conclusions that count as failed.
-fn is_failed(conclusion: Option<&str>) -> bool {
-    matches!(
-        conclusion,
-        Some("failure" | "cancelled" | "timed_out" | "startup_failure")
-    )
-}
 
 /// A failed check run from the check-runs API.
 #[derive(Debug, PartialEq)]
