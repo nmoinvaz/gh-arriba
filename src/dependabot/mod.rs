@@ -3,17 +3,16 @@ mod list;
 mod merge;
 mod rebase;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc};
 use regex::Regex;
 use serde::Serialize;
-use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::sync::LazyLock;
 use std::time::Duration;
 
-use crate::api::json::{str_of, time_of};
+use crate::api::dependabot::{self, PrDetails, PrSummary};
 use crate::api::{Client, Repo};
 use crate::cli::DependabotCommand;
 use crate::context::Ctx;
@@ -249,84 +248,17 @@ impl Overview {
     }
 }
 
-macro_rules! dep_fragment {
-    () => {
-        r#"
-fragment Dep on PullRequest {
-  id number title url createdAt headRefName
-  mergeable mergeStateStatus reviewDecision
-  additions deletions changedFiles
-  author { login }
-  repository { nameWithOwner }
-  commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
-}
-"#
-    };
-}
-
-const LIGHT_REPO_QUERY: &str = r#"
-query($owner: String!, $repo: String!, $cursor: String) {
-  repository(owner: $owner, name: $repo) {
-    pullRequests(states: OPEN, first: 100, after: $cursor) {
-      pageInfo { hasNextPage endCursor }
-      nodes { number title url author { login } repository { nameWithOwner } }
+/// Every open Dependabot PR in scope with just its number, title, URL, and repository.
+pub fn fetch_light(client: &Client, scope: &Scope) -> Result<Vec<PrSummary>> {
+    let nodes = match scope {
+        Scope::Repo(r) => dependabot::open_prs(client, r)?,
+        Scope::Org(o) => dependabot::search_dependabot_prs(client, o)?,
     }
-  }
-}"#;
-
-const LIGHT_SEARCH_QUERY: &str = r#"
-query($q: String!, $cursor: String) {
-  search(query: $q, type: ISSUE, first: 100, after: $cursor) {
-    pageInfo { hasNextPage endCursor }
-    nodes {
-      ... on PullRequest { number title url author { login } repository { nameWithOwner } }
-    }
-  }
-}"#;
-
-/// PRs per detail request. Each costs GitHub about 0.3s to compute, and requests that run past
-/// 10s fail with a 502.
-const DETAIL_BATCH: usize = 20;
-
-/// Every open Dependabot PR in scope with just its number, title, URL, and repository. These
-/// fields are cheap, so pages hold 100 PRs.
-pub fn fetch_light(client: &Client, scope: &Scope) -> Result<Vec<Value>> {
-    let mut nodes = Vec::new();
-    let mut cursor = Value::Null;
-    loop {
-        let (query, mut variables, key) = match scope {
-            Scope::Repo(r) => (
-                LIGHT_REPO_QUERY,
-                json!({ "owner": r.owner, "repo": r.name }),
-                "repository",
-            ),
-            Scope::Org(o) => (
-                LIGHT_SEARCH_QUERY,
-                json!({ "q": format!("is:pr is:open author:app/dependabot org:{o} archived:false") }),
-                "search",
-            ),
-        };
-        variables["cursor"] = cursor;
-        let mut data = client.graphql(query, variables)?;
-        if data[key].is_null() {
-            bail!("{scope} not found");
-        }
-        let page = match scope {
-            Scope::Repo(_) => data["repository"]["pullRequests"].take(),
-            Scope::Org(_) => data["search"].take(),
-        };
-        for node in page["nodes"].as_array().into_iter().flatten() {
-            // Search returns an empty object for results that are not pull requests.
-            if is_dependabot(node["author"]["login"].as_str()) {
-                nodes.push(node.clone());
-            }
-        }
-        if page["pageInfo"]["hasNextPage"].as_bool() != Some(true) {
-            break;
-        }
-        cursor = page["pageInfo"]["endCursor"].clone();
-    }
-    Ok(nodes)
+    .ok_or_else(|| anyhow!("{scope} not found"))?;
+    Ok(nodes
+        .into_iter()
+        .filter(|n| is_dependabot(n.author_login()))
+        .collect())
 }
 
 /// Fetch every open Dependabot PR in scope with checks and mergeability. With `settle`, PRs whose
@@ -334,25 +266,24 @@ pub fn fetch_light(client: &Client, scope: &Scope) -> Result<Vec<Value>> {
 pub fn fetch_prs(client: &Client, scope: &Scope, settle: bool) -> Result<Vec<DepPr>> {
     // Find Dependabot's PRs cheaply, then pay for details on those alone.
     let keys: Vec<(String, u64)> = fetch_light(client, scope)?
-        .iter()
-        .map(|n| (repo_of(n), n["number"].as_u64().unwrap_or(0)))
+        .into_iter()
+        .map(|n| (n.repository.name_with_owner, n.number))
         .collect();
-    let mut nodes = fetch_details(client, &keys)?;
+    let mut nodes = dependabot::pr_details(client, &keys)?;
 
     // Querying mergeability starts GitHub computing it, so a second look usually has the answer.
     if settle {
         let unknown: Vec<(String, u64)> = nodes
             .iter()
-            .filter(|n| n["mergeable"].as_str() == Some("UNKNOWN"))
-            .map(|n| (repo_of(n), n["number"].as_u64().unwrap_or(0)))
+            .filter(|n| n.mergeable == "UNKNOWN")
+            .map(|n| (n.repo().to_string(), n.number))
             .collect();
         if !unknown.is_empty() {
             std::thread::sleep(Duration::from_secs(2));
-            for fresh in fetch_details(client, &unknown)? {
-                let key = (repo_of(&fresh), fresh["number"].as_u64());
+            for fresh in dependabot::pr_details(client, &unknown)? {
                 if let Some(slot) = nodes
                     .iter_mut()
-                    .find(|n| (repo_of(n), n["number"].as_u64()) == key)
+                    .find(|n| (n.repo(), n.number) == (fresh.repo(), fresh.number))
                 {
                     *slot = fresh;
                 }
@@ -360,37 +291,7 @@ pub fn fetch_prs(client: &Client, scope: &Scope, settle: bool) -> Result<Vec<Dep
         }
     }
 
-    nodes.iter().map(parse_pr).collect()
-}
-
-/// Fetch full details for specific PRs in batched, aliased queries, keeping their order.
-fn fetch_details(client: &Client, prs: &[(String, u64)]) -> Result<Vec<Value>> {
-    let mut fresh = Vec::new();
-    for batch in prs.chunks(DETAIL_BATCH) {
-        let mut query = String::from(dep_fragment!());
-        query.push_str("query {\n");
-        for (i, (repo, number)) in batch.iter().enumerate() {
-            let (owner, name) = repo
-                .split_once('/')
-                .with_context(|| format!("Bad repository name {repo}"))?;
-            query.push_str(&format!(
-                "  p{i}: repository(owner: {owner:?}, name: {name:?}) {{ pullRequest(number: {number}) {{ ...Dep }} }}\n"
-            ));
-        }
-        query.push('}');
-        let data = client.graphql(&query, json!({}))?;
-        for i in 0..batch.len() {
-            let pr = &data[format!("p{i}")]["pullRequest"];
-            if !pr.is_null() {
-                fresh.push(pr.clone());
-            }
-        }
-    }
-    Ok(fresh)
-}
-
-fn repo_of(node: &Value) -> String {
-    str_of(&node["repository"], "nameWithOwner")
+    Ok(nodes.into_iter().map(DepPr::from).collect())
 }
 
 /// Dependabot's login is `dependabot` in GraphQL and `dependabot[bot]` in REST.
@@ -401,33 +302,31 @@ pub fn is_dependabot(login: Option<&str>) -> bool {
     )
 }
 
-fn parse_pr(node: &Value) -> Result<DepPr> {
-    let checks = node["commits"]["nodes"][0]["commit"]["statusCheckRollup"]["state"]
-        .as_str()
-        .map(str::to_string);
-    let mergeable = str_of(node, "mergeable");
-    let merge_state = str_of(node, "mergeStateStatus");
-    let (category, reason) = categorize(&mergeable, &merge_state, checks.as_deref());
-    let title = str_of(node, "title");
-    Ok(DepPr {
-        repo: repo_of(node),
-        number: node["number"].as_u64().context("PR number missing")?,
-        node_id: str_of(node, "id"),
-        update: parse_title(&title),
-        title,
-        url: str_of(node, "url"),
-        created_at: time_of(node, "createdAt")?,
-        head_ref: str_of(node, "headRefName"),
-        mergeable,
-        merge_state,
-        review_decision: node["reviewDecision"].as_str().map(str::to_string),
-        checks,
-        additions: node["additions"].as_u64().unwrap_or(0),
-        deletions: node["deletions"].as_u64().unwrap_or(0),
-        changed_files: node["changedFiles"].as_u64().unwrap_or(0),
-        category,
-        reason,
-    })
+impl From<PrDetails> for DepPr {
+    fn from(node: PrDetails) -> Self {
+        let checks = node.checks().map(str::to_string);
+        let (category, reason) =
+            categorize(&node.mergeable, &node.merge_state_status, checks.as_deref());
+        DepPr {
+            repo: node.repository.name_with_owner,
+            number: node.number,
+            node_id: node.id,
+            update: parse_title(&node.title),
+            title: node.title,
+            url: node.url,
+            created_at: node.created_at,
+            head_ref: node.head_ref_name,
+            mergeable: node.mergeable,
+            merge_state: node.merge_state_status,
+            review_decision: node.review_decision,
+            checks,
+            additions: node.additions,
+            deletions: node.deletions,
+            changed_files: node.changed_files,
+            category,
+            reason,
+        }
+    }
 }
 
 /// Sort a PR into ready, needs rebase, or blocked, with a reason for blocked ones.

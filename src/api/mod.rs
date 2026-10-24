@@ -3,6 +3,7 @@
 
 pub mod actions;
 mod client;
+pub mod dependabot;
 pub mod json;
 mod repo;
 
