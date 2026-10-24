@@ -47,6 +47,20 @@ impl Client {
         })
     }
 
+    /// A client for the API served at `base`, such as a local mock server in tests.
+    #[cfg(test)]
+    pub fn for_tests(base: &str) -> Self {
+        let base = base.trim_end_matches('/');
+        Self {
+            // The test server is local, so skip any proxy the environment configures.
+            http: Http::builder().no_proxy().build().unwrap(),
+            token: "test-token".to_string(),
+            api: base.to_string(),
+            graphql: format!("{base}/graphql"),
+            viewer: OnceLock::new(),
+        }
+    }
+
     /// Login of the authenticated user.
     pub fn viewer(&self) -> Result<&str> {
         if let Some(login) = self.viewer.get() {
@@ -61,7 +75,7 @@ impl Client {
     }
 
     fn url(&self, path: &str) -> String {
-        if path.starts_with("https://") {
+        if path.starts_with("https://") || path.starts_with("http://") {
             path.to_string()
         } else {
             format!("{}/{}", self.api, path.trim_start_matches('/'))
@@ -341,6 +355,7 @@ pub fn get_github_token(host: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mockito::{Matcher, Server};
 
     #[test]
     fn encoding_keeps_or_escapes_slashes() {
@@ -389,5 +404,162 @@ mod tests {
             with_per_page("https://a/x?per_page=5"),
             "https://a/x?per_page=5"
         );
+    }
+
+    #[test]
+    fn get_sends_the_token_and_parses_json() {
+        let mut server = Server::new();
+        let mock = server
+            .mock("GET", "/repos/o/r")
+            .match_header("authorization", "Bearer test-token")
+            .match_header("x-github-api-version", "2022-11-28")
+            .with_body(r#"{"default_branch": "main"}"#)
+            .create();
+        let client = Client::for_tests(&server.url());
+        assert_eq!(client.get("repos/o/r").unwrap()["default_branch"], "main");
+        mock.assert();
+    }
+
+    #[test]
+    fn get_all_follows_next_links() {
+        let mut server = Server::new();
+        let next = format!("<{}/items?page=2>; rel=\"next\"", server.url());
+        server
+            .mock("GET", "/items")
+            .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
+            .with_header("link", &next)
+            .with_body("[1, 2]")
+            .create();
+        server
+            .mock("GET", "/items")
+            .match_query(Matcher::UrlEncoded("page".into(), "2".into()))
+            .with_body("[3]")
+            .create();
+        let client = Client::for_tests(&server.url());
+        let items = client.get_all("items").unwrap();
+        assert_eq!(items, vec![json!(1), json!(2), json!(3)]);
+    }
+
+    #[test]
+    fn get_all_in_unwraps_the_named_array() {
+        let mut server = Server::new();
+        server
+            .mock("GET", "/runs")
+            .match_query(Matcher::Any)
+            .with_body(r#"{"total_count": 1, "jobs": [{"id": 7}]}"#)
+            .create();
+        let client = Client::for_tests(&server.url());
+        let jobs = client.get_all_in("runs", "jobs").unwrap();
+        assert_eq!(jobs[0]["id"], 7);
+        assert!(client.get_all_in("runs", "missing").is_err());
+    }
+
+    #[test]
+    fn get_opt_maps_404_to_none() {
+        let mut server = Server::new();
+        server
+            .mock("GET", "/missing")
+            .with_status(404)
+            .with_body(r#"{"message": "Not Found"}"#)
+            .create();
+        let client = Client::for_tests(&server.url());
+        assert!(client.get_opt("missing").unwrap().is_none());
+        let err = client.get("missing").unwrap_err().to_string();
+        assert_eq!(err, "GitHub API 404 on GET missing: Not Found");
+    }
+
+    #[test]
+    fn errors_carry_validation_details() {
+        let mut server = Server::new();
+        server
+            .mock("POST", "/repos/o/r/pulls/1/comments")
+            .with_status(422)
+            .with_body(
+                r#"{"message": "Validation Failed",
+                    "errors": ["line could not be resolved", {"message": "path is invalid"}]}"#,
+            )
+            .create();
+        let client = Client::for_tests(&server.url());
+        let err = client
+            .post("repos/o/r/pulls/1/comments", &json!({"body": "x"}))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            err,
+            "GitHub API 422 on POST repos/o/r/pulls/1/comments: Validation Failed \
+             (line could not be resolved; path is invalid)"
+        );
+    }
+
+    #[test]
+    fn empty_bodies_read_as_null() {
+        let mut server = Server::new();
+        server
+            .mock("DELETE", "/repos/o/r/actions/caches/1")
+            .with_status(204)
+            .create();
+        server
+            .mock("PUT", "/x")
+            .match_body(Matcher::Json(json!({"a": 1})))
+            .with_status(204)
+            .create();
+        server
+            .mock("PATCH", "/x")
+            .with_body(r#"{"ok": true}"#)
+            .create();
+        let client = Client::for_tests(&server.url());
+        assert_eq!(
+            client.delete("repos/o/r/actions/caches/1").unwrap(),
+            Value::Null
+        );
+        assert_eq!(client.put("x", &json!({"a": 1})).unwrap(), Value::Null);
+        assert_eq!(client.patch("x", &json!({})).unwrap()["ok"], true);
+    }
+
+    #[test]
+    fn text_and_raw_bodies() {
+        let mut server = Server::new();
+        server
+            .mock("GET", "/repos/o/r/actions/jobs/1/logs")
+            .with_body("line 1\nline 2\n")
+            .create();
+        server
+            .mock("GET", "/repos/o/r/contents/a.yml")
+            .match_header("accept", "application/vnd.github.raw+json")
+            .with_body("on: push\n")
+            .create();
+        let client = Client::for_tests(&server.url());
+        assert_eq!(
+            client.get_text("repos/o/r/actions/jobs/1/logs").unwrap(),
+            "line 1\nline 2\n"
+        );
+        assert_eq!(
+            client.get_raw("repos/o/r/contents/a.yml").unwrap(),
+            "on: push\n"
+        );
+    }
+
+    #[test]
+    fn graphql_returns_data_or_the_errors() {
+        let mut server = Server::new();
+        server
+            .mock("POST", "/graphql")
+            .match_body(Matcher::PartialJson(
+                json!({"query": "query { viewer { login } }"}),
+            ))
+            .with_body(r#"{"data": {"viewer": {"login": "me"}}}"#)
+            .expect(1)
+            .create();
+        server
+            .mock("POST", "/graphql")
+            .match_body(Matcher::PartialJson(json!({"query": "bad"})))
+            .with_body(r#"{"data": null, "errors": [{"message": "one"}, {"message": "two"}]}"#)
+            .create();
+        let client = Client::for_tests(&server.url());
+        // The viewer is fetched once and remembered.
+        assert_eq!(client.viewer().unwrap(), "me");
+        assert_eq!(client.viewer().unwrap(), "me");
+        let err = client.graphql("bad", json!({})).unwrap_err().to_string();
+        assert_eq!(err, "GraphQL error: one; two");
     }
 }
