@@ -267,6 +267,8 @@ fn render(report: &Report) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::Client;
+    use mockito::{Matcher, Server, ServerGuard};
     use serde_json::json;
 
     fn check(id: u64, name: &str, status: &str, conclusion: Option<&str>, app: &str) -> CheckRun {
@@ -368,6 +370,171 @@ mod tests {
              ##[error]boom\n\
              \n\
              skipped external check ci/jenkins (error) https://ci.example.com/1\n"
+        );
+    }
+
+    fn ctx(server: &ServerGuard, json: bool) -> Ctx {
+        Ctx {
+            client: Client::for_tests(&server.url()),
+            repo_flag: Some("o/r".into()),
+            json,
+            yes: true,
+        }
+    }
+
+    fn failures_args(out: &std::path::Path) -> FailuresArgs {
+        FailuresArgs {
+            pr: Some("o/r#5".to_string()),
+            jobs: Vec::new(),
+            out: Some(out.to_path_buf()),
+            context: log::CONTEXT,
+            max: log::MAX,
+            grep: None,
+            refresh: false,
+        }
+    }
+
+    /// PR o/r#5 at commit abc with a failed Actions job that has a log, one whose details are
+    /// gone, a failed external check, a running check, and two commit statuses.
+    fn serve_pr(server: &mut ServerGuard) {
+        server
+            .mock("POST", "/graphql")
+            .with_body(
+                r#"{"data": {"repository": {"pullRequest": {
+                    "id": "PR_1", "number": 5, "title": "Fix inflate", "url": "u",
+                    "state": "OPEN", "createdAt": "2026-01-01T00:00:00Z", "author": null,
+                    "headRefOid": "abc"}}}}"#,
+            )
+            .create();
+        server
+            .mock("GET", "/repos/o/r/commits/abc/check-runs")
+            .match_query(Matcher::Any)
+            .with_body(
+                r#"{"check_runs": [
+                    {"id": 1, "name": "Ubuntu", "status": "completed", "conclusion": "failure",
+                     "html_url": "https://h/1", "app": {"slug": "github-actions"}},
+                    {"id": 2, "name": "Windows", "status": "completed", "conclusion": "cancelled",
+                     "html_url": "https://h/2", "app": {"slug": "github-actions"}},
+                    {"id": 3, "name": "CodeRabbit", "status": "completed",
+                     "conclusion": "failure", "details_url": "https://cr/3",
+                     "app": {"slug": "coderabbitai"}},
+                    {"id": 4, "name": "macOS", "status": "queued", "app": {"slug": "github-actions"}}
+                ]}"#,
+            )
+            .create();
+        server
+            .mock("GET", "/repos/o/r/commits/abc/status")
+            .with_body(
+                r#"{"statuses": [
+                    {"context": "ci/jenkins", "state": "error"},
+                    {"context": "ci/slow", "state": "pending"},
+                    {"context": "ci/ok", "state": "success"}
+                ]}"#,
+            )
+            .create();
+        server
+            .mock("GET", "/repos/o/r/actions/jobs/1")
+            .with_body(
+                r#"{"id": 1, "run_id": 10, "workflow_name": "CI", "steps": [
+                    {"name": "Build", "conclusion": "failure"}]}"#,
+            )
+            .create();
+        server
+            .mock("GET", "/repos/o/r/actions/jobs/2")
+            .with_status(404)
+            .create();
+    }
+
+    #[test]
+    fn saves_failed_logs_and_reuses_them() {
+        let mut server = Server::new();
+        serve_pr(&mut server);
+        let log = server
+            .mock("GET", "/repos/o/r/actions/jobs/1/logs")
+            .with_body("compiling\nerror: boom\n")
+            .expect(2)
+            .create();
+        let out = std::env::temp_dir().join(format!("gh-arriba-failures-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&out);
+
+        run(&ctx(&server, true), failures_args(&out)).unwrap();
+        let path = out.join("10").join("Ubuntu-1.log");
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "compiling\nerror: boom\n"
+        );
+        // The saved log is used the next time, unless refreshed.
+        let mut args = failures_args(&out);
+        args.grep = Some(regex::Regex::new("boom").unwrap());
+        run(&ctx(&server, false), args).unwrap();
+        let mut args = failures_args(&out);
+        args.refresh = true;
+        run(&ctx(&server, true), args).unwrap();
+        log.assert();
+        fs::remove_dir_all(&out).unwrap();
+    }
+
+    #[test]
+    fn inspect_reports_why_a_log_is_missing() {
+        let mut server = Server::new();
+        serve_pr(&mut server);
+        server
+            .mock("GET", "/repos/o/r/actions/jobs/1/logs")
+            .with_status(404)
+            .create();
+        let out = std::env::temp_dir().join(format!("gh-arriba-inspect-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&out);
+        let ctx = ctx(&server, true);
+        let repo = Repo::parse("o/r").unwrap();
+        let args = failures_args(&out);
+        let failed = |id, name: &str| FailedCheck {
+            id,
+            name: name.to_string(),
+            conclusion: "failure".to_string(),
+            url: String::new(),
+            actions: true,
+        };
+
+        let job = inspect(&ctx, &repo, &failed(1, "Ubuntu"), &out, &args);
+        assert_eq!((job.run_id, job.workflow.as_str()), (10, "CI"));
+        assert_eq!(job.failed_steps, vec!["Build"]);
+        assert_eq!(
+            job.error.as_deref(),
+            Some("no log available, the job may not have started")
+        );
+        assert_eq!(job.log_path, None);
+
+        let job = inspect(&ctx, &repo, &failed(2, "Windows"), &out, &args);
+        assert_eq!(job.run_id, 0);
+        assert!(job.error.is_some());
+        let _ = fs::remove_dir_all(&out);
+    }
+
+    #[test]
+    fn render_summary_counts() {
+        let report = |pending, skipped: usize| Report {
+            pr: "o/r#7".to_string(),
+            title: "Fix".to_string(),
+            head_sha: "abc".to_string(),
+            pending,
+            jobs: Vec::new(),
+            grep: None,
+            skipped: (0..skipped)
+                .map(|_| Skipped {
+                    name: "lint".to_string(),
+                    conclusion: "failure".to_string(),
+                    url: String::new(),
+                })
+                .collect(),
+        };
+        assert_eq!(render(&report(0, 0)), "o/r#7 Fix: no failed checks\n");
+        assert_eq!(
+            render(&report(2, 0)),
+            "o/r#7 Fix: no failed checks, 2 pending\n"
+        );
+        assert_eq!(
+            render(&report(0, 1)),
+            "o/r#7 Fix: 1 failed\n\nskipped external check lint (failure)\n"
         );
     }
 }
