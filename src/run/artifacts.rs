@@ -1,13 +1,13 @@
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, TimeDelta, Utc};
 use serde::Serialize;
-use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::{Commit, find_runs, resolve_run, watch};
-use crate::api::{self, Repo};
+use crate::api::Repo;
+use crate::api::actions::{self, WorkflowRun};
 use crate::cli::ArtifactsArgs;
 use crate::context::{Ctx, git};
 use crate::pr::model::fetch_pr;
@@ -27,36 +27,29 @@ pub struct Artifact {
     pub repo: String,
 }
 
-fn parse_artifact(repo: &Repo, v: &Value) -> Artifact {
-    let time = |key: &str| {
-        v[key]
-            .as_str()
-            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-            .map(|t| t.with_timezone(&Utc))
-    };
-    Artifact {
-        id: v["id"].as_u64().unwrap_or(0),
-        name: v["name"].as_str().unwrap_or_default().to_string(),
-        size: v["size_in_bytes"].as_u64().unwrap_or(0),
-        created_at: time("created_at"),
-        expires_at: time("expires_at"),
-        expired: v["expired"].as_bool().unwrap_or(false),
-        run_id: v["workflow_run"]["id"].as_u64().unwrap_or(0),
-        repo: repo.to_string(),
+impl Artifact {
+    fn new(repo: &Repo, a: actions::Artifact) -> Self {
+        Artifact {
+            id: a.id,
+            run_id: a.run_id(),
+            name: a.name,
+            size: a.size_in_bytes,
+            created_at: a.created_at,
+            expires_at: a.expires_at,
+            expired: a.expired,
+            repo: repo.to_string(),
+        }
     }
 }
 
 /// Artifacts of one run, in the order the API lists them.
 fn run_artifacts(ctx: &Ctx, repo: &Repo, run_id: u64) -> Result<Vec<Artifact>> {
-    let path = format!("{}/actions/runs/{run_id}/artifacts", repo.api());
-    Ok(ctx
-        .client
-        .get_all_in(&path, "artifacts")?
-        .iter()
-        .map(|v| Artifact {
+    Ok(actions::run_artifacts(&ctx.client, repo, run_id)?
+        .into_iter()
+        .map(|a| Artifact {
             // The run is known here even when the response leaves out workflow_run.
             run_id,
-            ..parse_artifact(repo, v)
+            ..Artifact::new(repo, a)
         })
         .collect())
 }
@@ -89,19 +82,11 @@ fn select(ctx: &Ctx, args: &ArtifactsArgs) -> Result<Vec<(Repo, u64)>> {
 const SUCCESS_SCAN: usize = 10;
 
 /// IDs of successful runs in API order (newest first), narrowed to a workflow.
-fn successful_runs(runs: &[Value], workflow: Option<&str>) -> Vec<u64> {
+fn successful_runs(runs: &[WorkflowRun], workflow: Option<&str>) -> Vec<u64> {
     runs.iter()
-        .filter(|r| r["conclusion"].as_str() == Some("success"))
-        .filter(|r| {
-            workflow.is_none_or(|w| {
-                crate::workflow::matches(
-                    r["name"].as_str().unwrap_or_default(),
-                    r["path"].as_str().unwrap_or_default(),
-                    w,
-                )
-            })
-        })
-        .filter_map(|r| r["id"].as_u64())
+        .filter(|r| r.conclusion.as_deref() == Some("success"))
+        .filter(|r| workflow.is_none_or(|w| crate::workflow::matches(&r.name, &r.path, w)))
+        .map(|r| r.id)
         .collect()
 }
 
@@ -111,20 +96,9 @@ fn latest_success(ctx: &Ctx, args: &ArtifactsArgs) -> Result<((Repo, u64), Vec<A
     let repo = ctx.repo()?;
     let branch = match &args.branch {
         Some(b) => b.clone(),
-        None => ctx.client.get(&repo.api())?["default_branch"]
-            .as_str()
-            .context("Repository has no default branch")?
-            .to_string(),
+        None => actions::default_branch(&ctx.client, &repo)?,
     };
-    let path = format!(
-        "{}/actions/runs?branch={}&status=success&per_page=100",
-        repo.api(),
-        api::encode_path(&branch)
-    );
-    let runs = ctx.client.get(&path)?["workflow_runs"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
+    let runs = actions::successful_branch_runs(&ctx.client, &repo, &branch)?;
     let for_workflow = args
         .workflow
         .as_deref()
@@ -227,11 +201,9 @@ fn prune(ctx: &Ctx, args: &ArtifactsArgs) -> Result<()> {
         bail!("--prune works on one repository at a time");
     }
     let runs: HashSet<u64> = selected.into_iter().map(|(_, id)| id).collect();
-    let all: Vec<Artifact> = ctx
-        .client
-        .get_all_in(&format!("{}/actions/artifacts", repo.api()), "artifacts")?
-        .iter()
-        .map(|v| parse_artifact(&repo, v))
+    let all: Vec<Artifact> = actions::artifacts(&ctx.client, &repo)?
+        .into_iter()
+        .map(|a| Artifact::new(&repo, a))
         .collect();
     let live: Vec<&Artifact> = all.iter().filter(|a| !a.expired).collect();
     let total_bytes: u64 = live.iter().map(|a| a.size).sum();
@@ -302,8 +274,7 @@ fn prune(ctx: &Ctx, args: &ArtifactsArgs) -> Result<()> {
         return Ok(());
     }
     for a in &report.artifacts {
-        let path = format!("{}/actions/artifacts/{}", repo.api(), a.id);
-        if let Err(e) = ctx.client.delete(&path) {
+        if let Err(e) = actions::delete_artifact(&ctx.client, &repo, a.id) {
             eprintln!("failed to delete {} ({}): {e:#}", a.name, a.id);
             report.failed.push(a.id);
         }
@@ -407,12 +378,7 @@ fn download(ctx: &Ctx, found: &[((Repo, u64), Vec<Artifact>)], dir: &Path) -> Re
         let repo = Repo::parse(&a.repo)?;
         // Download beside the destination so a failed extraction leaves nothing half-written.
         let zip = dir.join(format!(".{}-{}.zip.part", a.name, a.id));
-        let fetched = ctx
-            .client
-            .download(
-                &format!("{}/actions/artifacts/{}/zip", repo.api(), a.id),
-                &zip,
-            )
+        let fetched = actions::download_artifact(&ctx.client, &repo, a.id, &zip)
             .and_then(|_| extract(&zip, &dest));
         let _ = fs::remove_file(&zip);
         let files = fetched.with_context(|| format!("Failed to download {}", a.name))?;
@@ -520,30 +486,29 @@ mod tests {
     }
 
     #[test]
-    fn parses_artifact_fields() {
-        let a = parse_artifact(
-            &repo(),
-            &json!({
-                "id": 5, "name": "linux-build", "size_in_bytes": 1536, "expired": false,
-                "created_at": "2026-10-20T00:00:00Z", "expires_at": "2027-01-18T00:00:00Z",
-                "workflow_run": { "id": 99 }
-            }),
-        );
+    fn artifact_from_api_model() {
+        let api: actions::Artifact = serde_json::from_value(json!({
+            "id": 5, "name": "linux-build", "size_in_bytes": 1536, "expired": false,
+            "created_at": "2026-10-20T00:00:00Z", "expires_at": "2027-01-18T00:00:00Z",
+            "workflow_run": { "id": 99 }
+        }))
+        .unwrap();
+        let a = Artifact::new(&repo(), api);
         assert_eq!(
-            (a.id, a.name.as_str(), a.size, a.run_id),
-            (5, "linux-build", 1536, 99)
+            (a.id, a.name.as_str(), a.size, a.run_id, a.repo.as_str()),
+            (5, "linux-build", 1536, 99, "o/r")
         );
         assert_eq!(a.created_at, Some(at("2026-10-20T00:00:00Z")));
-        assert!(!a.expired);
     }
 
     #[test]
     fn successful_runs_keep_order_and_workflow() {
-        let runs = vec![
-            json!({"id": 30, "name": "Lint", "path": ".github/workflows/lint.yml", "conclusion": "success"}),
-            json!({"id": 20, "name": "Build", "path": ".github/workflows/build.yml", "conclusion": "failure"}),
-            json!({"id": 10, "name": "Build", "path": ".github/workflows/build.yml", "conclusion": "success"}),
-        ];
+        let runs: Vec<WorkflowRun> = serde_json::from_value(json!([
+            {"id": 30, "name": "Lint", "path": ".github/workflows/lint.yml", "conclusion": "success"},
+            {"id": 20, "name": "Build", "path": ".github/workflows/build.yml", "conclusion": "failure"},
+            {"id": 10, "name": "Build", "path": ".github/workflows/build.yml", "conclusion": "success"},
+        ]))
+        .unwrap();
         assert_eq!(successful_runs(&runs, None), vec![30, 10]);
         assert_eq!(successful_runs(&runs, Some("build")), vec![10]);
         assert!(successful_runs(&runs, Some("deploy")).is_empty());

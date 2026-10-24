@@ -120,6 +120,23 @@ pub fn branch_runs(client: &Client, repo: &Repo, branch: &str) -> Result<Vec<Wor
     Ok(page.workflow_runs)
 }
 
+/// The newest hundred successful runs on a branch, newest first.
+pub fn successful_branch_runs(
+    client: &Client,
+    repo: &Repo,
+    branch: &str,
+) -> Result<Vec<WorkflowRun>> {
+    let page: RunsPage = parse(
+        client.get(&format!(
+            "{}/actions/runs?branch={}&status=success&per_page=100",
+            repo.api(),
+            encode_path(branch)
+        ))?,
+        "workflow runs",
+    )?;
+    Ok(page.workflow_runs)
+}
+
 /// A job, or None when the repository has no job with that ID.
 pub fn job_opt(client: &Client, repo: &Repo, id: u64) -> Result<Option<Job>> {
     client
