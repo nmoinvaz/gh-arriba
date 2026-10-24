@@ -536,6 +536,7 @@ fn elapsed(from: DateTime<Utc>, now: DateTime<Utc>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mockito::{Matcher, Server, ServerGuard};
     use serde_json::json;
 
     fn runner(name: &str, status: &str, busy: bool) -> Runner {
@@ -763,5 +764,252 @@ mod tests {
             "GitHub API 500 on GET x: oops"
         )));
         assert!(access_hint(&Scope::Org("x".to_string())).contains("admin:org"));
+    }
+
+    fn ctx(server: &ServerGuard, json: bool) -> Ctx {
+        Ctx {
+            client: Client::for_tests(&server.url()),
+            repo_flag: Some("o/r".into()),
+            json,
+            yes: true,
+        }
+    }
+
+    fn runners_args(org: Option<&str>) -> RunnersArgs {
+        RunnersArgs {
+            org: org.map(str::to_string),
+            queued: false,
+            from_jobs: false,
+            runs: 30,
+            repos: 10,
+        }
+    }
+
+    fn status(s: &str) -> Matcher {
+        Matcher::UrlEncoded("status".into(), s.into())
+    }
+
+    /// Run 1 is in progress with a job on runner `a`, run 2 is queued with a waiting job.
+    fn serve_active_runs(server: &mut ServerGuard, repo: &str) -> mockito::Mock {
+        server
+            .mock("GET", format!("/repos/{repo}/actions/runs").as_str())
+            .match_query(status("in_progress"))
+            .with_body(r#"{"workflow_runs": [{"id": 1, "name": "CI"}]}"#)
+            .create();
+        // A run can move from queued to in progress between the two listings.
+        server
+            .mock("GET", format!("/repos/{repo}/actions/runs").as_str())
+            .match_query(status("queued"))
+            .with_body(
+                r#"{"workflow_runs": [{"id": 1, "name": "CI"}, {"id": 2, "name": "Nightly"}]}"#,
+            )
+            .create();
+        server
+            .mock("GET", format!("/repos/{repo}/actions/runs/2/jobs").as_str())
+            .match_query(Matcher::Any)
+            .with_body(
+                r#"{"jobs": [{"id": 20, "run_id": 2, "name": "Test", "status": "queued",
+                    "labels": ["gpu"], "created_at": "2026-01-01T00:00:00Z"}]}"#,
+            )
+            .create();
+        server
+            .mock("GET", format!("/repos/{repo}/actions/runs/1/jobs").as_str())
+            .match_query(Matcher::Any)
+            .with_body(
+                r#"{"jobs": [
+                    {"id": 10, "run_id": 1, "name": "Build", "status": "in_progress",
+                     "runner_name": "a", "workflow_name": "CI"},
+                    {"id": 11, "run_id": 1, "name": "Lint", "status": "completed"}
+                ]}"#,
+            )
+            .create()
+    }
+
+    #[test]
+    fn active_jobs_scan_running_and_queued_runs_once() {
+        let mut server = Server::new();
+        let run_1 = serve_active_runs(&mut server, "o/r");
+        let client = Client::for_tests(&server.url());
+        let jobs = active_jobs(&client, &Repo::parse("o/r").unwrap()).unwrap();
+        run_1.assert();
+        let rows: Vec<(&str, &str, &str)> = jobs
+            .iter()
+            .map(|j| (j.workflow.as_str(), j.name.as_str(), j.status.as_str()))
+            .collect();
+        // The job's own workflow name wins, else the run's.
+        assert_eq!(
+            rows,
+            vec![
+                ("CI", "Build", "in_progress"),
+                ("Nightly", "Test", "queued")
+            ]
+        );
+    }
+
+    #[test]
+    fn repo_runners_with_their_jobs() {
+        let mut server = Server::new();
+        server
+            .mock("GET", "/repos/o/r/actions/runners")
+            .match_query(Matcher::Any)
+            .with_body(
+                r#"{"runners": [
+                    {"id": 2, "name": "b", "status": "offline"},
+                    {"id": 1, "name": "a", "status": "online", "busy": true}
+                ]}"#,
+            )
+            .expect(2)
+            .create();
+        serve_active_runs(&mut server, "o/r");
+        run(&ctx(&server, true), runners_args(None)).unwrap();
+        run(&ctx(&server, false), runners_args(None)).unwrap();
+    }
+
+    #[test]
+    fn org_scans_repos_only_when_there_is_something_to_find() {
+        let mut server = Server::new();
+        server
+            .mock("GET", "/orgs/o/actions/runners")
+            .match_query(Matcher::Any)
+            .with_body(r#"{"runners": [{"id": 1, "name": "a", "status": "online"}]}"#)
+            .create();
+        let repos = server
+            .mock("GET", "/orgs/o/repos")
+            .match_query(Matcher::Exact("type=all&per_page=100".into()))
+            .with_body(
+                r#"[{"full_name": "o/r"}, {"full_name": "o/old", "archived": true},
+                    {"full_name": "o/broken"}]"#,
+            )
+            .expect(1)
+            .create();
+        serve_active_runs(&mut server, "o/r");
+        // A repo whose runs can't be read is skipped with a warning.
+        server
+            .mock("GET", "/repos/o/broken/actions/runs")
+            .match_query(Matcher::Any)
+            .with_status(500)
+            .create();
+        let archived = server
+            .mock("GET", Matcher::Regex("^/repos/o/old/".into()))
+            .expect(0)
+            .create();
+        // No runner is busy, so nothing is scanned.
+        run(&ctx(&server, true), runners_args(Some("o"))).unwrap();
+        let mut args = runners_args(Some("o"));
+        args.queued = true;
+        run(&ctx(&server, true), args).unwrap();
+        repos.assert();
+        archived.assert();
+    }
+
+    /// Recent runs of `repo`, whose one job ran on self-hosted `box-1`.
+    fn serve_recent_jobs(server: &mut ServerGuard, repo: &str) {
+        server
+            .mock("GET", format!("/repos/{repo}/actions/runs").as_str())
+            .match_query(Matcher::Exact("per_page=30".into()))
+            .with_body(r#"{"workflow_runs": [{"id": 5, "name": "CI"}]}"#)
+            .create();
+        server
+            .mock("GET", format!("/repos/{repo}/actions/runs/5/jobs").as_str())
+            .match_query(Matcher::Any)
+            .with_body(
+                r#"{"jobs": [
+                    {"id": 50, "run_id": 5, "name": "Build", "status": "completed",
+                     "runner_name": "box-1", "completed_at": "2026-01-01T00:00:00Z"},
+                    {"id": 51, "run_id": 5, "name": "Wait", "status": "queued"}
+                ]}"#,
+            )
+            .create();
+    }
+
+    #[test]
+    fn falls_back_to_recent_jobs_without_admin_access() {
+        let mut server = Server::new();
+        server
+            .mock("GET", "/repos/o/r/actions/runners")
+            .match_query(Matcher::Any)
+            .with_status(403)
+            .with_body(r#"{"message": "Resource not accessible by integration"}"#)
+            .expect(2)
+            .create();
+        serve_recent_jobs(&mut server, "o/r");
+        run(&ctx(&server, true), runners_args(None)).unwrap();
+        run(&ctx(&server, false), runners_args(None)).unwrap();
+    }
+
+    #[test]
+    fn other_runner_errors_are_not_hidden() {
+        let mut server = Server::new();
+        server
+            .mock("GET", "/repos/o/r/actions/runners")
+            .match_query(Matcher::Any)
+            .with_status(500)
+            .with_body(r#"{"message": "Server Error"}"#)
+            .create();
+        let err = run(&ctx(&server, true), runners_args(None))
+            .unwrap_err()
+            .to_string();
+        assert!(err.starts_with("GitHub API 500"), "{err}");
+    }
+
+    #[test]
+    fn from_jobs_reads_the_most_recently_pushed_repos() {
+        let mut server = Server::new();
+        server
+            .mock("GET", "/orgs/o/repos")
+            .match_query(Matcher::UrlEncoded("sort".into(), "pushed".into()))
+            .with_body(r#"[{"full_name": "o/a"}, {"full_name": "o/b"}]"#)
+            .create();
+        serve_recent_jobs(&mut server, "o/a");
+        let skipped = server
+            .mock("GET", Matcher::Regex("^/repos/o/b/".into()))
+            .expect(0)
+            .create();
+        let client = Client::for_tests(&server.url());
+        let repos = recent_org_repos(&client, "o", 1).unwrap();
+        let jobs = recent_jobs(&client, &repos, 30);
+        let seen = infer(&jobs);
+        assert_eq!(seen.len(), 1);
+        assert_eq!(
+            (seen[0].name.as_str(), seen[0].last_job.repo.as_str()),
+            ("box-1", "o/a")
+        );
+
+        let mut args = runners_args(Some("o"));
+        args.from_jobs = true;
+        args.repos = 1;
+        run(&ctx(&server, true), args).unwrap();
+        skipped.assert();
+
+        let mut empty = Server::new();
+        empty
+            .mock("GET", "/orgs/e/repos")
+            .match_query(Matcher::Any)
+            .with_body("[]")
+            .create();
+        let mut args = runners_args(Some("e"));
+        args.from_jobs = true;
+        assert_eq!(
+            run(&ctx(&empty, true), args).unwrap_err().to_string(),
+            "No repositories to scan in e"
+        );
+    }
+
+    #[test]
+    fn render_inferred_without_runners_lists_the_queue() {
+        let report = InferredReport {
+            scope: "o/r".to_string(),
+            inferred: true,
+            runners: Vec::new(),
+            queued: vec![job("Test", "queued", None, "2026-01-01T00:00:00Z")],
+        };
+        assert_eq!(
+            render_inferred(&report, 5, at("2026-01-01T00:00:30Z")),
+            "Inferred from the jobs of the last 5 runs, not the runners API, so idle and offline runners look alike.\n\
+             No self-hosted runners ran those jobs in o/r.\n\
+             \n\
+             Queued (1):\n\
+             \x20 a/b  CI / Test  waiting 30s for self-hosted, windows\n"
+        );
     }
 }
