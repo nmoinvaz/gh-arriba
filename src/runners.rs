@@ -1,11 +1,10 @@
 use anyhow::{Result, bail};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
-use serde_json::Value;
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 
-use crate::api::json::{opt_time_of, str_of};
+use crate::api::actions::{self, OrgRepo};
 use crate::api::{Client, Repo};
 use crate::cli::RunnersArgs;
 use crate::context::Ctx;
@@ -41,28 +40,25 @@ impl Runner {
     }
 }
 
-fn parse_runner(v: &Value) -> Runner {
-    Runner {
-        id: v["id"].as_u64().unwrap_or(0),
-        name: str_of(v, "name"),
-        status: str_of(v, "status"),
-        busy: v["busy"].as_bool().unwrap_or(false),
-        os: str_of(v, "os"),
-        labels: v["labels"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|l| l["name"].as_str().map(str::to_string))
-            .collect(),
-        job: None,
+impl From<actions::Runner> for Runner {
+    fn from(r: actions::Runner) -> Self {
+        Runner {
+            id: r.id,
+            name: r.name,
+            status: r.status,
+            busy: r.busy,
+            os: r.os,
+            labels: r.labels.into_iter().map(|l| l.name).collect(),
+            job: None,
+        }
     }
 }
 
-/// Runners API path for the scope.
-fn runners_path(scope: &Scope) -> String {
+/// Runners registered to the scope.
+fn scope_runners(client: &Client, scope: &Scope) -> Result<Vec<actions::Runner>> {
     match scope {
-        Scope::Repo(r) => format!("{}/actions/runners", r.api()),
-        Scope::Org(o) => format!("orgs/{o}/actions/runners"),
+        Scope::Repo(r) => actions::repo_runners(client, r),
+        Scope::Org(o) => actions::org_runners(client, o),
     }
 }
 
@@ -103,28 +99,21 @@ struct Job {
     url: String,
 }
 
-fn parse_job(v: &Value, repo: &Repo, workflow: &str) -> Job {
+/// A job of `repo`, falling back to the run's `workflow` name when the job leaves it out.
+fn job_of(j: actions::Job, repo: &Repo, workflow: &str) -> Job {
     Job {
         repo: repo.to_string(),
-        workflow: v["workflow_name"].as_str().unwrap_or(workflow).to_string(),
-        name: str_of(v, "name"),
-        run_id: v["run_id"].as_u64().unwrap_or(0),
-        job_id: v["id"].as_u64().unwrap_or(0),
-        status: str_of(v, "status"),
-        runner: v["runner_name"]
-            .as_str()
-            .filter(|s| !s.is_empty())
-            .map(str::to_string),
-        labels: v["labels"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|l| l.as_str().map(str::to_string))
-            .collect(),
-        created_at: opt_time_of(v, "created_at"),
-        started_at: opt_time_of(v, "started_at"),
-        completed_at: opt_time_of(v, "completed_at"),
-        url: str_of(v, "html_url"),
+        workflow: j.workflow_name.unwrap_or_else(|| workflow.to_string()),
+        name: j.name,
+        run_id: j.run_id,
+        job_id: j.id,
+        status: j.status,
+        runner: j.runner_name.filter(|s| !s.is_empty()),
+        labels: j.labels,
+        created_at: j.created_at,
+        started_at: j.started_at,
+        completed_at: j.completed_at,
+        url: j.html_url,
     }
 }
 
@@ -134,21 +123,12 @@ fn active_jobs(client: &Client, repo: &Repo) -> Result<Vec<Job>> {
     let mut seen = HashSet::new();
     let mut jobs = Vec::new();
     for status in ["in_progress", "queued"] {
-        let runs = client.get_all_in(
-            &format!("{}/actions/runs?status={status}", repo.api()),
-            "workflow_runs",
-        )?;
-        for run in runs {
-            let Some(id) = run["id"].as_u64() else {
-                continue;
-            };
-            if !seen.insert(id) {
+        for run in actions::runs_with_status(client, repo, status)? {
+            if !seen.insert(run.id) {
                 continue;
             }
-            let workflow = run["name"].as_str().unwrap_or_default();
-            let path = format!("{}/actions/runs/{id}/jobs?filter=latest", repo.api());
-            for j in client.get_all_in(&path, "jobs")? {
-                let job = parse_job(&j, repo, workflow);
+            for j in actions::run_jobs(client, repo, run.id)? {
+                let job = job_of(j, repo, &run.name);
                 if matches!(job.status.as_str(), "in_progress" | "queued") {
                     jobs.push(job);
                 }
@@ -160,12 +140,15 @@ fn active_jobs(client: &Client, repo: &Repo) -> Result<Vec<Job>> {
 
 /// Repositories of an organization that can still run workflows.
 fn org_repos(client: &Client, org: &str) -> Result<Vec<Repo>> {
-    let repos = client.get_all(&format!("orgs/{org}/repos?type=all"))?;
-    Ok(repos
-        .iter()
-        .filter(|r| r["archived"].as_bool() != Some(true))
-        .filter_map(|r| Repo::parse(r["full_name"].as_str()?).ok())
-        .collect())
+    Ok(active_repos(actions::org_repos(client, org)?).collect())
+}
+
+/// Repositories that are not archived, in the order listed.
+fn active_repos(repos: Vec<OrgRepo>) -> impl Iterator<Item = Repo> {
+    repos
+        .into_iter()
+        .filter(|r| !r.archived)
+        .filter_map(|r| Repo::parse(&r.full_name).ok())
 }
 
 /// Run `f` over every item a few at a time. An item that fails is skipped with a warning, so one
@@ -230,53 +213,32 @@ struct SeenRunner {
 
 /// The most recent `runs` runs of a repo.
 fn recent_runs(client: &Client, repo: &Repo, runs: usize) -> Result<Vec<RunRef>> {
-    let page = client.get(&format!(
-        "{}/actions/runs?per_page={}",
-        repo.api(),
-        runs.clamp(1, 100)
-    ))?;
-    Ok(page["workflow_runs"]
-        .as_array()
+    Ok(actions::recent_runs(client, repo, runs)?
         .into_iter()
-        .flatten()
-        .filter_map(|r| {
-            Some(RunRef {
-                repo: repo.clone(),
-                id: r["id"].as_u64()?,
-                workflow: str_of(r, "name"),
-            })
+        .map(|r| RunRef {
+            repo: repo.clone(),
+            id: r.id,
+            workflow: r.name,
         })
         .collect())
 }
 
 /// The `limit` most recently pushed repositories of an organization.
 fn recent_org_repos(client: &Client, org: &str, limit: usize) -> Result<Vec<Repo>> {
-    let page = client.get(&format!(
-        "orgs/{org}/repos?type=all&sort=pushed&direction=desc&per_page=100"
-    ))?;
-    Ok(page
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|r| r["archived"].as_bool() != Some(true))
-        .filter_map(|r| Repo::parse(r["full_name"].as_str()?).ok())
-        .take(limit)
-        .collect())
+    Ok(
+        active_repos(actions::recently_pushed_org_repos(client, org)?)
+            .take(limit)
+            .collect(),
+    )
 }
 
 /// Every job of the recent runs in `repos`.
 fn recent_jobs(client: &Client, repos: &[Repo], runs: usize) -> Vec<Job> {
     let refs = in_parallel(repos, |repo| recent_runs(client, repo, runs));
     in_parallel(&refs, |run| {
-        let path = format!(
-            "{}/actions/runs/{}/jobs?filter=latest",
-            run.repo.api(),
-            run.id
-        );
-        Ok(client
-            .get_all_in(&path, "jobs")?
-            .iter()
-            .map(|j| parse_job(j, &run.repo, &run.workflow))
+        Ok(actions::run_jobs(client, &run.repo, run.id)?
+            .into_iter()
+            .map(|j| job_of(j, &run.repo, &run.workflow))
             .collect())
     })
 }
@@ -385,8 +347,8 @@ pub fn run(ctx: &Ctx, args: RunnersArgs) -> Result<()> {
     if args.from_jobs {
         return run_inferred(ctx, &scope, &args);
     }
-    let mut runners: Vec<Runner> = match client.get_all_in(&runners_path(&scope), "runners") {
-        Ok(list) => list.iter().map(parse_runner).collect(),
+    let mut runners: Vec<Runner> = match scope_runners(client, &scope) {
+        Ok(list) => list.into_iter().map(Runner::from).collect(),
         Err(e) if is_forbidden(&e) => {
             eprintln!(
                 "warning: {} Falling back to recent jobs.",
@@ -577,27 +539,27 @@ mod tests {
     use serde_json::json;
 
     fn runner(name: &str, status: &str, busy: bool) -> Runner {
-        parse_runner(&json!({
+        let api: actions::Runner = serde_json::from_value(json!({
             "id": 1, "name": name, "os": "Linux", "status": status, "busy": busy,
             "labels": [
                 { "id": 1, "name": "self-hosted", "type": "read-only" },
                 { "id": 2, "name": "linux", "type": "custom" }
             ]
         }))
+        .unwrap();
+        api.into()
     }
 
     fn job(name: &str, status: &str, runner: Option<&str>, at: &str) -> Job {
-        parse_job(
-            &json!({
-                "id": 7, "run_id": 3, "name": name, "status": status,
-                "workflow_name": "CI", "runner_name": runner,
-                "labels": ["self-hosted", "windows"],
-                "created_at": at, "started_at": at,
-                "html_url": "https://github.com/a/b/actions/runs/3/job/7"
-            }),
-            &Repo::parse("a/b").unwrap(),
-            "fallback",
-        )
+        let api: actions::Job = serde_json::from_value(json!({
+            "id": 7, "run_id": 3, "name": name, "status": status,
+            "workflow_name": "CI", "runner_name": runner,
+            "labels": ["self-hosted", "windows"],
+            "created_at": at, "started_at": at,
+            "html_url": "https://github.com/a/b/actions/runs/3/job/7"
+        }))
+        .unwrap();
+        job_of(api, &Repo::parse("a/b").unwrap(), "fallback")
     }
 
     fn at(s: &str) -> DateTime<Utc> {
