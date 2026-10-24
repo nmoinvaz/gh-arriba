@@ -159,6 +159,9 @@ gh arriba run logs https://github.com/owner/repo/actions/runs/123456 --failed -o
 grep -rn "error:" logs
 ```
 
+Logs of finished jobs are saved once, and later `run logs` and `pr failures` calls read the saved copy
+instead of downloading it again. Pass `--refresh` to download them anyway.
+
 Follow a run and print each job as it finishes, exiting non-zero if any fails:
 
 ```
