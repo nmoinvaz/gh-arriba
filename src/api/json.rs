@@ -20,14 +20,6 @@ pub fn time_of(v: &Value, key: &str) -> Result<DateTime<Utc>> {
         .with_timezone(&Utc))
 }
 
-/// RFC 3339 timestamp field that may be null or missing, such as a job's `completed_at`.
-pub fn opt_time_of(v: &Value, key: &str) -> Option<DateTime<Utc>> {
-    v[key]
-        .as_str()
-        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-        .map(|t| t.with_timezone(&Utc))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -42,8 +34,5 @@ mod tests {
         assert_eq!(login_of(&json!({"login": "me"})), "me");
         assert!(time_of(&v, "at").is_ok());
         assert!(time_of(&v, "missing").is_err());
-        assert!(opt_time_of(&v, "at").is_some());
-        assert_eq!(opt_time_of(&v, "bad"), None);
-        assert_eq!(opt_time_of(&v, "missing"), None);
     }
 }
