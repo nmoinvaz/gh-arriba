@@ -4,7 +4,7 @@ use serde_json::json;
 
 use super::list::print_group;
 use super::{Category, DepPr, LockStep, Overview, REBASE_COMMENT, Scope};
-use crate::api::Repo;
+use crate::api::{Repo, dependabot};
 use crate::cli::{DependabotMergeArgs, MergeMethod};
 use crate::context::Ctx;
 use crate::output::print_json;
@@ -353,13 +353,6 @@ fn print_summary(repo: &Repo, outcomes: &[Outcome], blocked: &[&DepPr]) {
     }
 }
 
-const ENABLE_AUTO_MERGE: &str = r#"
-mutation($id: ID!, $method: PullRequestMergeMethod!) {
-  enablePullRequestAutoMerge(input: {pullRequestId: $id, mergeMethod: $method}) {
-    clientMutationId
-  }
-}"#;
-
 struct Merger<'a> {
     ctx: &'a Ctx,
     repo: &'a Repo,
@@ -427,9 +420,7 @@ impl Merger<'_> {
     }
 
     fn comment(&self, pr: &DepPr, body: &str) -> Result<()> {
-        let path = format!("{}/issues/{}/comments", self.repo.api(), pr.number);
-        self.ctx.client.post(&path, &json!({ "body": body }))?;
-        Ok(())
+        dependabot::comment(&self.ctx.client, self.repo, pr.number, body)
     }
 
     fn approve(&self, pr: &DepPr) -> Result<()> {
@@ -437,21 +428,15 @@ impl Merger<'_> {
         if pr.review_decision.as_deref() == Some("APPROVED") {
             return Ok(());
         }
-        let path = format!("{}/pulls/{}/reviews", self.repo.api(), pr.number);
-        self.ctx
-            .client
-            .post(&path, &json!({ "event": "APPROVE" }))?;
-        Ok(())
+        dependabot::approve(&self.ctx.client, self.repo, pr.number)
     }
 
     fn merge(&self, pr: &DepPr) -> Result<()> {
-        let path = format!("{}/pulls/{}/merge", self.repo.api(), pr.number);
-        let body = json!({ "merge_method": method_name(self.method) });
-        self.ctx.client.put(&path, &body)?;
+        let client = &self.ctx.client;
+        dependabot::merge(client, self.repo, pr.number, method_name(self.method))?;
 
         // Repos that delete merged branches themselves answer 422 or 404 here.
-        let branch = format!("{}/git/refs/heads/{}", self.repo.api(), pr.head_ref);
-        if let Err(e) = self.ctx.client.delete(&branch) {
+        if let Err(e) = dependabot::delete_branch(client, self.repo, &pr.head_ref) {
             let msg = e.to_string();
             if !msg.contains("GitHub API 422") && !msg.contains("GitHub API 404") {
                 eprintln!("  warning: could not delete {}: {msg}", pr.head_ref);
@@ -461,12 +446,7 @@ impl Merger<'_> {
     }
 
     fn enable_auto_merge(&self, pr: &DepPr) -> Result<()> {
-        let method = method_name(self.method).to_uppercase();
-        self.ctx.client.graphql(
-            ENABLE_AUTO_MERGE,
-            json!({ "id": pr.node_id, "method": method }),
-        )?;
-        Ok(())
+        dependabot::enable_auto_merge(&self.ctx.client, &pr.node_id, method_name(self.method))
     }
 }
 
