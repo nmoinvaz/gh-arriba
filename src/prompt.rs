@@ -68,3 +68,30 @@ fn read_stdin() -> Result<String> {
         .context("Failed to read stdin")?;
     Ok(s)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn yes_confirms_without_asking() {
+        assert!(confirm("Delete it?", true).unwrap());
+    }
+
+    #[test]
+    fn body_argument_loses_trailing_newlines_only() {
+        assert_eq!(
+            read_body(Some("  hi\nthere\r\n\n"), "body").unwrap(),
+            "  hi\nthere"
+        );
+        assert_eq!(read_body(Some("x \n"), "body").unwrap(), "x ");
+    }
+
+    #[test]
+    fn blank_body_argument_is_rejected() {
+        for text in ["", "\n", "  \n\t"] {
+            let err = read_body(Some(text), "comment").unwrap_err();
+            assert_eq!(err.to_string(), "The comment is empty");
+        }
+    }
+}
