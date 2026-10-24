@@ -2,6 +2,7 @@ mod apply;
 mod comment;
 mod dump;
 mod failures;
+mod labels;
 pub mod model;
 mod rebase;
 mod retry;
@@ -27,5 +28,6 @@ pub fn run(ctx: &Ctx, cmd: PrCommand) -> Result<()> {
         PrCommand::Failures(args) => failures::run(ctx, args),
         PrCommand::Rebase(args) => rebase::run(ctx, args),
         PrCommand::Reviewers(args) => reviewers::run(ctx, args),
+        PrCommand::Labels(args) => labels::run(ctx, args),
     }
 }

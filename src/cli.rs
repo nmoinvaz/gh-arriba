@@ -74,6 +74,8 @@ pub enum PrCommand {
     Rebase(RebaseArgs),
     /// Suggest reviewers from top contributors and request one
     Reviewers(ReviewersArgs),
+    /// List the repo's labels and mark those on a PR
+    Labels(LabelsArgs),
 }
 
 #[derive(Args)]
@@ -314,6 +316,12 @@ pub struct ReviewersArgs {
     /// Number of contributors to suggest
     #[arg(long, default_value_t = 10)]
     pub limit: usize,
+}
+
+#[derive(Args)]
+pub struct LabelsArgs {
+    /// Number, URL, or branch (default: PR for the current branch, if any)
+    pub pr: Option<String>,
 }
 
 // -------------------------------------------------------------------------
