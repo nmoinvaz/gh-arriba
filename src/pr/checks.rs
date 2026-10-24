@@ -447,7 +447,179 @@ fn is_settled(status: &PrStatus, waited: Duration) -> bool {
 mod tests {
     use super::*;
     use crate::api::Repo;
+    use mockito::{Matcher, Mock, Server};
     use serde_json::{Value, json};
+
+    fn ctx(server: &Server, json: bool) -> Ctx {
+        Ctx {
+            client: Client::for_tests(&server.url()),
+            repo_flag: Some("o/r".into()),
+            json,
+            yes: true,
+        }
+    }
+
+    /// The rollup query for PR `owner/name#number`, with `nodes` as its checks.
+    fn mock_rollup(server: &mut Server, owner: &str, number: u64, nodes: Vec<Value>) -> Mock {
+        let mut pr = header();
+        pr["last"] = json!({"nodes": [{"commit": {"statusCheckRollup": {"contexts": {
+            "pageInfo": {"hasNextPage": false}, "nodes": nodes
+        }}}}]});
+        server
+            .mock("POST", "/graphql")
+            .match_body(Matcher::PartialJson(
+                json!({"variables": {"owner": owner, "number": number}}),
+            ))
+            .with_body(json!({"data": {"repository": {"pullRequest": pr}}}).to_string())
+            .create()
+    }
+
+    fn args(prs: &[&str]) -> ChecksArgs {
+        ChecksArgs {
+            prs: prs.iter().map(|s| s.to_string()).collect(),
+            wait: false,
+            interval: 1,
+            timeout: 0,
+            fail_fast: false,
+            sha: None,
+        }
+    }
+
+    fn passing() -> Vec<Value> {
+        vec![run_node("Ubuntu", "Build", "COMPLETED", Some("SUCCESS"))]
+    }
+
+    #[test]
+    fn summary_fails_when_any_check_failed() {
+        let mut server = Server::new();
+        let ok = mock_rollup(&mut server, "o", 1, passing()).expect(2);
+        let bad = mock_rollup(
+            &mut server,
+            "a",
+            2,
+            vec![
+                run_node("macOS", "Build", "COMPLETED", Some("FAILURE")),
+                json!({"__typename": "StatusContext", "context": "ci", "state": "FAILURE"}),
+            ],
+        )
+        .expect(2);
+        let err = run(&ctx(&server, false), args(&["1", "a/b#2"]))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(err, "2 checks failed");
+        let err = run(&ctx(&server, true), args(&["1", "a/b#2"]))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(err, "2 checks failed");
+        ok.assert();
+        bad.assert();
+    }
+
+    #[test]
+    fn summary_passes_without_failures() {
+        let mut server = Server::new();
+        let m = mock_rollup(&mut server, "o", 1, passing());
+        run(&ctx(&server, false), args(&["o/r#1"])).unwrap();
+        m.assert();
+    }
+
+    #[test]
+    fn wait_returns_once_settled() {
+        let mut server = Server::new();
+        let m = mock_rollup(&mut server, "o", 1, passing());
+        let a = ChecksArgs {
+            wait: true,
+            timeout: 30,
+            ..args(&["1"])
+        };
+        run(&ctx(&server, true), a).unwrap();
+        // Settled on the first poll, so there was no second.
+        m.assert();
+    }
+
+    #[test]
+    fn wait_times_out_with_pending_checks() {
+        let mut server = Server::new();
+        let m = mock_rollup(
+            &mut server,
+            "o",
+            1,
+            vec![run_node("Ubuntu", "Build", "QUEUED", None)],
+        );
+        let a = ChecksArgs {
+            wait: true,
+            ..args(&["1"])
+        };
+        let err = run(&ctx(&server, false), a).unwrap_err().to_string();
+        assert_eq!(err, "Timed out after 0 minutes with 1 checks pending");
+        m.assert();
+    }
+
+    #[test]
+    fn wait_fails_fast_on_a_failure() {
+        let mut server = Server::new();
+        mock_rollup(
+            &mut server,
+            "o",
+            1,
+            vec![
+                run_node("Ubuntu", "Build", "QUEUED", None),
+                run_node("macOS", "Build", "COMPLETED", Some("FAILURE")),
+            ],
+        );
+        mock_rollup(&mut server, "o", 2, passing());
+        let a = ChecksArgs {
+            wait: true,
+            fail_fast: true,
+            timeout: 30,
+            ..args(&["1", "2"])
+        };
+        let err = run(&ctx(&server, true), a).unwrap_err().to_string();
+        assert_eq!(err, "1 check failed");
+    }
+
+    #[test]
+    fn sha_waits_for_the_head() {
+        let mut server = Server::new();
+        let m = mock_rollup(&mut server, "o", 1, passing()).expect(2);
+        // The head is 1a2b3c4d5e6f, so an abbreviation of it matches at once.
+        let a = ChecksArgs {
+            sha: Some("1A2B3C4D".into()),
+            ..args(&["1"])
+        };
+        run(&ctx(&server, false), a).unwrap();
+        let a = ChecksArgs {
+            sha: Some("ffff0000".into()),
+            ..args(&["1"])
+        };
+        let err = run(&ctx(&server, true), a).unwrap_err().to_string();
+        assert_eq!(
+            err,
+            "o/r#1 head is still 1a2b3c4d after 0 minutes, not ffff0000"
+        );
+        m.assert();
+
+        let a = ChecksArgs {
+            sha: Some("1a2b".into()),
+            ..args(&["1", "2"])
+        };
+        let err = run(&ctx(&server, true), a).unwrap_err().to_string();
+        assert_eq!(err, "--sha takes a single PR");
+    }
+
+    #[test]
+    fn sha_then_wait_polls_the_checks() {
+        let mut server = Server::new();
+        let m = mock_rollup(&mut server, "o", 1, passing()).expect(2);
+        let a = ChecksArgs {
+            sha: Some("1a2b3c4d".into()),
+            wait: true,
+            timeout: 30,
+            ..args(&["1"])
+        };
+        run(&ctx(&server, false), a).unwrap();
+        m.assert();
+    }
 
     fn parse_check_run(node: &Value) -> CheckRun {
         serde_json::from_value(node.clone()).unwrap()
