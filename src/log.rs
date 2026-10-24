@@ -18,6 +18,12 @@ pub struct Excerpt {
     pub dropped: usize,
 }
 
+/// Lines of context shown before each error by default.
+pub const CONTEXT: usize = 8;
+
+/// Error blocks shown per job by default.
+pub const MAX: usize = 5;
+
 static TIMESTAMP: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^\x{feff}?\d{4}-\d{2}-\d{2}T[\d:.]+Z ?").unwrap());
 static ANSI: LazyLock<Regex> =
