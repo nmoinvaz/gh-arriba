@@ -210,8 +210,6 @@ is stored under a flat name with underscores for path separators, as in
 `zlib-ng_.vscode_settings.json`, and platform-specific files tag the OS before the extension, as in
 `zlib-ng_.vscode_settings[macos].json`. The manifest is `.<project>-config-sync.yaml`.
 
-`config` replaces [gcs](https://github.com/nmoinvaz/gcs) and reads the gists it created.
-
 ## Authentication
 
 Uses the token from `gh auth token`, falling back to `GH_TOKEN` or `GITHUB_TOKEN`. Set
