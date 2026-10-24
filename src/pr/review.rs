@@ -1,9 +1,8 @@
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
-use serde_json::{Value, json};
+use serde_json::json;
 
-use crate::api::json::{login_of, str_of};
-use crate::api::pulls::vars;
+use crate::api::pulls::{self, NewThread, fetch_pending};
 use crate::api::{Client, PrRef};
 use crate::cli::{PrArg, ReviewAddArgs, ReviewCommand, ReviewEvent, ReviewSubmitArgs, Side};
 use crate::context::Ctx;
@@ -33,13 +32,13 @@ pub struct FileLines {
 
 /// Commentable ranges for every file in the PR. Files without a patch get empty ranges.
 pub fn fetch_file_lines(client: &Client, pr: &PrRef) -> Result<Vec<FileLines>> {
-    let files = client.get_all(&format!("{}/files", pr.api()))?;
+    let files = pulls::pr_files(client, pr)?;
     Ok(files
-        .iter()
+        .into_iter()
         .map(|f| {
-            let (left, right) = f["patch"].as_str().map(hunk_ranges).unwrap_or_default();
+            let (left, right) = f.patch.as_deref().map(hunk_ranges).unwrap_or_default();
             FileLines {
-                path: str_of(f, "filename"),
+                path: f.filename,
                 right,
                 left,
             }
@@ -115,92 +114,6 @@ fn lines(ctx: &Ctx, args: PrArg) -> Result<()> {
         println!("{:width$}  {}", f.path, sides.join("  "));
     }
     Ok(())
-}
-
-#[derive(Debug, Serialize)]
-struct PendingComment {
-    id: u64,
-    path: String,
-    start_line: Option<u64>,
-    line: Option<u64>,
-    body: String,
-}
-
-#[derive(Debug, Serialize)]
-struct Pending {
-    id: String,
-    url: String,
-    body: String,
-    comment_count: u64,
-    comments: Vec<PendingComment>,
-}
-
-/// The PR's node ID and author, plus the viewer's pending review if there is one.
-struct ReviewState {
-    pr_id: String,
-    author: String,
-    pending: Option<Pending>,
-}
-
-const PENDING_QUERY: &str = r#"
-query($owner: String!, $repo: String!, $number: Int!) {
-  repository(owner: $owner, name: $repo) {
-    pullRequest(number: $number) {
-      id
-      author { login }
-      reviews(first: 10, states: PENDING) {
-        nodes {
-          id url body viewerDidAuthor
-          comments(first: 100) {
-            totalCount
-            nodes { databaseId path startLine line originalStartLine originalLine body }
-          }
-        }
-      }
-    }
-  }
-}"#;
-
-/// Pending reviews are visible only to their author, so at most one comes back for the viewer.
-fn fetch_pending(client: &Client, pr: &PrRef) -> Result<ReviewState> {
-    let data = client.graphql(PENDING_QUERY, vars(pr))?;
-    let p = &data["repository"]["pullRequest"];
-    if p.is_null() {
-        bail!("Pull request {pr} not found");
-    }
-    let pending = p["reviews"]["nodes"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .find(|r| r["viewerDidAuthor"].as_bool() == Some(true))
-        .map(parse_pending);
-    Ok(ReviewState {
-        pr_id: str_of(p, "id"),
-        author: login_of(&p["author"]),
-        pending,
-    })
-}
-
-fn parse_pending(review: &Value) -> Pending {
-    let comments = &review["comments"];
-    Pending {
-        id: str_of(review, "id"),
-        url: str_of(review, "url"),
-        body: str_of(review, "body"),
-        comment_count: comments["totalCount"].as_u64().unwrap_or(0),
-        comments: comments["nodes"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .map(|c| PendingComment {
-                id: c["databaseId"].as_u64().unwrap_or(0),
-                path: str_of(c, "path"),
-                start_line: c["startLine"].as_u64().or(c["originalStartLine"].as_u64()),
-                line: c["line"].as_u64().or(c["originalLine"].as_u64()),
-                body: str_of(c, "body"),
-            })
-            .collect(),
-    }
 }
 
 /// `path:line` or `path:start-end`.
@@ -297,16 +210,6 @@ fn check_commentable(files: &[FileLines], path: &str, side: Side, range: Range) 
     )
 }
 
-const ADD_REVIEW: &str = r#"
-mutation($pr: ID!) {
-  addPullRequestReview(input: { pullRequestId: $pr }) { pullRequestReview { id url } }
-}"#;
-
-const ADD_THREAD: &str = r#"
-mutation($input: AddPullRequestReviewThreadInput!) {
-  addPullRequestReviewThread(input: $input) { thread { id } }
-}"#;
-
 #[derive(Serialize)]
 struct Added {
     review_id: String,
@@ -332,32 +235,21 @@ fn add(ctx: &Ctx, args: ReviewAddArgs) -> Result<()> {
     let state = fetch_pending(client, &pr)?;
     let (review_id, existing) = match &state.pending {
         Some(p) => (p.id.clone(), p.comment_count),
-        None => {
-            let data = client.graphql(ADD_REVIEW, json!({ "pr": state.pr_id }))?;
-            let id = str_of(&data["addPullRequestReview"]["pullRequestReview"], "id");
-            if id.is_empty() {
-                bail!("GitHub did not return the new pending review");
-            }
-            (id, 0)
-        }
+        None => (pulls::add_pending_review(client, &state.pr_id)?, 0),
     };
 
     let side = side_name(args.side);
-    let mut input = json!({
-        "pullRequestReviewId": review_id,
-        "path": path,
-        "line": range.1,
-        "side": side,
-        "body": body,
-    });
-    if range.0 != range.1 {
-        input["startLine"] = json!(range.0);
-        input["startSide"] = json!(side);
-    }
-    let data = client.graphql(ADD_THREAD, json!({ "input": input }))?;
-    let thread_id = data["addPullRequestReviewThread"]["thread"]["id"]
-        .as_str()
-        .map(str::to_string);
+    let thread_id = pulls::add_review_thread(
+        client,
+        &NewThread {
+            review_id: &review_id,
+            path: &path,
+            start_line: range.0,
+            line: range.1,
+            side,
+            body: &body,
+        },
+    )?;
 
     let added = Added {
         review_id,
@@ -426,20 +318,6 @@ fn event_name(event: ReviewEvent) -> &'static str {
     }
 }
 
-const SUBMIT_REVIEW: &str = r#"
-mutation($id: ID!, $event: PullRequestReviewEvent!, $body: String) {
-  submitPullRequestReview(input: { pullRequestReviewId: $id, event: $event, body: $body }) {
-    pullRequestReview { id url state }
-  }
-}"#;
-
-const CREATE_REVIEW: &str = r#"
-mutation($pr: ID!, $event: PullRequestReviewEvent!, $body: String) {
-  addPullRequestReview(input: { pullRequestId: $pr, event: $event, body: $body }) {
-    pullRequestReview { id url state }
-  }
-}"#;
-
 /// What submit will do, decided before any mutation.
 #[derive(Debug, PartialEq)]
 enum SubmitPlan {
@@ -507,36 +385,25 @@ fn submit(ctx: &Ctx, args: ReviewSubmitArgs) -> Result<()> {
         .filter(|b| !b.is_empty());
 
     let review = match plan {
-        SubmitPlan::Submit(id) => {
-            let vars = json!({ "id": id, "event": event, "body": body });
-            client.graphql(SUBMIT_REVIEW, vars)?["submitPullRequestReview"]["pullRequestReview"]
-                .take()
-        }
-        SubmitPlan::Create => {
-            let vars = json!({ "pr": state.pr_id, "event": event, "body": body });
-            client.graphql(CREATE_REVIEW, vars)?["addPullRequestReview"]["pullRequestReview"].take()
-        }
+        SubmitPlan::Submit(id) => pulls::submit_review(client, &id, event, body)?,
+        SubmitPlan::Create => pulls::create_review(client, &state.pr_id, event, body)?,
     };
 
     if ctx.json {
         return output::print_json(&review);
     }
     let comments = state.pending.as_ref().map(|p| p.comment_count).unwrap_or(0);
+    let r = review.unwrap_or_default();
     println!(
         "submitted review {} as {} with {} inline comment{}: {}",
-        str_of(&review, "id"),
-        str_of(&review, "state"),
+        r.id.unwrap_or_default(),
+        r.state.unwrap_or_default(),
         comments,
         if comments == 1 { "" } else { "s" },
-        str_of(&review, "url")
+        r.url.unwrap_or_default()
     );
     Ok(())
 }
-
-const DELETE_REVIEW: &str = r#"
-mutation($id: ID!) {
-  deletePullRequestReview(input: { pullRequestReviewId: $id }) { pullRequestReview { id } }
-}"#;
 
 fn discard(ctx: &Ctx, args: PrArg) -> Result<()> {
     let pr = ctx.pr(args.pr.as_deref())?;
@@ -559,7 +426,7 @@ fn discard(ctx: &Ctx, args: PrArg) -> Result<()> {
         println!("Kept pending review {}.", p.id);
         return Ok(());
     }
-    ctx.client.graphql(DELETE_REVIEW, json!({ "id": p.id }))?;
+    pulls::delete_review(&ctx.client, &p.id)?;
 
     if ctx.json {
         return output::print_json(&json!({ "discarded": p.id, "comment_count": p.comment_count }));

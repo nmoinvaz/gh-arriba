@@ -10,12 +10,17 @@ use serde_json::{Value, json};
 use crate::api::{Client, PrRef, Repo};
 
 mod comments;
+mod pending;
 mod rollup;
 mod threads;
 
 pub use comments::{
     RestComment, edit_issue_comment, edit_review, edit_review_comment, find_issue_comment,
     find_review_comment, issue_comment, review, review_comment,
+};
+pub use pending::{
+    NewThread, add_pending_review, add_review_thread, create_review, delete_review, fetch_pending,
+    pr_files, submit_review,
 };
 pub use rollup::{CheckRun, StatusContext, StatusFields, checks_with_status, checks_with_title};
 #[cfg(test)]
