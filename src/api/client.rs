@@ -69,10 +69,16 @@ impl Client {
     }
 
     fn request(&self, method: Method, url: &str) -> RequestBuilder {
+        self.request_as(method, url, "application/vnd.github+json")
+    }
+
+    /// A request that accepts `media_type`. reqwest appends repeated headers, so each request
+    /// sets Accept exactly once.
+    fn request_as(&self, method: Method, url: &str, media_type: &str) -> RequestBuilder {
         self.http
             .request(method, url)
             .bearer_auth(&self.token)
-            .header("Accept", "application/vnd.github+json")
+            .header("Accept", media_type)
             .header("X-GitHub-Api-Version", "2022-11-28")
     }
 
@@ -156,8 +162,7 @@ impl Client {
     pub fn get_raw(&self, path: &str) -> Result<String> {
         let url = self.url(path);
         let resp = self
-            .request(Method::GET, &url)
-            .header("Accept", "application/vnd.github.raw+json")
+            .request_as(Method::GET, &url, "application/vnd.github.raw+json")
             .send()
             .with_context(|| format!("GET {path} failed"))?;
         check(resp, &Method::GET, path)?
