@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use crate::cli::{DispatchArgs, LogsArgs, RunCommand, WatchArgs};
 use crate::context::{Ctx, Repo, git};
-use crate::github::is_failed;
+use crate::github::{encode_path, is_failed};
 use crate::log::{self, Excerpt};
 use crate::{output, workflow};
 
@@ -345,7 +345,7 @@ fn find_runs(
             format!(
                 "{}/actions/runs?branch={}&per_page=100",
                 repo.api(),
-                encode(b)
+                encode_path(b)
             ),
             format!("branch {b}"),
         ),
@@ -409,20 +409,6 @@ fn select_runs(runs: &[Value], workflow: Option<&str>) -> Vec<u64> {
         .collect();
     ids.sort_unstable();
     ids
-}
-
-/// Percent-encode a query value, keeping slashes so branch names stay readable.
-fn encode(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for b in value.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
-                out.push(b as char)
-            }
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
 }
 
 /// The repository and run a RUN argument names. A job ID or URL stands for the run it belongs to.
@@ -620,10 +606,5 @@ mod tests {
         assert_eq!(select_runs(&runs, Some("build.yml")), vec![20]);
         assert!(select_runs(&runs, Some("deploy")).is_empty());
         assert!(select_runs(&[], None).is_empty());
-    }
-
-    #[test]
-    fn encode_keeps_slashes() {
-        assert_eq!(encode("nathan/dev/fix#2"), "nathan/dev/fix%232");
     }
 }
