@@ -14,6 +14,15 @@ gh extension install nmoinvaz/gh-arriba
 
 Upgrade with `gh extension upgrade arriba`.
 
+## Use with Claude
+
+Add this line to `~/.claude/CLAUDE.md` so Claude Code reaches for `gh arriba` where `gh` falls
+short:
+
+```
+* Use `gh arriba` for what `gh` lacks, such as PR review threads, pending reviews, CI reruns, job logs, releases, and Dependabot. Run `gh arriba --help` for the commands.
+```
+
 ## Usage
 
 ```
