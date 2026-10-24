@@ -375,6 +375,8 @@ pub enum RunCommand {
     Dispatch(DispatchArgs),
     /// List, download, or prune the artifacts of runs
     Artifacts(ArtifactsArgs),
+    /// Show Actions cache usage by ref and key against the repo limit
+    Caches(CachesArgs),
 }
 
 #[derive(Args)]
@@ -522,6 +524,17 @@ pub struct ArtifactsArgs {
     /// Print what --prune would delete without deleting it
     #[arg(long, requires = "prune")]
     pub dry_run: bool,
+}
+
+#[derive(Args)]
+pub struct CachesArgs {
+    /// Only caches for this branch, PR number, or full ref
+    #[arg(long = "ref", value_name = "REF")]
+    pub git_ref: Option<String>,
+
+    /// Only caches whose key starts with this
+    #[arg(short, long, value_name = "PREFIX")]
+    pub key: Option<String>,
 }
 
 /// Parse an age such as `30m`, `12h`, `7d`, or `2w`.
