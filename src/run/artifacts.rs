@@ -2,6 +2,9 @@ use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::Value;
+use std::collections::HashMap;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use super::{Commit, find_runs, resolve_run};
 use crate::cli::ArtifactsArgs;
@@ -132,7 +135,7 @@ fn latest_success(ctx: &Ctx, args: &ArtifactsArgs) -> Result<((Repo, u64), Vec<A
         .take(SUCCESS_SCAN)
     {
         let artifacts = run_artifacts(ctx, &repo, id)?;
-        if !artifacts.is_empty() {
+        if artifacts.iter().any(|a| wanted(args, &a.name)) {
             return Ok(((repo, id), artifacts));
         }
     }
@@ -149,13 +152,158 @@ pub fn run(ctx: &Ctx, args: ArtifactsArgs) -> Result<()> {
             found.push(((repo, id), artifacts));
         }
     }
+    for (_, artifacts) in &mut found {
+        artifacts.retain(|a| wanted(&args, &a.name));
+    }
 
+    if args.download {
+        return download(ctx, &found, &args.dir);
+    }
     if ctx.json {
         let all: Vec<&Artifact> = found.iter().flat_map(|(_, a)| a).collect();
         return output::print_json(&all);
     }
     print!("{}", render(&found, Utc::now()));
     Ok(())
+}
+
+/// Whether `-n` and `-p` keep an artifact. With neither, every artifact is kept.
+fn wanted(args: &ArtifactsArgs, name: &str) -> bool {
+    (args.names.is_empty() && args.patterns.is_empty())
+        || args.names.iter().any(|n| n == name)
+        || args.patterns.iter().any(|p| glob(p, name))
+}
+
+/// Match `name` against a glob where `*` is any run of characters and `?` is any one.
+fn glob(pattern: &str, name: &str) -> bool {
+    let (p, n): (Vec<char>, Vec<char>) = (pattern.chars().collect(), name.chars().collect());
+    let (mut pi, mut ni) = (0, 0);
+    // Where the last `*` was, and the name position it currently stands in for.
+    let mut star: Option<(usize, usize)> = None;
+    while ni < n.len() {
+        if pi < p.len() && (p[pi] == '?' || p[pi] == n[ni]) {
+            pi += 1;
+            ni += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star = Some((pi, ni));
+            pi += 1;
+        } else if let Some((sp, sn)) = star {
+            // Let the `*` swallow one more character and retry from there.
+            pi = sp + 1;
+            ni = sn + 1;
+            star = Some((sp, sn + 1));
+        } else {
+            return false;
+        }
+    }
+    p[pi..].iter().all(|&c| c == '*')
+}
+
+#[derive(Serialize)]
+struct Downloaded {
+    #[serde(flatten)]
+    artifact: Artifact,
+    path: PathBuf,
+    files: usize,
+}
+
+/// Download and extract the artifacts. One artifact goes straight into `dir`, several each get a
+/// directory named after the artifact, as `gh run download` does. Expired ones are skipped.
+fn download(ctx: &Ctx, found: &[((Repo, u64), Vec<Artifact>)], dir: &Path) -> Result<()> {
+    let mut chosen: Vec<&Artifact> = Vec::new();
+    for a in found.iter().flat_map(|(_, a)| a) {
+        if a.expired {
+            eprintln!("skipped {} ({}): expired", a.name, a.id);
+        } else {
+            chosen.push(a);
+        }
+    }
+    if chosen.is_empty() {
+        bail!("No artifacts to download");
+    }
+    let mut runs_by_name: HashMap<&str, Vec<u64>> = HashMap::new();
+    for a in &chosen {
+        runs_by_name.entry(&a.name).or_default().push(a.run_id);
+    }
+    if let Some((name, runs)) = runs_by_name.iter().find(|(_, runs)| runs.len() > 1) {
+        let runs: Vec<String> = runs.iter().map(u64::to_string).collect();
+        bail!(
+            "Several runs uploaded an artifact named {name} ({}). Pass one run, or -w to pick a workflow.",
+            runs.join(", ")
+        );
+    }
+
+    let single = chosen.len() == 1;
+    let mut done = Vec::new();
+    for a in chosen {
+        let dest = if single {
+            dir.to_path_buf()
+        } else {
+            dir.join(&a.name)
+        };
+        fs::create_dir_all(&dest)
+            .with_context(|| format!("Failed to create {}", dest.display()))?;
+        let repo = Repo::parse(&a.repo)?;
+        // Download beside the destination so a failed extraction leaves nothing half-written.
+        let zip = dir.join(format!(".{}-{}.zip.part", a.name, a.id));
+        let fetched = ctx
+            .client
+            .download(
+                &format!("{}/actions/artifacts/{}/zip", repo.api(), a.id),
+                &zip,
+            )
+            .and_then(|_| extract(&zip, &dest));
+        let _ = fs::remove_file(&zip);
+        let files = fetched.with_context(|| format!("Failed to download {}", a.name))?;
+        if !ctx.json {
+            println!(
+                "{} ({}, {files} files) -> {}",
+                a.name,
+                size(a.size),
+                dest.display()
+            );
+        }
+        done.push(Downloaded {
+            artifact: a.clone(),
+            path: dest,
+            files,
+        });
+    }
+    if ctx.json {
+        output::print_json(&done)?;
+    }
+    Ok(())
+}
+
+/// Extract a zip into `dest`, refusing entries whose paths would land outside it. Returns the
+/// number of files written.
+fn extract(zip: &Path, dest: &Path) -> Result<usize> {
+    let file = fs::File::open(zip).with_context(|| format!("Failed to open {}", zip.display()))?;
+    let mut archive = zip::ZipArchive::new(file).context("Not a valid zip archive")?;
+    let mut files = 0;
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i)?;
+        let Some(rel) = entry.enclosed_name() else {
+            bail!(
+                "Refusing to extract {:?}, it points outside the target directory",
+                entry.name()
+            );
+        };
+        let out = dest.join(rel);
+        if entry.is_dir() {
+            fs::create_dir_all(&out)?;
+            continue;
+        }
+        if let Some(parent) = out.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let mut target = fs::File::create(&out)
+            .with_context(|| format!("Failed to create {}", out.display()))?;
+        std::io::copy(&mut entry, &mut target)
+            .with_context(|| format!("Failed to write {}", out.display()))?;
+        files += 1;
+    }
+    Ok(files)
 }
 
 /// Artifacts grouped under each run, one row per artifact.
@@ -263,6 +411,58 @@ mod tests {
         assert_eq!(successful_runs(&runs, None), vec![30, 10]);
         assert_eq!(successful_runs(&runs, Some("build")), vec![10]);
         assert!(successful_runs(&runs, Some("deploy")).is_empty());
+    }
+
+    #[test]
+    fn glob_matches_stars_and_question_marks() {
+        assert!(glob("*", "anything"));
+        assert!(glob("*", ""));
+        assert!(glob("linux-*", "linux-x64"));
+        assert!(glob("*-x64", "linux-x64"));
+        assert!(glob("lin?x-*-debug", "linux-arm64-debug"));
+        assert!(glob("*a*b*", "xxaxxbxx"));
+        assert!(glob("exact", "exact"));
+        assert!(!glob("linux-*", "windows-x64"));
+        assert!(!glob("lin?x", "linx"));
+        assert!(!glob("*a*b", "xxbxxa"));
+        assert!(!glob("", "a"));
+    }
+
+    /// A zip in a fresh temp directory holding the given entries.
+    fn zip_with(test: &str, entries: &[(&str, &str)]) -> (PathBuf, PathBuf) {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("gh-arriba-{test}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("a.zip");
+        let mut writer = zip::ZipWriter::new(fs::File::create(&path).unwrap());
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        for (name, body) in entries {
+            writer.start_file(*name, options).unwrap();
+            writer.write_all(body.as_bytes()).unwrap();
+        }
+        writer.finish().unwrap();
+        (dir, path)
+    }
+
+    #[test]
+    fn extract_writes_nested_files() {
+        let (dir, zip) = zip_with("extract", &[("bin/tool", "x"), ("README", "y")]);
+        let out = dir.join("out");
+        assert_eq!(extract(&zip, &out).unwrap(), 2);
+        assert_eq!(fs::read_to_string(out.join("bin/tool")).unwrap(), "x");
+        assert_eq!(fs::read_to_string(out.join("README")).unwrap(), "y");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn extract_refuses_paths_outside_the_target() {
+        let (dir, zip) = zip_with("traversal", &[("../evil", "x")]);
+        let out = dir.join("out");
+        assert!(extract(&zip, &out).is_err());
+        assert!(!dir.join("evil").exists());
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

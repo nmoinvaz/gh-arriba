@@ -63,7 +63,7 @@ gh arriba [options] <command>
 | `run logs <RUN_OR_JOB>` | Download job logs to files for searching, picking jobs by name with `--job` and printing error lines with `--errors` or matches with `--grep` |
 | `run watch [RUN]...` | Follow runs until their jobs finish, by default every run for the local HEAD |
 | `run dispatch <WORKFLOW>` | Dispatch any workflow with `-f` inputs, printing its run and following it with `--watch` |
-| `run artifacts [RUN]...` | List artifacts with size and expiry for runs, a commit, a branch, or a PR |
+| `run artifacts [RUN]...` | List artifacts with size and expiry for runs, a commit, a branch, or a PR, and download them with `--download` |
 | `release` | Dispatch the repo's release workflow with a version bump, previewing with `--dry-run` |
 
 ### Dependabot
@@ -200,6 +200,12 @@ Or those of the latest green build of the default branch, skipping runs that upl
 
 ```
 gh arriba run artifacts --success -w build
+```
+
+Add `--download` to extract them, picking artifacts with `-n NAME` or `-p 'GLOB'`:
+
+```
+gh arriba run artifacts --success -w build --download -p 'linux-*' -D dist
 ```
 
 Cut a minor release through the repo's Release workflow:

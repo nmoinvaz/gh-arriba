@@ -142,6 +142,16 @@ impl Client {
             .with_context(|| format!("Failed to read body of {path}"))
     }
 
+    /// GET a binary body, such as an artifact zip, streaming it into `dest`. Redirects are
+    /// followed. Returns the bytes written.
+    pub fn download(&self, path: &str, dest: &std::path::Path) -> Result<u64> {
+        let mut resp = self.send(Method::GET, path, None)?;
+        let mut file = std::fs::File::create(dest)
+            .with_context(|| format!("Failed to create {}", dest.display()))?;
+        std::io::copy(&mut resp, &mut file)
+            .with_context(|| format!("Failed to download {path} to {}", dest.display()))
+    }
+
     /// GET file contents from the contents API as raw text.
     pub fn get_raw(&self, path: &str) -> Result<String> {
         let url = self.url(path);
