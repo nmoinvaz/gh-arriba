@@ -105,10 +105,7 @@ pub struct Found {
 /// Fetch the comment a target names. A bare ID is tried as a review comment, then an issue
 /// comment. Review IDs share no endpoint without the PR, so those need a URL.
 pub fn find(ctx: &Ctx, target: &Target) -> Result<Found> {
-    let repo = match &target.repo {
-        Some(r) => r.clone(),
-        None => ctx.repo()?,
-    };
+    let repo = ctx.repo_or(target.repo.clone())?;
     let id = target.id;
     let found = |kind, value| Found {
         repo: repo.clone(),
