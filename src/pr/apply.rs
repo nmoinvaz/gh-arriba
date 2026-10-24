@@ -4,11 +4,11 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::process::Command;
 
+use crate::api::pulls::{Thread, fetch_threads};
 use crate::api::{Client, PrRef, encode_path};
 use crate::cli::ApplyArgs;
 use crate::context::{Ctx, git};
 use crate::output;
-use crate::pr::model::{Thread, fetch_threads};
 use crate::prompt;
 
 /// One suggestion block, anchored to an inclusive line range on the PR head.
@@ -484,7 +484,7 @@ fn read_at_head(client: &Client, pr: &PrRef, head_oid: &str, path: &str) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pr::model::Comment;
+    use crate::api::pulls::Comment;
     use chrono::Utc;
 
     // Trimmed from CodeRabbit's comment on zlib-ng/zlib-ng#2477, deflate.c:1276-1277.

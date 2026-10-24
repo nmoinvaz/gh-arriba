@@ -1,11 +1,10 @@
 use anyhow::{Context, Result, bail};
 use regex::Regex;
 use serde::Serialize;
-use serde_json::{Value, json};
 use std::sync::LazyLock;
 
 use crate::api::Repo;
-use crate::api::json::{login_of, str_of};
+use crate::api::pulls::{self, RestComment, user_login};
 use crate::cli::{CommentCommand, CommentEditArgs, CommentShowArgs};
 use crate::context::Ctx;
 use crate::output::{indent, print_json};
@@ -100,7 +99,7 @@ pub fn parse_target(s: &str) -> Result<Target> {
 pub struct Found {
     pub repo: Repo,
     pub kind: Kind,
-    pub value: Value,
+    pub value: RestComment,
 }
 
 /// Fetch the comment a target names. A bare ID is tried as a review comment, then an issue
@@ -113,39 +112,30 @@ pub fn find(ctx: &Ctx, target: &Target) -> Result<Found> {
         kind,
         value,
     };
+    let client = &ctx.client;
     match target.kind {
-        Some(Kind::ReviewComment) => {
-            let v = ctx
-                .client
-                .get(&format!("{}/pulls/comments/{id}", repo.api()))?;
-            Ok(found(Kind::ReviewComment, v))
-        }
-        Some(Kind::IssueComment) => {
-            let v = ctx
-                .client
-                .get(&format!("{}/issues/comments/{id}", repo.api()))?;
-            Ok(found(Kind::IssueComment, v))
-        }
+        Some(Kind::ReviewComment) => Ok(found(
+            Kind::ReviewComment,
+            pulls::review_comment(client, &repo, id)?,
+        )),
+        Some(Kind::IssueComment) => Ok(found(
+            Kind::IssueComment,
+            pulls::issue_comment(client, &repo, id)?,
+        )),
         Some(Kind::Review) => {
             let number = target
                 .number
                 .context("A review URL carries its PR number")?;
-            let v = ctx
-                .client
-                .get(&format!("{}/pulls/{number}/reviews/{id}", repo.api()))?;
-            Ok(found(Kind::Review, v))
+            Ok(found(
+                Kind::Review,
+                pulls::review(client, &repo, number, id)?,
+            ))
         }
         None => {
-            if let Some(v) = ctx
-                .client
-                .get_opt(&format!("{}/pulls/comments/{id}", repo.api()))?
-            {
+            if let Some(v) = pulls::find_review_comment(client, &repo, id)? {
                 return Ok(found(Kind::ReviewComment, v));
             }
-            if let Some(v) = ctx
-                .client
-                .get_opt(&format!("{}/issues/comments/{id}", repo.api()))?
-            {
+            if let Some(v) = pulls::find_issue_comment(client, &repo, id)? {
                 return Ok(found(Kind::IssueComment, v));
             }
             let hint = if ctx.repo_flag.is_none() {
@@ -193,33 +183,29 @@ struct Shown {
 }
 
 /// Last path segment of an API URL as a number, as in `.../pulls/42`.
-pub(super) fn trailing_number(url: &Value) -> Option<u64> {
-    url.as_str()?.rsplit('/').next()?.parse().ok()
-}
-
-fn opt_str(v: &Value) -> Option<String> {
-    v.as_str().map(str::to_string)
+pub(super) fn trailing_number(url: Option<&str>) -> Option<u64> {
+    url?.rsplit('/').next()?.parse().ok()
 }
 
 fn normalize(found: &Found) -> Shown {
     let v = &found.value;
     let number = match found.kind {
-        Kind::IssueComment => trailing_number(&v["issue_url"]),
-        _ => trailing_number(&v["pull_request_url"]),
+        Kind::IssueComment => trailing_number(v.issue_url.as_deref()),
+        _ => trailing_number(v.pull_request_url.as_deref()),
     };
     let created_at = match found.kind {
-        Kind::Review => opt_str(&v["submitted_at"]),
-        _ => opt_str(&v["created_at"]),
+        Kind::Review => v.submitted_at.clone(),
+        _ => v.created_at.clone(),
     };
     let mut shown = Shown {
         kind: found.kind.name(),
-        id: v["id"].as_u64().unwrap_or_default(),
+        id: v.id,
         repo: found.repo.to_string(),
         number,
-        author: login_of(&v["user"]),
+        author: user_login(v.user.as_ref()),
         created_at,
-        url: str_of(v, "html_url"),
-        body: str_of(v, "body"),
+        url: v.html_url.clone(),
+        body: v.body.clone(),
         state: None,
         path: None,
         line: None,
@@ -230,20 +216,20 @@ fn normalize(found: &Found) -> Shown {
         diff_hunk: None,
     };
     match found.kind {
-        Kind::Review => shown.state = opt_str(&v["state"]),
+        Kind::Review => shown.state = v.state.clone(),
         Kind::ReviewComment => {
             // `line` is null once the comment no longer maps onto the PR head.
-            shown.outdated = v["line"].is_null();
-            shown.line = v["line"].as_u64().or_else(|| v["original_line"].as_u64());
+            shown.outdated = v.line.is_none();
+            shown.line = v.line.or(v.original_line);
             shown.start_line = if shown.outdated {
-                v["original_start_line"].as_u64()
+                v.original_start_line
             } else {
-                v["start_line"].as_u64()
+                v.start_line
             };
-            shown.path = opt_str(&v["path"]);
-            shown.side = opt_str(&v["side"]);
-            shown.in_reply_to = v["in_reply_to_id"].as_u64();
-            shown.diff_hunk = opt_str(&v["diff_hunk"]);
+            shown.path = v.path.clone();
+            shown.side = v.side.clone();
+            shown.in_reply_to = v.in_reply_to_id;
+            shown.diff_hunk = v.diff_hunk.clone();
         }
         Kind::IssueComment => {}
     }
@@ -306,31 +292,30 @@ fn show(ctx: &Ctx, args: CommentShowArgs) -> Result<()> {
     Ok(())
 }
 
-/// Method and path that replace a found comment's body.
-fn edit_endpoint(found: &Found) -> Result<(&'static str, String)> {
-    let api = found.repo.api();
-    let id = found.value["id"].as_u64().unwrap_or_default();
-    Ok(match found.kind {
-        Kind::ReviewComment => ("PATCH", format!("{api}/pulls/comments/{id}")),
-        Kind::IssueComment => ("PATCH", format!("{api}/issues/comments/{id}")),
+/// Replace a found comment's body, returning the comment as GitHub now has it.
+fn edit_found(ctx: &Ctx, found: &Found, body: &str) -> Result<RestComment> {
+    let client = &ctx.client;
+    let id = found.value.id;
+    match found.kind {
+        Kind::ReviewComment => pulls::edit_review_comment(client, &found.repo, id, body),
+        Kind::IssueComment => pulls::edit_issue_comment(client, &found.repo, id, body),
         Kind::Review => {
-            let number = trailing_number(&found.value["pull_request_url"])
-                .context("Review has no pull request")?;
-            ("PUT", format!("{api}/pulls/{number}/reviews/{id}"))
+            let number = review_number(found)?;
+            pulls::edit_review(client, &found.repo, number, id, body)
         }
-    })
+    }
+}
+
+/// The PR a found review belongs to.
+fn review_number(found: &Found) -> Result<u64> {
+    trailing_number(found.value.pull_request_url.as_deref()).context("Review has no pull request")
 }
 
 fn edit(ctx: &Ctx, args: CommentEditArgs) -> Result<()> {
     let body = prompt::read_body(args.body.as_deref(), "comment")?;
     let target = parse_target(&args.target)?;
     let found = find(ctx, &target)?;
-    let (method, path) = edit_endpoint(&found)?;
-    let payload = json!({ "body": body });
-    let resp = match method {
-        "PUT" => ctx.client.put(&path, &payload)?,
-        _ => ctx.client.patch(&path, &payload)?,
-    };
+    let resp = edit_found(ctx, &found, &body)?;
     let edited = normalize(&Found {
         repo: found.repo,
         kind: found.kind,
@@ -346,7 +331,11 @@ fn edit(ctx: &Ctx, args: CommentEditArgs) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use serde_json::{Value, json};
+
+    fn value(v: Value) -> RestComment {
+        serde_json::from_value(v).unwrap()
+    }
 
     fn repo() -> Option<Repo> {
         Some(Repo::parse("zlib-ng/zlib-ng").unwrap())
@@ -402,7 +391,7 @@ mod tests {
         let found = Found {
             repo: repo().unwrap(),
             kind: Kind::ReviewComment,
-            value: json!({
+            value: value(json!({
                 "id": 7, "user": { "login": "alice" }, "created_at": "2026-01-02T03:04:05Z",
                 "html_url": "https://github.com/zlib-ng/zlib-ng/pull/42#discussion_r7",
                 "pull_request_url": "https://api.github.com/repos/zlib-ng/zlib-ng/pulls/42",
@@ -410,7 +399,7 @@ mod tests {
                 "path": "deflate.c", "line": 12, "start_line": 10, "side": "RIGHT",
                 "original_line": 11, "in_reply_to_id": 6,
                 "diff_hunk": "@@ -1,2 +1,3 @@\n a\n+b"
-            }),
+            })),
         };
         let shown = normalize(&found);
         assert_eq!(shown.number, Some(42));
@@ -432,10 +421,10 @@ mod tests {
         let found = Found {
             repo: repo().unwrap(),
             kind: Kind::ReviewComment,
-            value: json!({
+            value: value(json!({
                 "id": 7, "user": { "login": "alice" }, "path": "a.c",
                 "line": null, "start_line": null, "original_line": 5, "original_start_line": 3
-            }),
+            })),
         };
         let shown = normalize(&found);
         assert!(shown.outdated);
@@ -443,35 +432,18 @@ mod tests {
     }
 
     #[test]
-    fn edit_endpoints_by_kind() {
-        let found = |kind, value| Found {
+    fn review_number_from_pull_request_url() {
+        let found = |v| Found {
             repo: repo().unwrap(),
-            kind,
-            value,
+            kind: Kind::Review,
+            value: value(v),
         };
         let pr = "https://api.github.com/repos/zlib-ng/zlib-ng/pulls/42";
-        let cases = [
-            (
-                found(
-                    Kind::ReviewComment,
-                    json!({ "id": 7, "pull_request_url": pr }),
-                ),
-                ("PATCH", "repos/zlib-ng/zlib-ng/pulls/comments/7"),
-            ),
-            (
-                found(Kind::IssueComment, json!({ "id": 8 })),
-                ("PATCH", "repos/zlib-ng/zlib-ng/issues/comments/8"),
-            ),
-            (
-                found(Kind::Review, json!({ "id": 9, "pull_request_url": pr })),
-                ("PUT", "repos/zlib-ng/zlib-ng/pulls/42/reviews/9"),
-            ),
-        ];
-        for (f, (method, path)) in cases {
-            let (m, p) = edit_endpoint(&f).unwrap();
-            assert_eq!((m, p.as_str()), (method, path));
-        }
-        assert!(edit_endpoint(&found(Kind::Review, json!({ "id": 9 }))).is_err());
+        assert_eq!(
+            review_number(&found(json!({ "id": 9, "pull_request_url": pr }))).unwrap(),
+            42
+        );
+        assert!(review_number(&found(json!({ "id": 9 }))).is_err());
     }
 
     #[test]
@@ -479,11 +451,11 @@ mod tests {
         let review = normalize(&Found {
             repo: repo().unwrap(),
             kind: Kind::Review,
-            value: json!({
+            value: value(json!({
                 "id": 9, "user": { "login": "bob" }, "state": "CHANGES_REQUESTED",
                 "submitted_at": "2026-01-02T03:04:05Z", "body": "See inline.",
                 "pull_request_url": "https://api.github.com/repos/zlib-ng/zlib-ng/pulls/42"
-            }),
+            })),
         });
         assert_eq!(review.number, Some(42));
         assert_eq!(review.created_at.as_deref(), Some("2026-01-02T03:04:05Z"));
@@ -494,10 +466,10 @@ mod tests {
         let issue = normalize(&Found {
             repo: repo().unwrap(),
             kind: Kind::IssueComment,
-            value: json!({
+            value: value(json!({
                 "id": 8, "user": { "login": "carol" },
                 "issue_url": "https://api.github.com/repos/zlib-ng/zlib-ng/issues/42"
-            }),
+            })),
         });
         assert_eq!(issue.number, Some(42));
         assert_eq!(issue.path, None);

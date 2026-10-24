@@ -7,13 +7,12 @@ use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::sync::LazyLock;
 
-use crate::api::json::{str_of, time_of};
+use crate::api::pulls::{self, PrThreads, ResolvedThread, Thread, fetch_pr, fetch_threads};
 use crate::api::{Client, PrRef, Repo};
 use crate::cli::{ReplyArgs, ResolveArgs, ThreadsArgs};
 use crate::context::Ctx;
 use crate::output::{first_lines, indent, print_json};
 use crate::pr::comment::{self, Kind};
-use crate::pr::model::{PrThreads, Thread, fetch_pr, fetch_threads, vars};
 use crate::prompt;
 
 /// Body lines shown per comment in human output.
@@ -29,7 +28,7 @@ pub fn run_threads(ctx: &Ctx, args: ThreadsArgs) -> Result<()> {
         other => other.map(str::to_string),
     };
     let since = if args.since_last_review {
-        last_review_time(&ctx.client, &pr, ctx.client.viewer()?)?
+        pulls::last_review_time(&ctx.client, &pr, ctx.client.viewer()?)?
     } else {
         None
     };
@@ -132,32 +131,6 @@ fn same_login(a: &str, b: &str) -> bool {
     let a = a.strip_suffix("[bot]").unwrap_or(a);
     let b = b.strip_suffix("[bot]").unwrap_or(b);
     a.eq_ignore_ascii_case(b)
-}
-
-const LAST_REVIEW_QUERY: &str = r#"
-query($owner: String!, $repo: String!, $number: Int!, $author: String!) {
-  repository(owner: $owner, name: $repo) {
-    pullRequest(number: $number) {
-      reviews(last: 1, author: $author,
-              states: [APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED]) {
-        nodes { submittedAt }
-      }
-    }
-  }
-}"#;
-
-/// When `login` last submitted a review on the PR, if ever.
-fn last_review_time(client: &Client, pr: &PrRef, login: &str) -> Result<Option<DateTime<Utc>>> {
-    let mut variables = vars(pr);
-    variables["author"] = json!(login);
-    let data = client.graphql(LAST_REVIEW_QUERY, variables)?;
-    let nodes = &data["repository"]["pullRequest"]["reviews"]["nodes"];
-    match nodes.get(0) {
-        Some(review) if !review["submittedAt"].is_null() => {
-            Ok(Some(time_of(review, "submittedAt")?))
-        }
-        _ => Ok(None),
-    }
 }
 
 fn print_thread(t: &Thread) {
@@ -267,24 +240,23 @@ fn fetch_findings(
     pr: &PrRef,
     since: Option<DateTime<Utc>>,
 ) -> Result<Vec<Finding>> {
-    let reviews = client.get_all(&format!("{}/reviews", pr.api()))?;
+    let reviews = pulls::reviews(client, pr)?;
     let mut findings = Vec::new();
     for review in &reviews {
-        if review["user"]["login"].as_str() != Some("coderabbitai[bot]") {
+        if review.user.as_ref().and_then(|u| u.login.as_deref()) != Some("coderabbitai[bot]") {
             continue;
         }
         // Pending reviews have no submission time and are not visible to others anyway.
-        let Ok(submitted_at) = time_of(review, "submitted_at") else {
+        let Some(submitted_at) = review.submitted_at else {
             continue;
         };
         if since.is_some_and(|s| submitted_at <= s) {
             continue;
         }
-        let body = review["body"].as_str().unwrap_or_default();
-        for item in parse_review_body(body) {
+        for item in parse_review_body(&review.body) {
             findings.push(Finding {
-                review_id: review["id"].as_u64().unwrap_or(0),
-                review_url: str_of(review, "html_url"),
+                review_id: review.id,
+                review_url: review.html_url.clone(),
                 submitted_at,
                 item,
             });
@@ -492,12 +464,7 @@ pub fn run_reply(ctx: &Ctx, args: ReplyArgs) -> Result<()> {
         Some((repo, id)) => {
             let c = lookup_comment(ctx, repo, id)?;
             // Replies attach to the thread's top-level comment, replies to replies fail.
-            let path = format!("{}/comments/{}/replies", c.pr.api(), c.top_id);
-            let resp = ctx.client.post(&path, &json!({ "body": body }))?;
-            let reply = NewComment {
-                id: resp["id"].as_u64().unwrap_or(0),
-                url: str_of(&resp, "html_url"),
-            };
+            let reply = pulls::reply_to_comment(&ctx.client, &c.pr, c.top_id, &body)?;
             let thread_id = if args.resolve {
                 let threads = fetch_threads(&ctx.client, &c.pr)?;
                 Some(find_thread(&threads, &id.to_string())?.id.clone())
@@ -507,14 +474,7 @@ pub fn run_reply(ctx: &Ctx, args: ReplyArgs) -> Result<()> {
             (reply, thread_id)
         }
         None => {
-            let data = ctx
-                .client
-                .graphql(REPLY_MUTATION, json!({ "id": args.target, "body": body }))?;
-            let c = &data["addPullRequestReviewThreadReply"]["comment"];
-            let reply = NewComment {
-                id: c["databaseId"].as_u64().unwrap_or(0),
-                url: str_of(c, "url"),
-            };
+            let reply = pulls::reply_to_thread(&ctx.client, &args.target, &body)?;
             (reply, args.resolve.then(|| args.target.clone()))
         }
     };
@@ -532,19 +492,6 @@ pub fn run_reply(ctx: &Ctx, args: ReplyArgs) -> Result<()> {
         print_resolved(&r);
     }
     Ok(())
-}
-
-const REPLY_MUTATION: &str = r#"
-mutation($id: ID!, $body: String!) {
-  addPullRequestReviewThreadReply(input: {pullRequestReviewThreadId: $id, body: $body}) {
-    comment { databaseId url }
-  }
-}"#;
-
-#[derive(Serialize)]
-struct NewComment {
-    id: u64,
-    url: String,
 }
 
 pub fn run_resolve(ctx: &Ctx, args: ResolveArgs) -> Result<()> {
@@ -586,34 +533,20 @@ struct Resolved {
     resolved: bool,
 }
 
-const RESOLVE_MUTATION: &str = r#"
-mutation($id: ID!) {
-  resolveReviewThread(input: {threadId: $id}) {
-    thread { id isResolved path line originalLine }
-  }
-}"#;
-
-const UNRESOLVE_MUTATION: &str = r#"
-mutation($id: ID!) {
-  unresolveReviewThread(input: {threadId: $id}) {
-    thread { id isResolved path line originalLine }
-  }
-}"#;
-
 fn set_resolved(client: &Client, thread_id: &str, resolve: bool) -> Result<Resolved> {
-    let (query, field) = if resolve {
-        (RESOLVE_MUTATION, "resolveReviewThread")
-    } else {
-        (UNRESOLVE_MUTATION, "unresolveReviewThread")
-    };
-    let data = client.graphql(query, json!({ "id": thread_id }))?;
-    let t = &data[field]["thread"];
-    Ok(Resolved {
-        thread_id: t["id"].as_str().unwrap_or(thread_id).to_string(),
-        path: str_of(t, "path"),
-        line: t["line"].as_u64().or_else(|| t["originalLine"].as_u64()),
-        resolved: t["isResolved"].as_bool().unwrap_or(resolve),
-    })
+    let t = pulls::set_thread_resolved(client, thread_id, resolve)?;
+    Ok(resolved(thread_id, resolve, t))
+}
+
+/// What a resolve reported, falling back to what was asked for where GitHub left fields out.
+fn resolved(thread_id: &str, resolve: bool, t: Option<ResolvedThread>) -> Resolved {
+    let t = t.unwrap_or_default();
+    Resolved {
+        thread_id: t.id.unwrap_or_else(|| thread_id.to_string()),
+        path: t.path,
+        line: t.line.or(t.original_line),
+        resolved: t.is_resolved.unwrap_or(resolve),
+    }
 }
 
 fn print_resolved(r: &Resolved) {
@@ -647,8 +580,7 @@ struct CommentRef {
 fn lookup_comment(ctx: &Ctx, repo: Option<Repo>, id: u64) -> Result<CommentRef> {
     let from_url = repo.is_some();
     let repo = ctx.repo_or(repo)?;
-    let path = format!("{}/pulls/comments/{id}", repo.api());
-    let comment = ctx.client.get_opt(&path)?.with_context(|| {
+    let comment = pulls::find_review_comment(&ctx.client, &repo, id)?.with_context(|| {
         // Comment IDs carry no repo, so a lookup in the wrong one is the likely mistake.
         let hint = if ctx.repo_flag.is_none() && !from_url {
             " Pass --repo OWNER/REPO."
@@ -657,11 +589,11 @@ fn lookup_comment(ctx: &Ctx, repo: Option<Repo>, id: u64) -> Result<CommentRef> 
         };
         format!("Review comment {id} not found in {repo}.{hint}")
     })?;
-    let number = comment::trailing_number(&comment["pull_request_url"])
+    let number = comment::trailing_number(comment.pull_request_url.as_deref())
         .with_context(|| format!("Review comment {id} has no pull request"))?;
     Ok(CommentRef {
         pr: PrRef { repo, number },
-        top_id: comment["in_reply_to_id"].as_u64().unwrap_or(id),
+        top_id: comment.in_reply_to_id.unwrap_or(id),
     })
 }
 
@@ -676,7 +608,7 @@ fn find_thread<'a>(threads: &'a PrThreads, id: &str) -> Result<&'a Thread> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pr::model::Comment;
+    use crate::api::pulls::Comment;
 
     /// Trimmed from a 2024 CodeRabbit review on zlib-ng/zlib-ng#1813.
     const OLD_BODY: &str = r#"**Actionable comments posted: 2**

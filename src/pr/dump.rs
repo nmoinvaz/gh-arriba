@@ -1,12 +1,13 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
-use serde_json::{Value, json};
+use serde_json::json;
 
-use crate::api::json::{login_of, time_of};
+use crate::api::pulls::{
+    self, IssueComment, PrInfo, Review, Thread, fetch_pr, fetch_threads, user_login,
+};
 use crate::cli::DumpArgs;
 use crate::context::Ctx;
-use crate::pr::model::{PrInfo, Thread, fetch_pr, fetch_threads};
 use crate::pr::threads::line_span;
 
 /// Width of the item prefix column, so bodies line up under it.
@@ -15,10 +16,8 @@ const PREFIX: usize = 8;
 pub fn run(ctx: &Ctx, args: DumpArgs) -> Result<()> {
     let pr = ctx.pr(args.pr.as_deref())?;
     let info = fetch_pr(&ctx.client, &pr)?;
-    let comments = ctx
-        .client
-        .get_all(&format!("{}/comments", pr.issue_api()))?;
-    let reviews = ctx.client.get_all(&format!("{}/reviews", pr.api()))?;
+    let comments = pulls::issue_comments(&ctx.client, &pr)?;
+    let reviews = pulls::reviews(&ctx.client, &pr)?;
     let threads = fetch_threads(&ctx.client, &pr)?.threads;
 
     let items = collect(&comments, &reviews, threads)?;
@@ -73,29 +72,33 @@ impl Item {
 }
 
 /// Merge issue comments, reviews, and review threads into one chronological list.
-fn collect(comments: &[Value], reviews: &[Value], threads: Vec<Thread>) -> Result<Vec<Item>> {
+fn collect(
+    comments: &[IssueComment],
+    reviews: &[Review],
+    threads: Vec<Thread>,
+) -> Result<Vec<Item>> {
     let mut items = Vec::new();
     for c in comments {
         items.push(Item::Comment {
-            at: time_of(c, "created_at")?,
-            author: login_of(&c["user"]),
-            url: text(c, "html_url"),
-            body: text(c, "body"),
+            at: c.created_at,
+            author: user_login(c.user.as_ref()),
+            url: text(&c.html_url),
+            body: text(&c.body),
         });
     }
     for r in reviews {
-        let state = text(r, "state");
-        let body = text(r, "body");
+        let state = text(&r.state);
+        let body = text(&r.body);
         // Pending reviews are private drafts. Empty COMMENTED reviews only wrap inline comments,
         // which appear under their threads.
         if state == "PENDING" || (state == "COMMENTED" && body.trim().is_empty()) {
             continue;
         }
         items.push(Item::Review {
-            at: time_of(r, "submitted_at")?,
-            author: login_of(&r["user"]),
+            at: r.submitted_at.context("submitted_at missing")?,
+            author: user_login(r.user.as_ref()),
             state,
-            url: text(r, "html_url"),
+            url: text(&r.html_url),
             body,
         });
     }
@@ -120,8 +123,8 @@ fn collect(comments: &[Value], reviews: &[Value], threads: Vec<Thread>) -> Resul
     Ok(items)
 }
 
-fn text(v: &Value, key: &str) -> String {
-    v[key].as_str().unwrap_or_default().replace("\r\n", "\n")
+fn text(s: &str) -> String {
+    s.replace("\r\n", "\n")
 }
 
 /// Render items so each starts at column 0 with a fixed prefix and bodies sit under `| `.
@@ -213,7 +216,16 @@ fn stamp(at: &DateTime<Utc>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pr::model::Comment;
+    use crate::api::pulls::Comment;
+    use serde::de::DeserializeOwned;
+    use serde_json::Value;
+
+    fn parse<T: DeserializeOwned>(values: Vec<Value>) -> Vec<T> {
+        values
+            .into_iter()
+            .map(|v| serde_json::from_value(v).unwrap())
+            .collect()
+    }
 
     fn info() -> PrInfo {
         PrInfo {
@@ -270,7 +282,7 @@ mod tests {
                    "state": "APPROVED", "html_url": "r2", "body": ""}),
             json!({"user": {"login": "me"}, "state": "PENDING", "html_url": "r3", "body": "x"}),
         ];
-        let items = collect(&comments, &reviews, vec![thread()]).unwrap();
+        let items = collect(&parse(comments), &parse(reviews), vec![thread()]).unwrap();
         let kinds: Vec<&str> = items
             .iter()
             .map(|i| match i {
@@ -288,7 +300,7 @@ mod tests {
             "user": {"login": "carol"}, "created_at": "2026-01-03T00:00:00Z",
             "html_url": "https://c", "body": "Thanks\r\nagain"
         })];
-        let items = collect(&comments, &[], vec![thread()]).unwrap();
+        let items = collect(&parse(comments), &[], vec![thread()]).unwrap();
         let out = render(&info(), &items);
         let expected = "\
 pr      #7 Fix it (OPEN) by alice  main <- fix  https://github.com/o/r/pull/7
