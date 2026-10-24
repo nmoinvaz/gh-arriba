@@ -287,6 +287,149 @@ fn print_summary(plan: &PrPlan) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mockito::{Matcher, Mock, Server};
+
+    fn ctx(server: &Server, json: bool) -> Ctx {
+        Ctx {
+            client: Client::for_tests(&server.url()),
+            repo_flag: Some("o/r".into()),
+            json,
+            yes: true,
+        }
+    }
+
+    fn node(name: &str, workflow: &str, run_id: u64, conclusion: &str) -> Value {
+        json!({
+            "__typename": "CheckRun", "name": name, "status": "COMPLETED",
+            "conclusion": conclusion, "startedAt": "2026-01-01T00:00:00Z",
+            "checkSuite": {"workflowRun": {
+                "databaseId": run_id, "event": "pull_request", "workflow": {"name": workflow}
+            }}
+        })
+    }
+
+    fn mock_rollup(server: &mut Server, number: u64, nodes: Vec<Value>) -> Mock {
+        server
+            .mock("POST", "/graphql")
+            .match_body(Matcher::PartialJson(
+                json!({"variables": {"number": number}}),
+            ))
+            .with_body(
+                json!({"data": {"repository": {"pullRequest": {
+                    "title": "Fix",
+                    "last": {"nodes": [{"commit": {"statusCheckRollup": {"contexts": {
+                        "pageInfo": {"hasNextPage": false}, "nodes": nodes
+                    }}}}]}
+                }}}})
+                .to_string(),
+            )
+            .create()
+    }
+
+    fn failing() -> Vec<Value> {
+        vec![
+            node("Ubuntu", "Build", 10, "FAILURE"),
+            node("Lint", "Lint", 11, "TIMED_OUT"),
+            node("Docs", "Docs", 12, "SUCCESS"),
+            json!({"__typename": "StatusContext", "context": "ci/jenkins", "state": "ERROR"}),
+        ]
+    }
+
+    fn args(target: &str, mine: bool, dry_run: bool) -> RetryArgs {
+        RetryArgs {
+            target: Some(target.into()),
+            mine,
+            dry_run,
+        }
+    }
+
+    #[test]
+    fn dry_run_reruns_nothing() {
+        let mut server = Server::new();
+        mock_rollup(&mut server, 7, failing());
+        let rerun = server
+            .mock("POST", Matcher::Regex("rerun-failed-jobs$".into()))
+            .expect(0)
+            .create();
+        run(&ctx(&server, true), args("7", false, true)).unwrap();
+        run(&ctx(&server, false), args("o/r#7", false, true)).unwrap();
+        rerun.assert();
+    }
+
+    #[test]
+    fn reruns_each_failed_workflow_run_once() {
+        let mut server = Server::new();
+        mock_rollup(&mut server, 7, failing());
+        let build = server
+            .mock("POST", "/repos/o/r/actions/runs/10/rerun-failed-jobs")
+            .with_status(201)
+            .expect(2)
+            .create();
+        // A refused rerun is reported, and the others still go out.
+        let lint = server
+            .mock("POST", "/repos/o/r/actions/runs/11/rerun-failed-jobs")
+            .with_status(403)
+            .with_body(r#"{"message": "Must have admin rights"}"#)
+            .expect(2)
+            .create();
+        run(&ctx(&server, false), args("7", false, false)).unwrap();
+        run(&ctx(&server, true), args("7", false, false)).unwrap();
+        build.assert();
+        lint.assert();
+    }
+
+    #[test]
+    fn mine_covers_every_open_pr_in_the_repo() {
+        let mut server = Server::new();
+        server
+            .mock("POST", "/graphql")
+            .match_body(Matcher::Regex(r"query \{ viewer".into()))
+            .with_body(r#"{"data": {"viewer": {"login": "me"}}}"#)
+            .create();
+        server
+            .mock("POST", "/graphql")
+            .match_body(Matcher::PartialJson(json!({"variables": {
+                "q": "is:pr is:open author:me repo:a/b"
+            }})))
+            .with_body(
+                r#"{"data": {"search": {"pageInfo": {"hasNextPage": false},
+                    "nodes": [{"number": 2}, {"number": 1}]}}}"#,
+            )
+            .create();
+        let one = mock_rollup(&mut server, 1, vec![node("Ubuntu", "Build", 10, "SUCCESS")]);
+        let two = mock_rollup(&mut server, 2, vec![node("Ubuntu", "Build", 20, "SUCCESS")]);
+        run(
+            &ctx(&server, false),
+            args("https://github.com/a/b", true, false),
+        )
+        .unwrap();
+        one.assert();
+        two.assert();
+    }
+
+    #[test]
+    fn mine_without_open_prs() {
+        let mut server = Server::new();
+        server
+            .mock("POST", "/graphql")
+            .match_body(Matcher::Regex(r"query \{ viewer".into()))
+            .with_body(r#"{"data": {"viewer": {"login": "me"}}}"#)
+            .create();
+        server
+            .mock("POST", "/graphql")
+            .match_body(Matcher::Regex("search".into()))
+            .with_body(r#"{"data": {"search": {"pageInfo": {"hasNextPage": false}, "nodes": []}}}"#)
+            .create();
+        run(
+            &ctx(&server, true),
+            args("https://github.com/a/b", true, false),
+        )
+        .unwrap();
+        let err = run(&ctx(&server, true), args("7", true, false))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(err, "--mine takes a repository, not a PR");
+    }
 
     fn check(
         name: &str,
