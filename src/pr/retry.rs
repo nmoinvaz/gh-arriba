@@ -25,6 +25,7 @@ pub(super) struct CheckRun {
     pub(super) status: String,
     pub(super) conclusion: Option<String>,
     pub(super) started_at: Option<DateTime<Utc>>,
+    pub(super) completed_at: Option<DateTime<Utc>>,
     /// Page with the check's details, such as the Actions job.
     pub(super) url: Option<String>,
 }
@@ -122,6 +123,10 @@ pub(super) fn parse_check_run(node: &Value) -> CheckRun {
         status: node["status"].as_str().unwrap_or_default().to_string(),
         conclusion: node["conclusion"].as_str().map(str::to_string),
         started_at: node["startedAt"]
+            .as_str()
+            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+            .map(|t| t.with_timezone(&Utc)),
+        completed_at: node["completedAt"]
             .as_str()
             .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
             .map(|t| t.with_timezone(&Utc)),
@@ -484,6 +489,7 @@ mod tests {
             .to_string(),
             conclusion: conclusion.map(str::to_string),
             started_at: Some(at.parse().unwrap()),
+            completed_at: None,
             url: None,
         }
     }
