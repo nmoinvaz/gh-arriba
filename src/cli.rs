@@ -285,6 +285,10 @@ pub struct LogsArgs {
     /// Download directory (default: temp dir)
     #[arg(short, long, value_name = "DIR")]
     pub out: Option<PathBuf>,
+
+    /// Only jobs whose name contains this text, repeatable
+    #[arg(long = "job", value_name = "PATTERN")]
+    pub jobs: Vec<String>,
 }
 
 // -------------------------------------------------------------------------
