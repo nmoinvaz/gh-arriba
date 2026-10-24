@@ -63,7 +63,7 @@ gh arriba [options] <command>
 | `run logs <RUN_OR_JOB>` | Download job logs to files for searching, picking jobs by name with `--job` and printing error lines with `--errors` or matches with `--grep` |
 | `run watch [RUN]...` | Follow runs until their jobs finish, by default every run for the local HEAD |
 | `run dispatch <WORKFLOW>` | Dispatch any workflow with `-f` inputs, printing its run and following it with `--watch` |
-| `run artifacts [RUN]...` | List artifacts with size and expiry for runs, a commit, a branch, or a PR, and download them with `--download` |
+| `run artifacts [RUN]...` | List artifacts with size and expiry for runs, a commit, a branch, or a PR, download them with `--download`, or delete old ones with `--prune` |
 | `release` | Dispatch the repo's release workflow with a version bump, previewing with `--dry-run` |
 
 ### Dependabot
@@ -206,6 +206,13 @@ Add `--download` to extract them, picking artifacts with `-n NAME` or `-p 'GLOB'
 
 ```
 gh arriba run artifacts --success -w build --download -p 'linux-*' -D dist
+```
+
+See what pruning would free across the repo, keeping the newest of each artifact name and anything
+from the last week, then run it again without `--dry-run` to delete:
+
+```
+gh arriba run artifacts --prune --older-than 7d --keep-latest 1 --dry-run
 ```
 
 Cut a minor release through the repo's Release workflow:
