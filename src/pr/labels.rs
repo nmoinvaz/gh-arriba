@@ -370,6 +370,181 @@ fn render(labels: &[Label]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mockito::{Matcher, Mock, Server};
+
+    fn ctx(server: &Server, json: bool) -> Ctx {
+        Ctx {
+            client: Client::for_tests(&server.url()),
+            repo_flag: Some("o/r".into()),
+            json,
+            yes: true,
+        }
+    }
+
+    fn args(pr: Option<&str>, add: &[&str], remove: &[&str], suggest: bool) -> LabelsArgs {
+        let owned = |v: &[&str]| v.iter().map(|s| s.to_string()).collect();
+        LabelsArgs {
+            pr: pr.map(str::to_string),
+            add: owned(add),
+            remove: owned(remove),
+            suggest,
+        }
+    }
+
+    fn mock_repo_labels(server: &mut Server) -> Mock {
+        server
+            .mock("GET", "/repos/o/r/labels")
+            .match_query(Matcher::Any)
+            .with_body(
+                json!([
+                    {"name": "Bug", "description": "Something broken"},
+                    {"name": "ui/ux", "description": null},
+                    {"name": "testing", "description": "Tests and the test suite"},
+                    {"name": "cleanup", "description": ""}
+                ])
+                .to_string(),
+            )
+            .create()
+    }
+
+    fn mock_pr_labels(server: &mut Server) -> Mock {
+        server
+            .mock("GET", "/repos/o/r/issues/7/labels")
+            .match_query(Matcher::Any)
+            .with_body(r#"[{"name": "cleanup"}]"#)
+            .create()
+    }
+
+    #[test]
+    fn list_without_a_pr_marks_nothing_applied() {
+        let mut server = Server::new();
+        let labels = mock_repo_labels(&mut server).expect(2);
+        let applied = mock_pr_labels(&mut server).expect(0);
+        // With -R and no PR the repo's labels are still listed.
+        run(&ctx(&server, true), args(None, &[], &[], false)).unwrap();
+        run(&ctx(&server, false), args(None, &[], &[], false)).unwrap();
+        labels.assert();
+        applied.assert();
+        let err = run(&ctx(&server, true), args(None, &["bug"], &[], false))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(err, "No pull request found. Pass a PR number or URL.");
+    }
+
+    #[test]
+    fn list_for_a_pr_reads_its_labels() {
+        let mut server = Server::new();
+        mock_repo_labels(&mut server);
+        let applied = mock_pr_labels(&mut server).expect(1);
+        run(&ctx(&server, false), args(Some("o/r#7"), &[], &[], false)).unwrap();
+        applied.assert();
+    }
+
+    #[test]
+    fn list_of_a_repo_without_labels() {
+        let mut server = Server::new();
+        server
+            .mock("GET", "/repos/o/r/labels")
+            .match_query(Matcher::Any)
+            .with_body("[]")
+            .create();
+        run(&ctx(&server, false), args(None, &[], &[], false)).unwrap();
+    }
+
+    #[test]
+    fn edit_adds_new_and_removes_applied_labels_only() {
+        let mut server = Server::new();
+        mock_repo_labels(&mut server);
+        // Read once for the listing and once more for the result.
+        let applied = mock_pr_labels(&mut server).expect(2);
+        let add = server
+            .mock("POST", "/repos/o/r/issues/7/labels")
+            .match_body(Matcher::Json(json!({"labels": ["Bug", "ui/ux"]})))
+            .with_body("[]")
+            .create();
+        let remove = server
+            .mock("DELETE", "/repos/o/r/issues/7/labels/cleanup")
+            .with_body("[]")
+            .create();
+        let not_applied = server
+            .mock("DELETE", "/repos/o/r/issues/7/labels/testing")
+            .expect(0)
+            .create();
+        // "cleanup" is already applied, so adding it again sends nothing for it.
+        let a = args(
+            Some("7"),
+            &["bug", "ui", "cleanup"],
+            &["cleanup", "testing"],
+            false,
+        );
+        run(&ctx(&server, true), a).unwrap();
+        add.assert();
+        remove.assert();
+        not_applied.assert();
+        applied.assert();
+    }
+
+    #[test]
+    fn edit_with_a_typo_changes_nothing() {
+        let mut server = Server::new();
+        mock_repo_labels(&mut server);
+        mock_pr_labels(&mut server);
+        let add = server
+            .mock("POST", "/repos/o/r/issues/7/labels")
+            .expect(0)
+            .create();
+        let a = args(Some("7"), &["bug", "clenaup"], &[], false);
+        let err = run(&ctx(&server, false), a).unwrap_err().to_string();
+        assert_eq!(err, "No label \"clenaup\". Closest: cleanup");
+        add.assert();
+    }
+
+    #[test]
+    fn edit_in_human_output() {
+        let mut server = Server::new();
+        mock_repo_labels(&mut server);
+        server
+            .mock("GET", "/repos/o/r/issues/7/labels")
+            .match_query(Matcher::Any)
+            .with_body("[]")
+            .create();
+        server
+            .mock("POST", "/repos/o/r/issues/7/labels")
+            .with_body("[]")
+            .create();
+        run(
+            &ctx(&server, false),
+            args(Some("7"), &["testing"], &[], false),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn suggest_uses_title_body_branch_and_files() {
+        let mut server = Server::new();
+        mock_repo_labels(&mut server);
+        mock_pr_labels(&mut server);
+        let pr = server
+            .mock("POST", "/graphql")
+            .match_body(Matcher::Regex("isCrossRepository".into()))
+            .with_body(
+                r#"{"data": {"repository": {"pullRequest": {
+                    "number": 7, "title": "Run tests on arm64", "body": "Broken ui layout.",
+                    "headRefName": "ci/cleanup", "createdAt": "2026-01-01T00:00:00Z"}}}}"#,
+            )
+            .expect(2)
+            .create();
+        let files = server
+            .mock("GET", "/repos/o/r/pulls/7/files")
+            .match_query(Matcher::Any)
+            .with_body(r#"[{"filename": "test/test_inflate.c"}]"#)
+            .expect(2)
+            .create();
+        run(&ctx(&server, true), args(Some("7"), &[], &[], true)).unwrap();
+        run(&ctx(&server, false), args(Some("7"), &[], &[], true)).unwrap();
+        pr.assert();
+        files.assert();
+    }
     use serde_json::Value;
 
     fn parse_repo_labels(values: Vec<Value>) -> Vec<RepoLabel> {
