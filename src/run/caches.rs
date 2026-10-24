@@ -339,6 +339,9 @@ fn plural(n: usize, noun: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::Client;
+    use mockito::{Matcher, Server, ServerGuard};
+    use serde_json::json;
 
     fn at(s: &str) -> DateTime<Utc> {
         s.parse().unwrap()
@@ -492,5 +495,161 @@ mod tests {
         let closed = HashSet::from([5]);
         let plan = prune_plan(&all, None, None, Some(&closed), now);
         assert_eq!(plan.iter().map(|c| c.id).collect::<Vec<_>>(), vec![1]);
+    }
+
+    fn ctx(server: &ServerGuard, json: bool) -> Ctx {
+        Ctx {
+            client: Client::for_tests(&server.url()),
+            repo_flag: Some("o/r".into()),
+            json,
+            yes: true,
+        }
+    }
+
+    fn args() -> CachesArgs {
+        CachesArgs {
+            git_ref: None,
+            key: None,
+            prune: false,
+            unused_for: None,
+            older_than: None,
+            closed: false,
+            dry_run: false,
+        }
+    }
+
+    /// Caches of PRs 5 and 6 and of main, all last used a month ago.
+    fn serve_caches(server: &mut ServerGuard) {
+        let used = (Utc::now() - TimeDelta::days(30)).to_rfc3339();
+        server
+            .mock("GET", "/repos/o/r/actions/caches")
+            .match_query(Matcher::Exact("per_page=100".into()))
+            .with_body(
+                json!({"actions_caches": [
+                    {"id": 1, "key": "cargo-aaaaaaaa", "ref": "refs/pull/5/merge",
+                     "size_in_bytes": 10, "last_accessed_at": used, "created_at": used},
+                    {"id": 2, "key": "cargo-bbbbbbbb", "ref": "refs/pull/6/merge",
+                     "size_in_bytes": 20, "last_accessed_at": used, "created_at": used},
+                    {"id": 3, "key": "cargo-cccccccc", "ref": "refs/heads/main",
+                     "size_in_bytes": 30, "last_accessed_at": used, "created_at": used},
+                    {"id": 4, "key": "cargo-dddddddd", "ref": "refs/pull/7/merge",
+                     "size_in_bytes": 40, "last_accessed_at": used, "created_at": used}
+                ]})
+                .to_string(),
+            )
+            .create();
+    }
+
+    #[test]
+    fn summary_with_filters_sent_to_the_server() {
+        let mut server = Server::new();
+        let filtered = server
+            .mock("GET", "/repos/o/r/actions/caches")
+            .match_query(Matcher::Exact(
+                "ref=refs%2Fpull%2F5%2Fmerge&key=cargo&per_page=100".into(),
+            ))
+            .with_body(r#"{"actions_caches": [{"id": 1, "ref": "refs/pull/5/merge"}]}"#)
+            .expect(2)
+            .create();
+        server
+            .mock("GET", "/repos/o/r/actions/cache/usage")
+            .with_body(r#"{"active_caches_size_in_bytes": 1024, "active_caches_count": 3}"#)
+            .create();
+        let mut a = args();
+        a.git_ref = Some("5".to_string());
+        a.key = Some("cargo".to_string());
+        run(&ctx(&server, true), a).unwrap();
+        let mut a = args();
+        a.git_ref = Some("#5".to_string());
+        a.key = Some("cargo".to_string());
+        run(&ctx(&server, false), a).unwrap();
+        filtered.assert();
+    }
+
+    #[test]
+    fn prune_needs_a_selection() {
+        let mut server = Server::new();
+        serve_caches(&mut server);
+        let mut a = args();
+        a.prune = true;
+        assert_eq!(
+            run(&ctx(&server, true), a).unwrap_err().to_string(),
+            "Pick the caches to prune with --unused-for, --older-than, --closed, --ref, or --key"
+        );
+    }
+
+    #[test]
+    fn prune_closed_deletes_only_closed_pr_caches() {
+        let mut server = Server::new();
+        serve_caches(&mut server);
+        server
+            .mock("GET", "/repos/o/r/pulls/5")
+            .with_body(r#"{"state": "closed"}"#)
+            .create();
+        server
+            .mock("GET", "/repos/o/r/pulls/6")
+            .with_body(r#"{"state": "open"}"#)
+            .create();
+        // A PR whose state can't be read keeps its caches.
+        server
+            .mock("GET", "/repos/o/r/pulls/7")
+            .with_status(500)
+            .create();
+        let deleted = server
+            .mock("DELETE", "/repos/o/r/actions/caches/1")
+            .with_status(204)
+            .create();
+        let others = server
+            .mock(
+                "DELETE",
+                Matcher::Regex("^/repos/o/r/actions/caches/[234]$".into()),
+            )
+            .expect(0)
+            .create();
+
+        // A dry run deletes nothing.
+        let mut a = args();
+        a.prune = true;
+        a.closed = true;
+        a.dry_run = true;
+        run(&ctx(&server, true), a).unwrap();
+
+        let mut a = args();
+        a.prune = true;
+        a.closed = true;
+        run(&ctx(&server, false), a).unwrap();
+        deleted.assert();
+        others.assert();
+    }
+
+    #[test]
+    fn prune_by_age_reports_failed_deletes() {
+        let mut server = Server::new();
+        serve_caches(&mut server);
+        server
+            .mock(
+                "DELETE",
+                Matcher::Regex("^/repos/o/r/actions/caches/[123]$".into()),
+            )
+            .with_status(204)
+            .expect(3)
+            .create();
+        server
+            .mock("DELETE", "/repos/o/r/actions/caches/4")
+            .with_status(404)
+            .create();
+        let mut a = args();
+        a.prune = true;
+        a.unused_for = Some(TimeDelta::days(7));
+        assert_eq!(
+            run(&ctx(&server, false), a).unwrap_err().to_string(),
+            "1 cache could not be deleted"
+        );
+
+        // Nothing is that old.
+        let mut a = args();
+        a.prune = true;
+        a.older_than = Some(TimeDelta::days(365));
+        run(&ctx(&server, true), a).unwrap();
     }
 }
