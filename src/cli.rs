@@ -271,6 +271,10 @@ pub struct ChecksArgs {
     /// Stop waiting as soon as a check fails
     #[arg(long, requires = "wait")]
     pub fail_fast: bool,
+
+    /// First wait until the PR head is this commit, a hash or a local revision such as HEAD
+    #[arg(long, value_name = "SHA")]
+    pub sha: Option<String>,
 }
 
 #[derive(Args)]

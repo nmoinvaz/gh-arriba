@@ -136,8 +136,10 @@ gh arriba pr retry --mine
 Wait for CI after pushing, printing each check as it finishes and failing if any check fails:
 
 ```
-gh arriba pr checks --wait --fail-fast
+git push && gh arriba pr checks --sha HEAD --wait --fail-fast
 ```
+
+`--sha` waits for GitHub to see the push first, so the checks reported are the new commit's.
 
 Download only the failed job logs from a run and search them:
 
