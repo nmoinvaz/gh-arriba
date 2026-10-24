@@ -1,6 +1,7 @@
 //! Communication with GitHub: the authenticated REST and GraphQL client and the helpers that
 //! shape its requests and read its responses.
 
+pub mod actions;
 mod client;
 pub mod json;
 mod repo;

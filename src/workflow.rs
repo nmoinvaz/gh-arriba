@@ -1,42 +1,14 @@
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
-use serde_json::{Map, Value, json};
+use serde_json::{Map, Value};
 use serde_yaml::Value as Yaml;
 use std::collections::HashSet;
 use std::time::Duration;
 
-use crate::api::json::str_of;
+use crate::api::actions::{self, file_name as file, file_stem as stem};
 use crate::api::{Client, Repo};
 
-/// An Actions workflow, as the workflows API lists it.
-#[derive(Clone, Debug)]
-pub struct Workflow {
-    pub id: u64,
-    pub name: String,
-    pub path: String,
-}
-
-impl Workflow {
-    /// File name without its directory or `.yml` extension.
-    pub fn stem(&self) -> &str {
-        stem(&self.path)
-    }
-
-    pub fn file(&self) -> &str {
-        file(&self.path)
-    }
-}
-
-fn file(path: &str) -> &str {
-    path.rsplit('/').next().unwrap_or(path)
-}
-
-fn stem(path: &str) -> &str {
-    let base = file(path);
-    base.strip_suffix(".yml")
-        .or_else(|| base.strip_suffix(".yaml"))
-        .unwrap_or(base)
-}
+pub use crate::api::actions::Workflow;
 
 /// Whether `query` names a workflow by its display name, file name, or file stem.
 pub fn matches(name: &str, path: &str, query: &str) -> bool {
@@ -47,18 +19,7 @@ pub fn matches(name: &str, path: &str, query: &str) -> bool {
 
 /// Active workflows in the repository.
 pub fn list(client: &Client, repo: &Repo) -> Result<Vec<Workflow>> {
-    Ok(client
-        .get_all_in(&format!("{}/actions/workflows", repo.api()), "workflows")?
-        .iter()
-        .filter(|w| w["state"].as_str() == Some("active"))
-        .filter_map(|w| {
-            Some(Workflow {
-                id: w["id"].as_u64()?,
-                name: w["name"].as_str()?.to_string(),
-                path: w["path"].as_str()?.to_string(),
-            })
-        })
-        .collect())
+    actions::workflows(client, repo)
 }
 
 /// The single workflow in `found`, or an error that lists the candidates. `what` completes
@@ -175,11 +136,7 @@ pub fn inputs_at(
     workflow: &Workflow,
     git_ref: &str,
 ) -> Result<Vec<Input>> {
-    let yaml = client.get_raw(&format!(
-        "{}/contents/{}?ref={git_ref}",
-        repo.api(),
-        workflow.path
-    ))?;
+    let yaml = actions::workflow_file(client, repo, &workflow.path, git_ref)?;
     dispatch_inputs(&yaml)
         .map_err(|e| anyhow::anyhow!("{} ({}): {e}", workflow.name, workflow.path))
 }
@@ -230,55 +187,29 @@ pub fn dispatch(
     git_ref: &str,
     inputs: Map<String, Value>,
 ) -> Result<Option<NewRun>> {
-    let runs_path = format!(
-        "{}/actions/workflows/{}/runs?event=workflow_dispatch&per_page=10",
-        repo.api(),
-        workflow.id
-    );
     // Runs that existed before dispatching, so the new one can be told apart without clocks.
-    let before: HashSet<u64> = run_ids(&client.get(&runs_path)?);
+    let before: HashSet<u64> = actions::workflow_dispatch_runs(client, repo, workflow.id)?
+        .iter()
+        .map(|r| r.id)
+        .collect();
 
-    client.post(
-        &format!(
-            "{}/actions/workflows/{}/dispatches",
-            repo.api(),
-            workflow.id
-        ),
-        &json!({ "ref": git_ref, "inputs": inputs }),
-    )?;
+    actions::dispatch_workflow(client, repo, workflow.id, git_ref, inputs)?;
 
     let viewer = client.viewer()?.to_string();
     for _ in 0..10 {
         std::thread::sleep(Duration::from_millis(1500));
-        let runs = client.get(&runs_path)?;
-        let new_run = runs["workflow_runs"]
-            .as_array()
+        let runs = actions::workflow_dispatch_runs(client, repo, workflow.id)?;
+        let new_run = runs
             .into_iter()
-            .flatten()
-            .find(|r| {
-                let id = r["id"].as_u64().unwrap_or(0);
-                let actor = r["triggering_actor"]["login"]
-                    .as_str()
-                    .or(r["actor"]["login"].as_str());
-                !before.contains(&id) && actor == Some(viewer.as_str())
-            });
+            .find(|r| !before.contains(&r.id) && r.started_by() == Some(viewer.as_str()));
         if let Some(r) = new_run {
             return Ok(Some(NewRun {
-                id: r["id"].as_u64().unwrap_or(0),
-                url: str_of(r, "html_url"),
+                id: r.id,
+                url: r.html_url,
             }));
         }
     }
     Ok(None)
-}
-
-fn run_ids(runs: &Value) -> HashSet<u64> {
-    runs["workflow_runs"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|r| r["id"].as_u64())
-        .collect()
 }
 
 #[cfg(test)]

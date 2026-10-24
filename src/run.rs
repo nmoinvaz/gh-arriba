@@ -10,6 +10,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use crate::api::actions;
 use crate::api::{Repo, encode_path, is_failed};
 use crate::cli::{DispatchArgs, LogsArgs, RunCommand, WatchArgs};
 use crate::context::{Ctx, git};
@@ -435,10 +436,7 @@ fn dispatch(ctx: &Ctx, args: DispatchArgs) -> Result<()> {
     let wf = workflow::find(&workflows, &args.workflow)?;
     let git_ref = match args.git_ref {
         Some(r) => r,
-        None => client.get(&repo.api())?["default_branch"]
-            .as_str()
-            .context("Repository has no default branch")?
-            .to_string(),
+        None => actions::default_branch(client, &repo)?,
     };
 
     let inputs = workflow::inputs_at(client, &repo, wf, &git_ref)?;
