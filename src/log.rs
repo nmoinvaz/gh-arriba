@@ -1,5 +1,6 @@
 use regex::Regex;
 use serde::Serialize;
+use std::path::PathBuf;
 use std::sync::LazyLock;
 
 /// A run of log lines around one or more errors.
@@ -23,6 +24,11 @@ pub const CONTEXT: usize = 8;
 
 /// Error blocks shown per job by default.
 pub const MAX: usize = 5;
+
+/// Where saved job logs go without `-o`, shared so later calls find logs saved earlier.
+pub fn default_dir() -> PathBuf {
+    std::env::temp_dir().join("gh-arriba-logs")
+}
 
 static TIMESTAMP: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^\x{feff}?\d{4}-\d{2}-\d{2}T[\d:.]+Z ?").unwrap());
