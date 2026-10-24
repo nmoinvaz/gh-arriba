@@ -375,7 +375,7 @@ pub enum RunCommand {
     Dispatch(DispatchArgs),
     /// List, download, or prune the artifacts of runs
     Artifacts(ArtifactsArgs),
-    /// Show Actions cache usage by ref and key against the repo limit
+    /// Show Actions cache usage by ref and key against the repo limit, or prune caches
     Caches(CachesArgs),
 }
 
@@ -535,6 +535,22 @@ pub struct CachesArgs {
     /// Only caches whose key starts with this
     #[arg(short, long, value_name = "PREFIX")]
     pub key: Option<String>,
+
+    /// Delete the caches that the filters and the options below select
+    #[arg(long)]
+    pub prune: bool,
+
+    /// Prune only caches not used for this long, as in 12h, 7d, or 2w
+    #[arg(long, value_name = "AGE", value_parser = parse_age, requires = "prune")]
+    pub unused_for: Option<chrono::TimeDelta>,
+
+    /// Prune only caches created longer ago than this
+    #[arg(long, value_name = "AGE", value_parser = parse_age, requires = "prune")]
+    pub older_than: Option<chrono::TimeDelta>,
+
+    /// Print what --prune would delete without deleting it
+    #[arg(long, requires = "prune")]
+    pub dry_run: bool,
 }
 
 /// Parse an age such as `30m`, `12h`, `7d`, or `2w`.

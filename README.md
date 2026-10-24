@@ -64,7 +64,7 @@ gh arriba [options] <command>
 | `run watch [RUN]...` | Follow runs until their jobs finish, by default every run for the local HEAD |
 | `run dispatch <WORKFLOW>` | Dispatch any workflow with `-f` inputs, printing its run and following it with `--watch` |
 | `run artifacts [RUN]...` | List artifacts with size and expiry for runs, a commit, a branch, or a PR, download them with `--download`, or delete old ones with `--prune` |
-| `run caches` | Show Actions cache usage against the repo's 10 GB limit, grouped by ref and key |
+| `run caches` | Show Actions cache usage against the repo's 10 GB limit, grouped by ref and key, or delete caches with `--prune` |
 | `release` | Dispatch the repo's release workflow with a version bump, previewing with `--dry-run` |
 
 ### Dependabot
@@ -221,6 +221,12 @@ See what fills the repo's Actions cache, by branch or PR and by key with its has
 ```
 gh arriba run caches
 gh arriba run caches --ref main -k Linux-cargo
+```
+
+Delete caches nobody has used for a week, previewing first:
+
+```
+gh arriba run caches --prune --unused-for 7d --dry-run
 ```
 
 Cut a minor release through the repo's Release workflow:
