@@ -263,6 +263,31 @@ fn parse_next_link(header: &str) -> Option<String> {
     })
 }
 
+/// Percent-encode a repository path or query value, keeping its slashes readable.
+pub fn encode_path(s: &str) -> String {
+    encode(s, true)
+}
+
+/// Percent-encode text for use as a single URL path segment, slashes included.
+pub fn encode_segment(s: &str) -> String {
+    encode(s, false)
+}
+
+fn encode(s: &str, keep_slash: bool) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric()
+            || matches!(b, b'-' | b'.' | b'_' | b'~')
+            || (keep_slash && b == b'/')
+        {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
 /// Whether a check run, job, step, or workflow run conclusion counts as failed. REST spells
 /// conclusions in lowercase and GraphQL in uppercase, so either is accepted.
 pub fn is_failed(conclusion: Option<&str>) -> bool {
@@ -301,6 +326,16 @@ pub fn get_github_token(host: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn encoding_keeps_or_escapes_slashes() {
+        assert_eq!(encode_path("a b/c#d.rs"), "a%20b/c%23d.rs");
+        assert_eq!(encode_path("nathan/dev/fix#2"), "nathan/dev/fix%232");
+        assert_eq!(encode_segment("ui/ux"), "ui%2Fux");
+        assert_eq!(encode_segment("build system"), "build%20system");
+        assert_eq!(encode_segment("type: bug"), "type%3A%20bug");
+        assert_eq!(encode_segment("naïve"), "na%C3%AFve");
+    }
 
     #[test]
     fn failed_conclusions_in_either_case() {
