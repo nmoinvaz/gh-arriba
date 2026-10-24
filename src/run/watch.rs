@@ -1,11 +1,10 @@
 use anyhow::{Result, bail};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
-use serde_json::Value;
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
-use crate::api::json::{opt_time_of, str_of};
+use crate::api::actions::{self, Job, WorkflowRun};
 use crate::api::{Repo, is_failed};
 use crate::context::Ctx;
 use crate::output;
@@ -96,50 +95,41 @@ impl RunState {
     }
 }
 
-fn parse_job(job: &Value) -> JobState {
-    let started = opt_time_of(job, "started_at");
-    let seconds = match (started, opt_time_of(job, "completed_at")) {
+fn job_state(job: Job) -> JobState {
+    let seconds = match (job.started_at, job.completed_at) {
         (Some(s), Some(c)) => Some((c - s).num_seconds().max(0)),
         _ => None,
     };
     JobState {
-        id: job["id"].as_u64().unwrap_or(0),
-        name: str_of(job, "name"),
-        status: str_of(job, "status"),
-        conclusion: job["conclusion"].as_str().map(str::to_string),
+        id: job.id,
+        name: job.name,
+        status: job.status,
+        conclusion: job.conclusion,
         seconds,
-        labels: job["labels"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|l| l.as_str().map(str::to_string))
-            .collect(),
-        url: str_of(job, "html_url"),
-        queued_at: opt_time_of(job, "created_at").or(started),
+        labels: job.labels,
+        url: job.html_url,
+        queued_at: job.created_at.or(job.started_at),
     }
 }
 
-fn parse_run(repo: &Repo, run: &Value, jobs: &[Value]) -> RunState {
+fn run_state(repo: &Repo, run: WorkflowRun, jobs: Vec<Job>) -> RunState {
     RunState {
         repo: repo.to_string(),
-        id: run["id"].as_u64().unwrap_or(0),
-        workflow: str_of(run, "name"),
-        title: str_of(run, "display_title"),
-        url: str_of(run, "html_url"),
-        status: str_of(run, "status"),
-        conclusion: run["conclusion"].as_str().map(str::to_string),
-        jobs: jobs.iter().map(parse_job).collect(),
+        id: run.id,
+        workflow: run.name,
+        title: run.display_title,
+        url: run.html_url,
+        status: run.status,
+        conclusion: run.conclusion,
+        jobs: jobs.into_iter().map(job_state).collect(),
         filtered: false,
     }
 }
 
 fn fetch(ctx: &Ctx, repo: &Repo, id: u64, wait: &Wait) -> Result<RunState> {
-    let path = format!("{}/actions/runs/{id}", repo.api());
-    let run = ctx.client.get(&path)?;
-    let jobs = ctx
-        .client
-        .get_all_in(&format!("{path}/jobs?filter=latest"), "jobs")?;
-    let mut state = parse_run(repo, &run, &jobs);
+    let run = actions::workflow_run(&ctx.client, repo, id)?;
+    let jobs = actions::run_jobs(&ctx.client, repo, id)?;
+    let mut state = run_state(repo, run, jobs);
     state.jobs.retain(|j| wait.wants(&j.name));
     state.filtered = wait.job.is_some();
     Ok(state)
@@ -305,24 +295,26 @@ mod tests {
         Repo::parse("zlib-ng/zlib-ng").unwrap()
     }
 
-    fn job(id: u64, name: &str, status: &str, conclusion: Option<&str>) -> Value {
-        json!({
+    fn job(id: u64, name: &str, status: &str, conclusion: Option<&str>) -> Job {
+        serde_json::from_value(json!({
             "id": id, "name": name, "status": status, "conclusion": conclusion,
             "created_at": "2026-01-01T00:00:00Z",
             "started_at": "2026-01-01T00:01:00Z",
             "completed_at": if status == "completed" { json!("2026-01-01T00:04:12Z") } else { json!(null) },
             "labels": ["self-hosted", "windows"],
             "html_url": format!("https://github.com/zlib-ng/zlib-ng/actions/runs/9/job/{id}"),
-        })
+        }))
+        .unwrap()
     }
 
-    fn run(status: &str, conclusion: Option<&str>, jobs: &[Value]) -> RunState {
-        let run = json!({
+    fn run(status: &str, conclusion: Option<&str>, jobs: &[Job]) -> RunState {
+        let run = serde_json::from_value(json!({
             "id": 9, "name": "CI", "display_title": "Fix inflate",
             "html_url": "https://github.com/zlib-ng/zlib-ng/actions/runs/9",
             "status": status, "conclusion": conclusion,
-        });
-        parse_run(&repo(), &run, jobs)
+        }))
+        .unwrap();
+        run_state(&repo(), run, jobs.to_vec())
     }
 
     #[test]

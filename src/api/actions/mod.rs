@@ -4,13 +4,17 @@ mod runs;
 mod workflows;
 
 use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 
 use super::{Client, Repo};
 
-pub use runs::WorkflowRun;
+pub use runs::{
+    Job, WorkflowRun, attempt_jobs, branch_runs, commit_runs, job, job_log, job_opt, run_jobs,
+    workflow_run, workflow_run_opt,
+};
 pub use workflows::{
     Workflow, dispatch_workflow, file_name, file_stem, workflow_dispatch_runs, workflow_file,
     workflows,
@@ -43,4 +47,14 @@ where
     T: Default + Deserialize<'de>,
 {
     Ok(Option::<T>::deserialize(d)?.unwrap_or_default())
+}
+
+/// Read an RFC 3339 timestamp that may be null, missing, or malformed, as None in each case.
+fn opt_time<'de, D>(d: D) -> std::result::Result<Option<DateTime<Utc>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Option::<String>::deserialize(d)?
+        .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+        .map(|t| t.with_timezone(&Utc)))
 }

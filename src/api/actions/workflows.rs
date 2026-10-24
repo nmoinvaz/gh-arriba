@@ -2,6 +2,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
+use super::runs::RunsPage;
 use super::{WorkflowRun, parse, parse_all};
 use crate::api::{Client, Repo};
 
@@ -69,12 +70,7 @@ pub fn workflow_dispatch_runs(
     repo: &Repo,
     workflow_id: u64,
 ) -> Result<Vec<WorkflowRun>> {
-    #[derive(Deserialize)]
-    struct Page {
-        #[serde(default)]
-        workflow_runs: Vec<WorkflowRun>,
-    }
-    let page: Page = parse(
+    let page: RunsPage = parse(
         client.get(&format!(
             "{}/actions/workflows/{workflow_id}/runs?event=workflow_dispatch&per_page=10",
             repo.api()
