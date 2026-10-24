@@ -8,6 +8,7 @@ mod pr;
 mod prompt;
 mod release;
 mod run;
+mod runners;
 
 use anyhow::Result;
 use clap::Parser;
@@ -37,6 +38,7 @@ fn main() -> Result<()> {
         Command::Run(cmd) => run::run(&ctx, cmd),
         Command::Release(args) => release::run(&ctx, args),
         Command::Dependabot(cmd) => dependabot::run(&ctx, cmd),
+        Command::Runners(args) => runners::run(&ctx, args),
         Command::Config(args) => config::run(&ctx, args),
     }
 }

@@ -66,6 +66,16 @@ gh arriba [options] <command>
 | `dependabot alerts` | List open security alerts with their fix PR |
 | `dependabot dismiss <ALERT>...` | Dismiss alerts with a reason |
 
+### Runners
+
+| Command | Description |
+|---------|-------------|
+| `runners` | List the repo's self-hosted runners with status, OS, and labels |
+| `runners --org <ORG>` | List the organization's runners instead |
+
+Listing runners needs admin access: for an organization, an org admin token with the `admin:org`
+scope (`gh auth refresh -s admin:org`).
+
 ### Config sync
 
 | Command | Description |

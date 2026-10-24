@@ -38,6 +38,8 @@ pub enum Command {
     /// Triage Dependabot pull requests and security alerts
     #[command(subcommand)]
     Dependabot(DependabotCommand),
+    /// List self-hosted runners and what they are running
+    Runners(RunnersArgs),
     /// Sync project config files to and from a gist
     Config(ConfigArgs),
 }
@@ -431,6 +433,17 @@ pub enum DismissReason {
     NotUsed,
     #[value(name = "tolerable_risk")]
     TolerableRisk,
+}
+
+// -------------------------------------------------------------------------
+//  runners
+// -------------------------------------------------------------------------
+
+#[derive(Args)]
+pub struct RunnersArgs {
+    /// Runners registered to an organization instead of the repo
+    #[arg(long, value_name = "ORG")]
+    pub org: Option<String>,
 }
 
 // -------------------------------------------------------------------------
