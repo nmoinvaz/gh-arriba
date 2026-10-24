@@ -13,9 +13,9 @@ use std::fmt;
 use std::sync::LazyLock;
 use std::time::Duration;
 
+use crate::api::Client;
 use crate::cli::DependabotCommand;
 use crate::context::{Ctx, Repo};
-use crate::github::Client;
 use crate::json::{str_of, time_of};
 
 pub fn run(ctx: &Ctx, cmd: DependabotCommand) -> Result<()> {

@@ -5,8 +5,8 @@ use serde_yaml::Value as Yaml;
 use std::collections::HashSet;
 use std::time::Duration;
 
+use crate::api::Client;
 use crate::context::Repo;
-use crate::github::Client;
 use crate::json::str_of;
 
 /// An Actions workflow, as the workflows API lists it.

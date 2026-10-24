@@ -3,8 +3,8 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 use std::collections::HashMap;
 
+use crate::api::Client;
 use crate::context::PrRef;
-use crate::github::Client;
 use crate::json::{opt_time_of, str_of};
 use crate::pr::model::vars;
 

@@ -4,9 +4,9 @@ use serde_json::Value;
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
+use crate::api::{Client, is_failed};
 use crate::cli::ChecksArgs;
 use crate::context::{Ctx, PrRef, git};
-use crate::github::{Client, is_failed};
 use crate::json::str_of;
 use crate::output;
 use crate::pr::rollup::{self, CheckRun, latest};

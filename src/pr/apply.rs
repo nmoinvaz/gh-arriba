@@ -4,9 +4,9 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::process::Command;
 
+use crate::api::{Client, encode_path};
 use crate::cli::ApplyArgs;
 use crate::context::{Ctx, PrRef, git};
-use crate::github::{Client, encode_path};
 use crate::output;
 use crate::pr::model::{Thread, fetch_threads};
 use crate::prompt;

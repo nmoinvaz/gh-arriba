@@ -5,9 +5,9 @@ use serde_json::{Value, json};
 use std::collections::HashSet;
 
 use super::{Scope, fetch_light, parse_title};
+use crate::api::Client;
 use crate::cli::{DependabotAlertsArgs, DependabotDismissArgs};
 use crate::context::Ctx;
-use crate::github::Client;
 use crate::json::str_of;
 use crate::output::print_json;
 use crate::output::table;

@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 
-use crate::github::Client;
+use crate::api::Client;
 
 pub struct GistClient<'a> {
     client: &'a Client,

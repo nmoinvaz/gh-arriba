@@ -10,9 +10,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use crate::api::{encode_path, is_failed};
 use crate::cli::{DispatchArgs, LogsArgs, RunCommand, WatchArgs};
 use crate::context::{Ctx, Repo, git};
-use crate::github::{encode_path, is_failed};
 use crate::log::{self, Excerpt};
 use crate::{output, parallel, workflow};
 

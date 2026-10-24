@@ -2,9 +2,9 @@ use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use serde_json::{Value, json};
 
+use crate::api::Client;
 use crate::cli::{PrArg, ReviewAddArgs, ReviewCommand, ReviewEvent, ReviewSubmitArgs, Side};
 use crate::context::{Ctx, PrRef};
-use crate::github::Client;
 use crate::json::{login_of, str_of};
 use crate::output;
 use crate::pr::model::vars;

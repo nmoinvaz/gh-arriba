@@ -7,9 +7,9 @@ use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::sync::LazyLock;
 
+use crate::api::Client;
 use crate::cli::{ReplyArgs, ResolveArgs, ThreadsArgs};
 use crate::context::{Ctx, PrRef, Repo};
-use crate::github::Client;
 use crate::json::{str_of, time_of};
 use crate::output::{first_lines, indent, print_json};
 use crate::pr::comment::{self, Kind};
