@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::Value;
@@ -6,6 +6,7 @@ use serde_json::Value;
 use super::{Commit, find_runs, resolve_run};
 use crate::cli::ArtifactsArgs;
 use crate::context::{Ctx, Repo, git};
+use crate::github;
 use crate::output;
 use crate::pr::model::fetch_pr;
 
@@ -81,12 +82,72 @@ fn select(ctx: &Ctx, args: &ArtifactsArgs) -> Result<Vec<(Repo, u64)>> {
     )
 }
 
-pub fn run(ctx: &Ctx, args: ArtifactsArgs) -> Result<()> {
-    let runs = select(ctx, &args)?;
-    let mut found = Vec::new();
-    for (repo, id) in runs {
+/// Successful runs scanned for artifacts before giving up, newest first.
+const SUCCESS_SCAN: usize = 10;
+
+/// IDs of successful runs in API order (newest first), narrowed to a workflow.
+fn successful_runs(runs: &[Value], workflow: Option<&str>) -> Vec<u64> {
+    runs.iter()
+        .filter(|r| r["conclusion"].as_str() == Some("success"))
+        .filter(|r| {
+            workflow.is_none_or(|w| {
+                crate::workflow::matches(
+                    r["name"].as_str().unwrap_or_default(),
+                    r["path"].as_str().unwrap_or_default(),
+                    w,
+                )
+            })
+        })
+        .filter_map(|r| r["id"].as_u64())
+        .collect()
+}
+
+/// The newest successful run on a branch that uploaded artifacts, such as the latest green build
+/// of the default branch. Runs without artifacts, like lint-only workflows, are skipped.
+fn latest_success(ctx: &Ctx, args: &ArtifactsArgs) -> Result<((Repo, u64), Vec<Artifact>)> {
+    let repo = ctx.repo()?;
+    let branch = match &args.branch {
+        Some(b) => b.clone(),
+        None => ctx.client.get(&repo.api())?["default_branch"]
+            .as_str()
+            .context("Repository has no default branch")?
+            .to_string(),
+    };
+    let path = format!(
+        "{}/actions/runs?branch={}&status=success&per_page=100",
+        repo.api(),
+        github::encode_path(&branch)
+    );
+    let runs = ctx.client.get(&path)?["workflow_runs"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let for_workflow = args
+        .workflow
+        .as_deref()
+        .map(|w| format!(" of {w}"))
+        .unwrap_or_default();
+    for id in successful_runs(&runs, args.workflow.as_deref())
+        .into_iter()
+        .take(SUCCESS_SCAN)
+    {
         let artifacts = run_artifacts(ctx, &repo, id)?;
-        found.push(((repo, id), artifacts));
+        if !artifacts.is_empty() {
+            return Ok(((repo, id), artifacts));
+        }
+    }
+    bail!("No successful run{for_workflow} with artifacts among the newest on {branch} in {repo}")
+}
+
+pub fn run(ctx: &Ctx, args: ArtifactsArgs) -> Result<()> {
+    let mut found = Vec::new();
+    if args.success {
+        found.push(latest_success(ctx, &args)?);
+    } else {
+        for (repo, id) in select(ctx, &args)? {
+            let artifacts = run_artifacts(ctx, &repo, id)?;
+            found.push(((repo, id), artifacts));
+        }
     }
 
     if ctx.json {
@@ -190,6 +251,18 @@ mod tests {
         );
         assert_eq!(a.created_at, Some(at("2026-10-20T00:00:00Z")));
         assert!(!a.expired);
+    }
+
+    #[test]
+    fn successful_runs_keep_order_and_workflow() {
+        let runs = vec![
+            json!({"id": 30, "name": "Lint", "path": ".github/workflows/lint.yml", "conclusion": "success"}),
+            json!({"id": 20, "name": "Build", "path": ".github/workflows/build.yml", "conclusion": "failure"}),
+            json!({"id": 10, "name": "Build", "path": ".github/workflows/build.yml", "conclusion": "success"}),
+        ];
+        assert_eq!(successful_runs(&runs, None), vec![30, 10]);
+        assert_eq!(successful_runs(&runs, Some("build")), vec![10]);
+        assert!(successful_runs(&runs, Some("deploy")).is_empty());
     }
 
     #[test]
