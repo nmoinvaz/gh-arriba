@@ -467,6 +467,7 @@ pub(crate) fn alert_fixture() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mockito::{Matcher, Server};
 
     #[test]
     fn alerts_parse_with_nulls() {
@@ -561,5 +562,297 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(no_checks.checks(), None);
+    }
+
+    fn summary(number: u64, login: &str) -> Value {
+        json!({
+            "number": number, "title": format!("Bump a from 1.0.{number} to 1.0.9"),
+            "url": format!("https://github.com/o/r/pull/{number}"),
+            "author": { "login": login }, "repository": { "nameWithOwner": "o/r" }
+        })
+    }
+
+    fn details(repo: &str, number: u64) -> Value {
+        json!({ "pullRequest": {
+            "id": format!("PR_{number}"), "number": number, "title": "t", "url": "u",
+            "createdAt": "2026-01-02T03:04:05Z", "repository": { "nameWithOwner": repo }
+        } })
+    }
+
+    #[test]
+    fn open_prs_follows_cursors() {
+        let mut server = Server::new();
+        let first = server
+            .mock("POST", "/graphql")
+            .match_body(Matcher::PartialJson(json!({
+                "variables": { "owner": "o", "repo": "r", "cursor": null }
+            })))
+            .with_body(
+                json!({ "data": { "repository": { "pullRequests": {
+                    "pageInfo": { "hasNextPage": true, "endCursor": "c1" },
+                    "nodes": [summary(1, "dependabot"), summary(2, "someone")]
+                } } } })
+                .to_string(),
+            )
+            .create();
+        let second = server
+            .mock("POST", "/graphql")
+            .match_body(Matcher::PartialJson(
+                json!({ "variables": { "cursor": "c1" } }),
+            ))
+            .with_body(
+                json!({ "data": { "repository": { "pullRequests": {
+                    "pageInfo": { "hasNextPage": false, "endCursor": null },
+                    "nodes": [summary(3, "dependabot")]
+                } } } })
+                .to_string(),
+            )
+            .create();
+        let client = Client::for_tests(&server.url());
+        let prs = open_prs(&client, &Repo::parse("o/r").unwrap())
+            .unwrap()
+            .unwrap();
+        let numbers: Vec<u64> = prs.iter().map(|p| p.number).collect();
+        assert_eq!(numbers, vec![1, 2, 3]);
+        assert_eq!(prs[1].author_login(), Some("someone"));
+        first.assert();
+        second.assert();
+    }
+
+    #[test]
+    fn open_prs_none_for_missing_repo() {
+        let mut server = Server::new();
+        server
+            .mock("POST", "/graphql")
+            .with_body(r#"{"data": {"repository": null}}"#)
+            .create();
+        let client = Client::for_tests(&server.url());
+        let repo = Repo::parse("o/gone").unwrap();
+        assert!(open_prs(&client, &repo).unwrap().is_none());
+    }
+
+    #[test]
+    fn search_scopes_to_the_org_and_pages() {
+        let mut server = Server::new();
+        let q = "is:pr is:open author:app/dependabot org:acme archived:false";
+        server
+            .mock("POST", "/graphql")
+            .match_body(Matcher::PartialJson(
+                json!({ "variables": { "q": q, "cursor": null } }),
+            ))
+            .with_body(
+                json!({ "data": { "search": {
+                    "pageInfo": { "hasNextPage": true, "endCursor": "n" },
+                    "nodes": [{}, summary(4, "dependabot")]
+                } } })
+                .to_string(),
+            )
+            .create();
+        server
+            .mock("POST", "/graphql")
+            .match_body(Matcher::PartialJson(
+                json!({ "variables": { "q": q, "cursor": "n" } }),
+            ))
+            .with_body(
+                json!({ "data": { "search": {
+                    "pageInfo": { "hasNextPage": false },
+                    "nodes": [summary(5, "dependabot")]
+                } } })
+                .to_string(),
+            )
+            .create();
+        let client = Client::for_tests(&server.url());
+        let prs = search_dependabot_prs(&client, "acme").unwrap().unwrap();
+        let numbers: Vec<u64> = prs.iter().map(|p| p.number).collect();
+        // The empty object is a search hit that isn't a PR.
+        assert_eq!(numbers, vec![0, 4, 5]);
+
+        let mut server = Server::new();
+        server
+            .mock("POST", "/graphql")
+            .with_body(r#"{"data": {"search": null}}"#)
+            .create();
+        let client = Client::for_tests(&server.url());
+        assert!(search_dependabot_prs(&client, "acme").unwrap().is_none());
+    }
+
+    #[test]
+    fn pr_details_batches_aliases_and_keeps_order() {
+        let mut server = Server::new();
+        // 21 PRs make two requests: p0..p19, then p0 alone for the 21st.
+        let mut first = serde_json::Map::new();
+        for i in 0..20u64 {
+            // #6 was deleted and #7's repository is gone.
+            let value = match i {
+                5 => json!({ "pullRequest": null }),
+                6 => Value::Null,
+                _ => details("o/r", i + 1),
+            };
+            first.insert(format!("p{i}"), value);
+        }
+        let batch1 = server
+            .mock("POST", "/graphql")
+            .match_body(Matcher::Regex(r"p19: repository".into()))
+            .with_body(json!({ "data": first }).to_string())
+            .create();
+        let batch2 = server
+            .mock("POST", "/graphql")
+            .match_body(Matcher::AllOf(vec![
+                Matcher::Regex(r"pullRequest\(number: 21\)".into()),
+                Matcher::Regex(r"fragment Dep on PullRequest".into()),
+            ]))
+            .with_body(json!({ "data": { "p0": details("x/y", 21) } }).to_string())
+            .create();
+        let client = Client::for_tests(&server.url());
+        let prs: Vec<(String, u64)> = (1..=21)
+            .map(|n| {
+                let repo = if n == 21 { "x/y" } else { "o/r" };
+                (repo.to_string(), n)
+            })
+            .collect();
+        let got = pr_details(&client, &prs).unwrap();
+        let numbers: Vec<u64> = got.iter().map(|p| p.number).collect();
+        let want: Vec<u64> = (1..=21).filter(|n| *n != 6 && *n != 7).collect();
+        assert_eq!(numbers, want);
+        assert_eq!(got.last().unwrap().repo(), "x/y");
+        assert_eq!(got[0].id, "PR_1");
+        batch1.assert();
+        batch2.assert();
+
+        // Nothing to fetch sends nothing.
+        assert!(pr_details(&client, &[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn rest_merge_calls() {
+        let mut server = Server::new();
+        let repo = Repo::parse("o/r").unwrap();
+        let approve_mock = server
+            .mock("POST", "/repos/o/r/pulls/3/reviews")
+            .match_body(Matcher::Json(json!({ "event": "APPROVE" })))
+            .with_body("{}")
+            .create();
+        let merge_mock = server
+            .mock("PUT", "/repos/o/r/pulls/3/merge")
+            .match_body(Matcher::Json(json!({ "merge_method": "squash" })))
+            .with_body(r#"{"merged": true}"#)
+            .create();
+        let delete_mock = server
+            .mock(
+                "DELETE",
+                "/repos/o/r/git/refs/heads/dependabot/cargo/serde-1.0.2",
+            )
+            .with_status(204)
+            .create();
+        let auto_mock = server
+            .mock("POST", "/graphql")
+            .match_body(Matcher::AllOf(vec![
+                Matcher::Regex("enablePullRequestAutoMerge".into()),
+                Matcher::PartialJson(json!({ "variables": { "id": "PR_3", "method": "REBASE" } })),
+            ]))
+            .with_body(r#"{"data": {"enablePullRequestAutoMerge": {"clientMutationId": null}}}"#)
+            .create();
+        let client = Client::for_tests(&server.url());
+        approve(&client, &repo, 3).unwrap();
+        merge(&client, &repo, 3, "squash").unwrap();
+        delete_branch(&client, &repo, "dependabot/cargo/serde-1.0.2").unwrap();
+        enable_auto_merge(&client, "PR_3", "rebase").unwrap();
+        approve_mock.assert();
+        merge_mock.assert();
+        delete_mock.assert();
+        auto_mock.assert();
+    }
+
+    #[test]
+    fn merge_refusal_surfaces_status() {
+        let mut server = Server::new();
+        server
+            .mock("PUT", "/repos/o/r/pulls/3/merge")
+            .with_status(405)
+            .with_body(r#"{"message": "Pull Request is not mergeable"}"#)
+            .create();
+        let client = Client::for_tests(&server.url());
+        let repo = Repo::parse("o/r").unwrap();
+        let err = merge(&client, &repo, 3, "rebase").unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "GitHub API 405 on PUT repos/o/r/pulls/3/merge: Pull Request is not mergeable"
+        );
+    }
+
+    #[test]
+    fn alert_listings_and_lookup() {
+        let mut server = Server::new();
+        let next = format!(
+            "<{}/repos/o/r/dependabot/alerts?state=open&page=2>; rel=\"next\"",
+            server.url()
+        );
+        server
+            .mock("GET", "/repos/o/r/dependabot/alerts")
+            .match_query(Matcher::AllOf(vec![
+                Matcher::UrlEncoded("state".into(), "open".into()),
+                Matcher::UrlEncoded("per_page".into(), "100".into()),
+            ]))
+            .with_header("link", &next)
+            .with_body(json!([alert_fixture()]).to_string())
+            .create();
+        let mut second = alert_fixture();
+        second["number"] = json!(8);
+        server
+            .mock("GET", "/repos/o/r/dependabot/alerts")
+            .match_query(Matcher::UrlEncoded("page".into(), "2".into()))
+            .with_body(json!([second]).to_string())
+            .create();
+        server
+            .mock("GET", "/orgs/acme/dependabot/alerts")
+            .match_query(Matcher::UrlEncoded("state".into(), "open".into()))
+            .with_body(json!([alert_fixture()]).to_string())
+            .create();
+        server
+            .mock("GET", "/repos/o/r/dependabot/alerts/7")
+            .with_body(alert_fixture().to_string())
+            .create();
+        server
+            .mock("GET", "/repos/o/r/dependabot/alerts/9")
+            .with_body(r#"{"number": "nine"}"#)
+            .create();
+        let client = Client::for_tests(&server.url());
+        let repo = Repo::parse("o/r").unwrap();
+        let numbers: Vec<u64> = repo_alerts(&client, &repo)
+            .unwrap()
+            .iter()
+            .map(|a| a.number)
+            .collect();
+        assert_eq!(numbers, vec![7, 8]);
+        assert_eq!(org_alerts(&client, "acme").unwrap()[0].repo(), "o/r");
+        assert_eq!(get_alert(&client, &repo, 7).unwrap().severity(), "high");
+        let err = get_alert(&client, &repo, 9).unwrap_err();
+        assert_eq!(err.to_string(), "Failed to parse Dependabot alert");
+    }
+
+    #[test]
+    fn dismiss_sends_reason_and_optional_comment() {
+        let mut server = Server::new();
+        let with_comment = server
+            .mock("PATCH", "/repos/o/r/dependabot/alerts/7")
+            .match_body(Matcher::Json(json!({
+                "state": "dismissed", "dismissed_reason": "not_used",
+                "dismissed_comment": "dev only"
+            })))
+            .with_body("{}")
+            .create();
+        let without = server
+            .mock("PATCH", "/repos/o/r/dependabot/alerts/8")
+            .match_body(Matcher::Json(json!({
+                "state": "dismissed", "dismissed_reason": "tolerable_risk"
+            })))
+            .with_body("{}")
+            .create();
+        let client = Client::for_tests(&server.url());
+        let repo = Repo::parse("o/r").unwrap();
+        dismiss_alert(&client, &repo, 7, "not_used", Some("dev only")).unwrap();
+        dismiss_alert(&client, &repo, 8, "tolerable_risk", None).unwrap();
+        with_comment.assert();
+        without.assert();
     }
 }
