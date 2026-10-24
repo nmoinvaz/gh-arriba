@@ -217,7 +217,7 @@ fn logs(ctx: &Ctx, args: LogsArgs) -> Result<()> {
 const PARALLEL_DOWNLOADS: usize = 8;
 
 /// One-line reason for a failed download. Jobs cancelled before they start have no log blob.
-fn short_error(e: &anyhow::Error) -> String {
+pub(crate) fn short_error(e: &anyhow::Error) -> String {
     let text = format!("{e:#}");
     if text.contains("404") {
         return "no log available, the job may not have started".to_string();
@@ -229,7 +229,13 @@ fn short_error(e: &anyhow::Error) -> String {
     }
 }
 
-fn download(ctx: &Ctx, repo: &Repo, job_id: u64, dir: &Path, name: &str) -> Result<PathBuf> {
+pub(crate) fn download(
+    ctx: &Ctx,
+    repo: &Repo,
+    job_id: u64,
+    dir: &Path,
+    name: &str,
+) -> Result<PathBuf> {
     // The endpoint redirects to blob storage, and reqwest drops the token on that hop.
     let text = ctx
         .client

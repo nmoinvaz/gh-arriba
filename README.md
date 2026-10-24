@@ -44,6 +44,7 @@ gh arriba [options] <command>
 | `pr apply [PR]` | Apply reviewers' suggestion blocks to the working tree |
 | `pr dump [PR]` | Write the whole discussion as grep-friendly text |
 | `pr retry [PR]` | Rerun failed and cancelled checks on a PR, or all your PRs with `--mine` |
+| `pr failures [PR]` | Show failed checks with their failed steps and error lines, saving full logs |
 | `pr rebase [PR]` | Rebase onto the base branch, signed locally or server-side with `--remote` |
 | `pr reviewers [PR]` | Suggest reviewers from top contributors and request one with `--add` |
 

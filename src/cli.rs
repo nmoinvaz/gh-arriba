@@ -63,6 +63,8 @@ pub enum PrCommand {
     Dump(DumpArgs),
     /// Rerun failed and cancelled checks on a PR or all your PRs
     Retry(RetryArgs),
+    /// Show failed checks with their failed steps and error lines
+    Failures(FailuresArgs),
     /// Rebase a PR onto its base, signed locally or server-side
     Rebase(RebaseArgs),
     /// Suggest reviewers from top contributors and request one
@@ -228,6 +230,28 @@ pub struct RetryArgs {
     /// Print the run tree without rerunning
     #[arg(long)]
     pub dry_run: bool,
+}
+
+#[derive(Args)]
+pub struct FailuresArgs {
+    /// Number, URL, or branch (default: PR for the current branch)
+    pub pr: Option<String>,
+
+    /// Only checks whose name contains this text, repeatable
+    #[arg(long = "job", value_name = "PATTERN")]
+    pub jobs: Vec<String>,
+
+    /// Directory to save full logs in (default: temp dir)
+    #[arg(short, long, value_name = "DIR")]
+    pub out: Option<PathBuf>,
+
+    /// Lines of log to show before each error
+    #[arg(long, value_name = "N", default_value_t = 8)]
+    pub context: usize,
+
+    /// Error blocks to show per job
+    #[arg(long, value_name = "N", default_value_t = 5)]
+    pub max: usize,
 }
 
 #[derive(Args)]
