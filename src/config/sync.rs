@@ -517,11 +517,12 @@ pub fn do_add(
             continue;
         }
         // A platform-agnostic entry and a platform-specific one for the same
-        // path would both match on sync. Reject the mix instead.
+        // path would both match on sync. Reject the mix instead. Variants for
+        // different platforms never match together, so they may coexist.
         if entries
             .iter()
             .chain(added.iter())
-            .any(|e| e.path == normalized)
+            .any(|e| e.path == normalized && (e.platform.is_none() || platform_str.is_none()))
         {
             anyhow::bail!(
                 "{normalized} is already tracked with a different platform scope. \
