@@ -1,12 +1,11 @@
 use anyhow::{Result, anyhow, bail};
 use clap::ValueEnum;
 use serde::Serialize;
-use serde_json::{Value, json};
+use serde_json::json;
 use std::collections::HashSet;
 
 use super::{Scope, fetch_light, parse_title};
-use crate::api::Client;
-use crate::api::json::str_of;
+use crate::api::{Client, dependabot};
 use crate::cli::{DependabotAlertsArgs, DependabotDismissArgs};
 use crate::context::Ctx;
 use crate::output::print_json;
@@ -114,16 +113,14 @@ pub fn alerted_packages(client: &Client, scope: &Scope) -> Result<HashSet<(Strin
 }
 
 pub fn fetch_alerts(client: &Client, scope: &Scope) -> Result<Vec<Alert>> {
-    let path = match scope {
-        Scope::Repo(r) => format!("{}/dependabot/alerts?state=open", r.api()),
-        Scope::Org(o) => format!("orgs/{o}/dependabot/alerts?state=open"),
-    };
-    let items = client
-        .get_all(&path)
-        .map_err(|e| access_error(e, &scope.to_string()))?;
+    let items = match scope {
+        Scope::Repo(r) => dependabot::repo_alerts(client, r),
+        Scope::Org(o) => dependabot::org_alerts(client, o),
+    }
+    .map_err(|e| access_error(e, &scope.to_string()))?;
     Ok(items
-        .iter()
-        .map(|a| parse_alert(a, scope_repo(scope)))
+        .into_iter()
+        .map(|a| Alert::new(a, scope_repo(scope)))
         .collect())
 }
 
@@ -144,30 +141,26 @@ fn access_error(e: anyhow::Error, scope: &str) -> anyhow::Error {
     }
 }
 
-/// Parse a REST alert. Org listings carry the repository, repo listings rely on `repo`.
-fn parse_alert(a: &Value, repo: Option<String>) -> Alert {
-    let advisory = &a["security_advisory"];
-    let package = &a["dependency"]["package"];
-    Alert {
-        repo: repo.unwrap_or_else(|| str_of(&a["repository"], "full_name")),
-        number: a["number"].as_u64().unwrap_or(0),
-        state: str_of(a, "state"),
-        severity: advisory["severity"]
-            .as_str()
-            .or_else(|| a["security_vulnerability"]["severity"].as_str())
-            .unwrap_or("unknown")
-            .to_string(),
-        package: str_of(package, "name"),
-        ecosystem: str_of(package, "ecosystem"),
-        cve: advisory["cve_id"].as_str().map(str::to_string),
-        ghsa: str_of(advisory, "ghsa_id"),
-        summary: str_of(advisory, "summary"),
-        manifest: str_of(&a["dependency"], "manifest_path"),
-        patched: a["security_vulnerability"]["first_patched_version"]["identifier"]
-            .as_str()
-            .map(str::to_string),
-        url: str_of(a, "html_url"),
-        fix_pr: None,
+impl Alert {
+    /// Org listings carry the repository, repo listings rely on `repo`.
+    fn new(a: dependabot::Alert, repo: Option<String>) -> Self {
+        let advisory = a.advisory();
+        let package = a.dependency.package.clone().unwrap_or_default();
+        Alert {
+            repo: repo.unwrap_or_else(|| a.repo().to_string()),
+            number: a.number,
+            severity: a.severity().to_string(),
+            patched: a.patched().map(str::to_string),
+            state: a.state,
+            package: package.name.unwrap_or_default(),
+            ecosystem: package.ecosystem.unwrap_or_default(),
+            cve: advisory.cve_id,
+            ghsa: advisory.ghsa_id.unwrap_or_default(),
+            summary: advisory.summary.unwrap_or_default(),
+            manifest: a.dependency.manifest_path.unwrap_or_default(),
+            url: a.html_url,
+            fix_pr: None,
+        }
     }
 }
 
@@ -239,17 +232,14 @@ pub fn run_dismiss(ctx: &Ctx, args: DependabotDismissArgs) -> Result<()> {
 
     let mut targets = Vec::new();
     for number in &args.alerts {
-        let value = ctx
-            .client
-            .get(&format!("{}/dependabot/alerts/{number}", repo.api()))
-            .map_err(|e| {
-                if e.to_string().contains("No alert found") {
-                    anyhow!("Alert #{number} not found in {repo}")
-                } else {
-                    access_error(e, &repo.to_string())
-                }
-            })?;
-        let alert = parse_alert(&value, Some(repo.to_string()));
+        let value = dependabot::get_alert(&ctx.client, &repo, *number).map_err(|e| {
+            if e.to_string().contains("No alert found") {
+                anyhow!("Alert #{number} not found in {repo}")
+            } else {
+                access_error(e, &repo.to_string())
+            }
+        })?;
+        let alert = Alert::new(value, Some(repo.to_string()));
         if alert.state != "open" {
             eprintln!("  skipped #{number}, already {}", alert.state);
             continue;
@@ -281,15 +271,11 @@ pub fn run_dismiss(ctx: &Ctx, args: DependabotDismissArgs) -> Result<()> {
         return Ok(());
     }
 
-    let mut body = json!({ "state": "dismissed", "dismissed_reason": reason });
-    if let Some(c) = &args.comment {
-        body["dismissed_comment"] = json!(c);
-    }
     let mut dismissed = Vec::new();
     let mut failed = 0usize;
     for a in &targets {
-        let path = format!("{}/dependabot/alerts/{}", repo.api(), a.number);
-        match ctx.client.patch(&path, &body) {
+        let comment = args.comment.as_deref();
+        match dependabot::dismiss_alert(&ctx.client, &repo, a.number, &reason, comment) {
             Ok(_) => {
                 if !ctx.json {
                     println!("  dismissed #{} {} ({reason})", a.number, a.package);
@@ -314,40 +300,23 @@ pub fn run_dismiss(ctx: &Ctx, args: DependabotDismissArgs) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::dependabot::alert_fixture;
+    use serde_json::Value;
 
-    fn alert_json() -> Value {
-        json!({
-            "number": 7,
-            "state": "open",
-            "html_url": "https://github.com/o/r/security/dependabot/7",
-            "dependency": {
-                "package": { "ecosystem": "npm", "name": "Lodash" },
-                "manifest_path": "package-lock.json"
-            },
-            "security_advisory": {
-                "ghsa_id": "GHSA-35jh-r3h4-6jhm",
-                "cve_id": "CVE-2021-23337",
-                "summary": "Command Injection in lodash",
-                "severity": "high"
-            },
-            "security_vulnerability": {
-                "severity": "high",
-                "first_patched_version": { "identifier": "4.17.21" }
-            },
-            "repository": { "full_name": "o/r" }
-        })
+    fn parse_alert(v: &Value, repo: Option<String>) -> Alert {
+        Alert::new(serde_json::from_value(v.clone()).unwrap(), repo)
     }
 
     #[test]
     fn parses_repo_and_org_alerts() {
-        let a = parse_alert(&alert_json(), None);
+        let a = parse_alert(&alert_fixture(), None);
         assert_eq!(a.repo, "o/r");
         assert_eq!(a.package, "Lodash");
         assert_eq!(a.advisory(), "CVE-2021-23337");
         assert_eq!(a.patched.as_deref(), Some("4.17.21"));
         assert_eq!(a.severity, "high");
 
-        let mut v = alert_json();
+        let mut v = alert_fixture();
         v["security_advisory"]["cve_id"] = Value::Null;
         let a = parse_alert(&v, Some("x/y".into()));
         assert_eq!(a.repo, "x/y");
