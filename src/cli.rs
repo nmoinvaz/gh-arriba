@@ -375,6 +375,8 @@ pub enum RunCommand {
     Logs(LogsArgs),
     /// Follow runs until their jobs finish, failing if any job fails
     Watch(WatchArgs),
+    /// Dispatch a workflow and print the run it starts
+    Dispatch(DispatchArgs),
 }
 
 #[derive(Args)]
@@ -417,6 +419,27 @@ pub struct WatchArgs {
     /// Only runs of this workflow, by name or file
     #[arg(short, long, value_name = "NAME", conflicts_with = "runs")]
     pub workflow: Option<String>,
+
+    #[command(flatten)]
+    pub wait: WaitArgs,
+}
+
+#[derive(Args)]
+pub struct DispatchArgs {
+    /// Workflow name, file name, or file name without extension
+    pub workflow: String,
+
+    /// Branch or tag to run the workflow on (default: the default branch)
+    #[arg(long = "ref", value_name = "BRANCH")]
+    pub git_ref: Option<String>,
+
+    /// Set a workflow input, repeatable
+    #[arg(short = 'f', long = "field", value_name = "KEY=VALUE")]
+    pub fields: Vec<String>,
+
+    /// Follow the run until it finishes
+    #[arg(long)]
+    pub watch: bool,
 
     #[command(flatten)]
     pub wait: WaitArgs,
