@@ -155,24 +155,12 @@ fn fetch(ctx: &Ctx, repo: &Repo, id: u64, wait: &Wait) -> Result<RunState> {
     Ok(state)
 }
 
-/// Human duration such as `45s`, `3m12s`, or `1h05m`.
-fn duration(seconds: i64) -> String {
-    let (h, m, s) = (seconds / 3600, seconds % 3600 / 60, seconds % 60);
-    if h > 0 {
-        format!("{h}h{m:02}m")
-    } else if m > 0 {
-        format!("{m}m{s:02}s")
-    } else {
-        format!("{s}s")
-    }
-}
-
 /// One progress line for a job that just finished.
 fn finished_line(run: &RunState, job: &JobState) -> String {
     let conclusion = job.conclusion.as_deref().unwrap_or("completed");
     let took = job
         .seconds
-        .map(|s| format!(" ({})", duration(s)))
+        .map(|s| format!(" ({})", output::duration(s)))
         .unwrap_or_default();
     format!("{conclusion:<10} {}: {}{took}", run.workflow, job.name)
 }
@@ -189,7 +177,7 @@ fn queued_line(run: &RunState, job: &JobState, waited: i64) -> String {
         "queued",
         run.workflow,
         job.name,
-        duration(waited)
+        output::duration(waited)
     )
 }
 
@@ -247,7 +235,7 @@ pub fn watch(ctx: &Ctx, runs: &[(Repo, u64)], wait: &Wait) -> Result<Vec<RunStat
                 .collect();
             bail!(
                 "Timed out after {} with runs still going: {}",
-                duration(wait.timeout.as_secs() as i64),
+                output::duration(wait.timeout.as_secs() as i64),
                 pending.join(", ")
             );
         }
@@ -274,7 +262,7 @@ pub fn render(runs: &[RunState]) -> String {
         let width = run.jobs.iter().map(|j| j.name.len()).max().unwrap_or(0);
         for job in &run.jobs {
             let state = job.conclusion.as_deref().unwrap_or(&job.status);
-            let took = job.seconds.map(duration).unwrap_or_default();
+            let took = job.seconds.map(output::duration).unwrap_or_default();
             let line = format!("  {state:<10} {:<width$}  {took}", job.name);
             out.push_str(line.trim_end());
             out.push('\n');
@@ -345,13 +333,6 @@ mod tests {
             "status": status, "conclusion": conclusion,
         });
         parse_run(&repo(), &run, jobs)
-    }
-
-    #[test]
-    fn durations_read_naturally() {
-        assert_eq!(duration(45), "45s");
-        assert_eq!(duration(192), "3m12s");
-        assert_eq!(duration(3900), "1h05m");
     }
 
     #[test]
