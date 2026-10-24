@@ -78,6 +78,17 @@ pub struct Job {
     pub started_at: Option<DateTime<Utc>>,
     #[serde(default, deserialize_with = "opt_time")]
     pub completed_at: Option<DateTime<Utc>>,
+    #[serde(default, deserialize_with = "null_default")]
+    pub steps: Vec<Step>,
+}
+
+/// A step of a job.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Step {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub conclusion: Option<String>,
 }
 
 /// One page of the runs listing.
