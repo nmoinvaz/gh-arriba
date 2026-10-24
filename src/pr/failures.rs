@@ -261,13 +261,8 @@ fn render(report: &Report) -> String {
         if let Some(e) = &job.error {
             out.push_str(&format!("  {e}\n"));
         }
-        match &job.excerpt {
-            Some(x) if x.blocks.is_empty() => out.push_str(&format!(
-                "  {}\n",
-                log::nothing_found(report.grep.as_deref())
-            )),
-            Some(x) => out.push_str(&log::render(x, "  ")),
-            None => {}
+        if let Some(x) = &job.excerpt {
+            out.push_str(&log::render(x, report.grep.as_deref(), "  "));
         }
     }
 

@@ -204,15 +204,9 @@ fn logs(ctx: &Ctx, args: LogsArgs) -> Result<()> {
                     let label = conclusion.as_deref().unwrap_or("running");
                     let note = if cached { " (saved earlier)" } else { "" };
                     println!("{label:<10} {}{note}", path.display());
-                    match &excerpt {
-                        Some(x) if x.blocks.is_empty() => {
-                            println!(
-                                "  {}",
-                                log::nothing_found(args.grep.as_ref().map(|re| re.as_str()))
-                            )
-                        }
-                        Some(x) => print!("{}", log::render(x, "  ")),
-                        None => {}
+                    if let Some(x) = &excerpt {
+                        let pattern = args.grep.as_ref().map(|re| re.as_str());
+                        print!("{}", log::render(x, pattern, "  "));
                     }
                 }
                 downloaded.push(Downloaded {
