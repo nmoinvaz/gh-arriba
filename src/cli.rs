@@ -548,6 +548,10 @@ pub struct CachesArgs {
     #[arg(long, value_name = "AGE", value_parser = parse_age, requires = "prune")]
     pub older_than: Option<chrono::TimeDelta>,
 
+    /// Prune only caches of PRs that are closed or merged
+    #[arg(long, requires = "prune")]
+    pub closed: bool,
+
     /// Print what --prune would delete without deleting it
     #[arg(long, requires = "prune")]
     pub dry_run: bool,

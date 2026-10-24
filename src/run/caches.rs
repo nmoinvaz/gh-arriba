@@ -2,14 +2,14 @@ use anyhow::{Result, bail};
 use chrono::{DateTime, TimeDelta, Utc};
 use serde::Serialize;
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use super::watch;
 use crate::cli::CachesArgs;
 use crate::context::{Ctx, Repo};
 use crate::github;
 use crate::json::{opt_time_of, str_of};
-use crate::{output, prompt};
+use crate::{output, parallel, prompt};
 
 /// GitHub's default cache limit per repository. Past it, the least recently used caches are evicted.
 const LIMIT: u64 = 10 * 1024 * 1024 * 1024;
@@ -210,23 +210,52 @@ fn render(s: &Summary, filtered: bool, now: DateTime<Utc>) -> String {
     out
 }
 
-/// Caches to delete: those unused for longer than `unused_for` and created longer ago than
-/// `older_than`, each only when given. Least recently used first.
-fn prune_plan(
-    caches: &[Cache],
+/// Caches to delete: those unused for longer than `unused_for`, created longer ago than
+/// `older_than`, and of a PR in `closed`, each only when given. Least recently used first.
+fn prune_plan<'a>(
+    caches: &'a [Cache],
     unused_for: Option<TimeDelta>,
     older_than: Option<TimeDelta>,
+    closed: Option<&HashSet<u64>>,
     now: DateTime<Utc>,
-) -> Vec<&Cache> {
+) -> Vec<&'a Cache> {
     let past = |t: Option<DateTime<Utc>>, span: Option<TimeDelta>| {
         span.is_none_or(|span| t.is_some_and(|t| now - t > span))
     };
     let mut doomed: Vec<&Cache> = caches
         .iter()
         .filter(|c| past(c.last_accessed_at, unused_for) && past(c.created_at, older_than))
+        .filter(|c| {
+            closed.is_none_or(|prs| pr_number(&c.git_ref).is_some_and(|n| prs.contains(&n)))
+        })
         .collect();
     doomed.sort_by_key(|c| c.last_accessed_at);
     doomed
+}
+
+/// The PRs with caches that are no longer open. A PR whose state can't be read is kept open.
+fn closed_prs(ctx: &Ctx, repo: &Repo, caches: &[Cache]) -> HashSet<u64> {
+    let prs: Vec<u64> = caches
+        .iter()
+        .filter_map(|c| pr_number(&c.git_ref))
+        .collect::<BTreeSet<u64>>()
+        .into_iter()
+        .collect();
+    let states = parallel::map(&prs, |n| {
+        ctx.client
+            .get(&format!("{}/pulls/{n}", repo.api()))
+            .map(|pr| str_of(&pr, "state"))
+    });
+    prs.into_iter()
+        .zip(states)
+        .filter_map(|(n, state)| match state {
+            Ok(s) => (s == "closed").then_some(n),
+            Err(e) => {
+                eprintln!("warning: kept the caches of PR #{n}, its state is unknown: {e:#}");
+                None
+            }
+        })
+        .collect()
 }
 
 #[derive(Serialize)]
@@ -246,11 +275,25 @@ fn prune(ctx: &Ctx, repo: &Repo, args: &CachesArgs, caches: &[Cache]) -> Result<
         && args.key.is_none()
         && args.unused_for.is_none()
         && args.older_than.is_none()
+        && !args.closed
     {
-        bail!("Pick the caches to prune with --unused-for, --older-than, --ref, or --key");
+        bail!(
+            "Pick the caches to prune with --unused-for, --older-than, --closed, --ref, or --key"
+        );
     }
+    let closed = if args.closed {
+        Some(closed_prs(ctx, repo, caches))
+    } else {
+        None
+    };
     let now = Utc::now();
-    let plan = prune_plan(caches, args.unused_for, args.older_than, now);
+    let plan = prune_plan(
+        caches,
+        args.unused_for,
+        args.older_than,
+        closed.as_ref(),
+        now,
+    );
     let mut report = Pruned {
         repo: repo.to_string(),
         freed_bytes: plan.iter().map(|c| c.size).sum(),
@@ -478,9 +521,9 @@ mod tests {
         new_unused.created_at = Some(at("2026-10-10T00:00:00Z"));
         let all = vec![old_unused, old_used, new_unused];
         let ids = |plan: Vec<&Cache>| plan.iter().map(|c| c.id).collect::<Vec<_>>();
-        assert_eq!(ids(prune_plan(&all, None, None, now)), vec![1, 3, 2]);
+        assert_eq!(ids(prune_plan(&all, None, None, None, now)), vec![1, 3, 2]);
         assert_eq!(
-            ids(prune_plan(&all, Some(TimeDelta::days(7),), None, now)),
+            ids(prune_plan(&all, Some(TimeDelta::days(7)), None, None, now)),
             vec![1, 3]
         );
         assert_eq!(
@@ -488,13 +531,27 @@ mod tests {
                 &all,
                 Some(TimeDelta::days(7)),
                 Some(TimeDelta::days(20)),
+                None,
                 now
             )),
             vec![1]
         );
         assert_eq!(
-            ids(prune_plan(&all, None, Some(TimeDelta::days(20)), now)),
+            ids(prune_plan(&all, None, Some(TimeDelta::days(20)), None, now)),
             vec![1, 2]
         );
+    }
+
+    #[test]
+    fn prune_plan_keeps_open_and_branch_caches_with_closed() {
+        let now = at("2026-10-24T00:00:00Z");
+        let all = vec![
+            cache(1, "a", "refs/pull/5/merge", 10, "2026-10-20T00:00:00Z"),
+            cache(2, "a", "refs/pull/6/merge", 10, "2026-10-20T00:00:00Z"),
+            cache(3, "a", "refs/heads/main", 10, "2026-10-20T00:00:00Z"),
+        ];
+        let closed = HashSet::from([5]);
+        let plan = prune_plan(&all, None, None, Some(&closed), now);
+        assert_eq!(plan.iter().map(|c| c.id).collect::<Vec<_>>(), vec![1]);
     }
 }
