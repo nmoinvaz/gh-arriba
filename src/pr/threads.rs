@@ -10,9 +10,10 @@ use std::sync::LazyLock;
 use crate::cli::{ReplyArgs, ResolveArgs, ThreadsArgs};
 use crate::context::{Ctx, PrRef, Repo};
 use crate::github::Client;
+use crate::json::{str_of, time_of};
 use crate::output::{first_lines, indent, print_json};
 use crate::pr::comment::{self, Kind};
-use crate::pr::model::{PrThreads, Thread, fetch_pr, fetch_threads, time_of, vars};
+use crate::pr::model::{PrThreads, Thread, fetch_pr, fetch_threads, vars};
 use crate::prompt;
 
 /// Body lines shown per comment in human output.
@@ -283,7 +284,7 @@ fn fetch_findings(
         for item in parse_review_body(body) {
             findings.push(Finding {
                 review_id: review["id"].as_u64().unwrap_or(0),
-                review_url: review["html_url"].as_str().unwrap_or_default().to_string(),
+                review_url: str_of(review, "html_url"),
                 submitted_at,
                 item,
             });
@@ -495,7 +496,7 @@ pub fn run_reply(ctx: &Ctx, args: ReplyArgs) -> Result<()> {
             let resp = ctx.client.post(&path, &json!({ "body": body }))?;
             let reply = NewComment {
                 id: resp["id"].as_u64().unwrap_or(0),
-                url: resp["html_url"].as_str().unwrap_or_default().to_string(),
+                url: str_of(&resp, "html_url"),
             };
             let thread_id = if args.resolve {
                 let threads = fetch_threads(&ctx.client, &c.pr)?;
@@ -512,7 +513,7 @@ pub fn run_reply(ctx: &Ctx, args: ReplyArgs) -> Result<()> {
             let c = &data["addPullRequestReviewThreadReply"]["comment"];
             let reply = NewComment {
                 id: c["databaseId"].as_u64().unwrap_or(0),
-                url: c["url"].as_str().unwrap_or_default().to_string(),
+                url: str_of(c, "url"),
             };
             (reply, args.resolve.then(|| args.target.clone()))
         }
@@ -609,7 +610,7 @@ fn set_resolved(client: &Client, thread_id: &str, resolve: bool) -> Result<Resol
     let t = &data[field]["thread"];
     Ok(Resolved {
         thread_id: t["id"].as_str().unwrap_or(thread_id).to_string(),
-        path: t["path"].as_str().unwrap_or_default().to_string(),
+        path: str_of(t, "path"),
         line: t["line"].as_u64().or_else(|| t["originalLine"].as_u64()),
         resolved: t["isResolved"].as_bool().unwrap_or(resolve),
     })

@@ -8,9 +8,9 @@ use super::{Scope, fetch_light, parse_title};
 use crate::cli::{DependabotAlertsArgs, DependabotDismissArgs};
 use crate::context::Ctx;
 use crate::github::Client;
+use crate::json::str_of;
 use crate::output::print_json;
 use crate::output::table;
-use crate::pr::model::str_of;
 use crate::prompt;
 
 /// GitHub's limit on a dismissal comment.

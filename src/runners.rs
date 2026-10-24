@@ -9,6 +9,7 @@ use crate::cli::RunnersArgs;
 use crate::context::{Ctx, Repo};
 use crate::dependabot::Scope;
 use crate::github::Client;
+use crate::json::{opt_time_of, str_of};
 use crate::output::table;
 use crate::{output, parallel};
 
@@ -43,10 +44,10 @@ impl Runner {
 fn parse_runner(v: &Value) -> Runner {
     Runner {
         id: v["id"].as_u64().unwrap_or(0),
-        name: v["name"].as_str().unwrap_or_default().to_string(),
-        status: v["status"].as_str().unwrap_or_default().to_string(),
+        name: str_of(v, "name"),
+        status: str_of(v, "status"),
         busy: v["busy"].as_bool().unwrap_or(false),
-        os: v["os"].as_str().unwrap_or_default().to_string(),
+        os: str_of(v, "os"),
         labels: v["labels"]
             .as_array()
             .into_iter()
@@ -103,19 +104,13 @@ struct Job {
 }
 
 fn parse_job(v: &Value, repo: &Repo, workflow: &str) -> Job {
-    let time = |key: &str| {
-        v[key]
-            .as_str()
-            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-            .map(|t| t.with_timezone(&Utc))
-    };
     Job {
         repo: repo.to_string(),
         workflow: v["workflow_name"].as_str().unwrap_or(workflow).to_string(),
-        name: v["name"].as_str().unwrap_or_default().to_string(),
+        name: str_of(v, "name"),
         run_id: v["run_id"].as_u64().unwrap_or(0),
         job_id: v["id"].as_u64().unwrap_or(0),
-        status: v["status"].as_str().unwrap_or_default().to_string(),
+        status: str_of(v, "status"),
         runner: v["runner_name"]
             .as_str()
             .filter(|s| !s.is_empty())
@@ -126,10 +121,10 @@ fn parse_job(v: &Value, repo: &Repo, workflow: &str) -> Job {
             .flatten()
             .filter_map(|l| l.as_str().map(str::to_string))
             .collect(),
-        created_at: time("created_at"),
-        started_at: time("started_at"),
-        completed_at: time("completed_at"),
-        url: v["html_url"].as_str().unwrap_or_default().to_string(),
+        created_at: opt_time_of(v, "created_at"),
+        started_at: opt_time_of(v, "started_at"),
+        completed_at: opt_time_of(v, "completed_at"),
+        url: str_of(v, "html_url"),
     }
 }
 
@@ -248,7 +243,7 @@ fn recent_runs(client: &Client, repo: &Repo, runs: usize) -> Result<Vec<RunRef>>
             Some(RunRef {
                 repo: repo.clone(),
                 id: r["id"].as_u64()?,
-                workflow: r["name"].as_str().unwrap_or_default().to_string(),
+                workflow: str_of(r, "name"),
             })
         })
         .collect())

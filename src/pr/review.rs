@@ -5,8 +5,9 @@ use serde_json::{Value, json};
 use crate::cli::{PrArg, ReviewAddArgs, ReviewCommand, ReviewEvent, ReviewSubmitArgs, Side};
 use crate::context::{Ctx, PrRef};
 use crate::github::Client;
+use crate::json::{login_of, str_of};
 use crate::output;
-use crate::pr::model::{login_of, str_of, vars};
+use crate::pr::model::vars;
 use crate::prompt;
 
 pub fn run(ctx: &Ctx, cmd: ReviewCommand) -> Result<()> {

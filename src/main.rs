@@ -3,6 +3,7 @@ mod config;
 mod context;
 mod dependabot;
 mod github;
+mod json;
 mod log;
 mod output;
 mod parallel;

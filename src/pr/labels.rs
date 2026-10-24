@@ -6,6 +6,7 @@ use std::collections::HashSet;
 use crate::cli::LabelsArgs;
 use crate::context::{Ctx, PrRef, Repo};
 use crate::github::{Client, encode_segment};
+use crate::json::str_of;
 use crate::output;
 use crate::pr::model::fetch_pr;
 
@@ -78,7 +79,7 @@ fn parse_labels(all: &[Value], applied: &HashSet<String>) -> Vec<Label> {
             let name = l["name"].as_str()?;
             Some(Label {
                 name: name.to_string(),
-                description: l["description"].as_str().unwrap_or_default().to_string(),
+                description: str_of(l, "description"),
                 applied: applied.contains(name),
             })
         })

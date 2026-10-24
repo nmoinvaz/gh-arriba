@@ -6,8 +6,8 @@ use std::collections::BTreeMap;
 use crate::cli::RetryArgs;
 use crate::context::{Ctx, PrRef, Repo, git, parse_pr_ref};
 use crate::github::{Client, is_failed};
+use crate::json::str_of;
 use crate::output;
-use crate::pr::model::str_of;
 use crate::pr::rollup::{self, CheckRun, latest};
 
 /// A commit status from an external service, which cannot be rerun.

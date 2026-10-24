@@ -6,6 +6,7 @@ use std::sync::LazyLock;
 
 use crate::cli::{CommentCommand, CommentEditArgs, CommentShowArgs};
 use crate::context::{Ctx, Repo};
+use crate::json::{login_of, str_of};
 use crate::output::{indent, print_json};
 use crate::prompt;
 
@@ -217,10 +218,10 @@ fn normalize(found: &Found) -> Shown {
         id: v["id"].as_u64().unwrap_or_default(),
         repo: found.repo.to_string(),
         number,
-        author: v["user"]["login"].as_str().unwrap_or("ghost").to_string(),
+        author: login_of(&v["user"]),
         created_at,
-        url: v["html_url"].as_str().unwrap_or_default().to_string(),
-        body: v["body"].as_str().unwrap_or_default().to_string(),
+        url: str_of(v, "html_url"),
+        body: str_of(v, "body"),
         state: None,
         path: None,
         line: None,

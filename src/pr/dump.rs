@@ -5,7 +5,8 @@ use serde_json::{Value, json};
 
 use crate::cli::DumpArgs;
 use crate::context::Ctx;
-use crate::pr::model::{PrInfo, Thread, fetch_pr, fetch_threads, time_of};
+use crate::json::{login_of, time_of};
+use crate::pr::model::{PrInfo, Thread, fetch_pr, fetch_threads};
 use crate::pr::threads::line_span;
 
 /// Width of the item prefix column, so bodies line up under it.
@@ -77,7 +78,7 @@ fn collect(comments: &[Value], reviews: &[Value], threads: Vec<Thread>) -> Resul
     for c in comments {
         items.push(Item::Comment {
             at: time_of(c, "created_at")?,
-            author: login(c),
+            author: login_of(&c["user"]),
             url: text(c, "html_url"),
             body: text(c, "body"),
         });
@@ -92,7 +93,7 @@ fn collect(comments: &[Value], reviews: &[Value], threads: Vec<Thread>) -> Resul
         }
         items.push(Item::Review {
             at: time_of(r, "submitted_at")?,
-            author: login(r),
+            author: login_of(&r["user"]),
             state,
             url: text(r, "html_url"),
             body,
@@ -117,10 +118,6 @@ fn collect(comments: &[Value], reviews: &[Value], threads: Vec<Thread>) -> Resul
     }
     items.sort_by_key(Item::at);
     Ok(items)
-}
-
-fn login(v: &Value) -> String {
-    v["user"]["login"].as_str().unwrap_or("ghost").to_string()
 }
 
 fn text(v: &Value, key: &str) -> String {

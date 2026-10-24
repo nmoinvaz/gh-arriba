@@ -5,6 +5,7 @@ use serde_json::{Value, json};
 
 use crate::context::PrRef;
 use crate::github::Client;
+use crate::json::{login_of, str_of, time_of};
 
 /// Pull request metadata most commands need.
 #[derive(Clone, Debug, Serialize)]
@@ -228,22 +229,6 @@ pub fn vars(pr: &PrRef) -> Value {
         "repo": pr.repo.name,
         "number": pr.number,
     })
-}
-
-pub fn str_of(v: &Value, key: &str) -> String {
-    v[key].as_str().unwrap_or_default().to_string()
-}
-
-/// Login of a GraphQL actor, or "ghost" for deleted accounts.
-pub fn login_of(actor: &Value) -> String {
-    actor["login"].as_str().unwrap_or("ghost").to_string()
-}
-
-pub fn time_of(v: &Value, key: &str) -> Result<DateTime<Utc>> {
-    let s = v[key].as_str().with_context(|| format!("{key} missing"))?;
-    Ok(DateTime::parse_from_rfc3339(s)
-        .with_context(|| format!("Bad timestamp {s}"))?
-        .with_timezone(&Utc))
 }
 
 #[cfg(test)]
