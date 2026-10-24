@@ -8,9 +8,10 @@ use std::collections::hash_map::Entry;
 use std::sync::LazyLock;
 
 use crate::cli::{ReplyArgs, ResolveArgs, ThreadsArgs};
-use crate::context::{Ctx, PrRef};
+use crate::context::{Ctx, PrRef, Repo};
 use crate::github::Client;
 use crate::output::{first_lines, indent, print_json};
+use crate::pr::comment::{self, Kind};
 use crate::pr::model::{PrThreads, Thread, fetch_pr, fetch_threads, time_of, vars};
 use crate::prompt;
 
@@ -499,8 +500,8 @@ pub fn run_reply(ctx: &Ctx, args: ReplyArgs) -> Result<()> {
     let body = prompt::read_body(args.body.as_deref(), "reply")?;
 
     let (comment, thread_id) = match comment_id(&args.target)? {
-        Some(id) => {
-            let c = lookup_comment(ctx, id)?;
+        Some((repo, id)) => {
+            let c = lookup_comment(ctx, repo, id)?;
             // Replies attach to the thread's top-level comment, replies to replies fail.
             let path = format!("{}/comments/{}/replies", c.pr.api(), c.top_id);
             let resp = ctx.client.post(&path, &json!({ "body": body }))?;
@@ -564,19 +565,19 @@ struct NewComment {
 pub fn run_resolve(ctx: &Ctx, args: ResolveArgs) -> Result<()> {
     let resolve = !args.undo;
     // Threads per PR number, so several comment IDs on one PR cost one fetch.
-    let mut cache: HashMap<u64, PrThreads> = HashMap::new();
+    let mut cache: HashMap<(Repo, u64), PrThreads> = HashMap::new();
     let mut results = Vec::new();
 
     for target in &args.targets {
         let thread_id = match comment_id(target)? {
             None => target.clone(),
-            Some(id) => {
-                let c = lookup_comment(ctx, id)?;
-                let threads = match cache.entry(c.pr.number) {
+            Some((repo, id)) => {
+                let c = lookup_comment(ctx, repo, id)?;
+                let threads = match cache.entry((c.pr.repo.clone(), c.pr.number)) {
                     Entry::Occupied(e) => e.into_mut(),
                     Entry::Vacant(e) => e.insert(fetch_threads(&ctx.client, &c.pr)?),
                 };
-                find_thread(threads, target)?.id.clone()
+                find_thread(threads, &id.to_string())?.id.clone()
             }
         };
         let r = set_resolved(&ctx.client, &thread_id, resolve)?;
@@ -641,14 +642,19 @@ fn print_resolved(r: &Resolved) {
 // -------------------------------------------------------------------------
 
 /// Database ID of a review comment, or None for a thread node ID.
-fn comment_id(target: &str) -> Result<Option<u64>> {
+/// A review comment named by ID or `#discussion_r` link, with the link's repo, or None for a
+/// PRRT_ thread ID.
+fn comment_id(target: &str) -> Result<Option<(Option<Repo>, u64)>> {
     if target.starts_with("PRRT_") {
         return Ok(None);
     }
-    target
-        .parse()
-        .map(Some)
-        .with_context(|| format!("Expected a comment ID or a PRRT_ thread ID, got {target:?}"))
+    let t = comment::parse_target(target).with_context(|| {
+        format!("Expected a comment ID, review comment URL, or PRRT_ thread ID, got {target:?}")
+    })?;
+    match t.kind {
+        None | Some(Kind::ReviewComment) => Ok(Some((t.repo, t.id))),
+        Some(_) => anyhow::bail!("{target} is not a review comment, which threads are made of"),
+    }
 }
 
 /// The PR a review comment belongs to and the top-level comment of its thread.
@@ -657,12 +663,17 @@ struct CommentRef {
     top_id: u64,
 }
 
-fn lookup_comment(ctx: &Ctx, id: u64) -> Result<CommentRef> {
-    let repo = ctx.repo()?;
+/// Look up a review comment in `repo`, or in -R or the current repo when the ID came bare.
+fn lookup_comment(ctx: &Ctx, repo: Option<Repo>, id: u64) -> Result<CommentRef> {
+    let from_url = repo.is_some();
+    let repo = match repo {
+        Some(r) => r,
+        None => ctx.repo()?,
+    };
     let path = format!("{}/pulls/comments/{id}", repo.api());
     let comment = ctx.client.get_opt(&path)?.with_context(|| {
         // Comment IDs carry no repo, so a lookup in the wrong one is the likely mistake.
-        let hint = if ctx.repo_flag.is_none() {
+        let hint = if ctx.repo_flag.is_none() && !from_url {
             " Pass --repo OWNER/REPO."
         } else {
             ""
@@ -1011,8 +1022,13 @@ Outside diff range comments:
 
     #[test]
     fn comment_id_accepts_numbers_and_thread_ids() {
-        assert_eq!(comment_id("123").unwrap(), Some(123));
+        assert_eq!(comment_id("123").unwrap(), Some((None, 123)));
         assert_eq!(comment_id("PRRT_kwDO").unwrap(), None);
         assert!(comment_id("abc").is_err());
+        assert_eq!(
+            comment_id("https://github.com/a/b/pull/4#discussion_r123").unwrap(),
+            Some((Some(Repo::parse("a/b").unwrap()), 123))
+        );
+        assert!(comment_id("https://github.com/a/b/pull/4#issuecomment-123").is_err());
     }
 }

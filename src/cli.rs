@@ -110,7 +110,7 @@ pub struct ThreadsArgs {
 
 #[derive(Args)]
 pub struct ReplyArgs {
-    /// Comment database ID or thread ID (PRRT_...)
+    /// Comment database ID, comment URL, or thread ID (PRRT_...)
     pub target: String,
 
     /// Reply text, or - to read stdin (default: stdin)
@@ -123,7 +123,7 @@ pub struct ReplyArgs {
 
 #[derive(Args)]
 pub struct ResolveArgs {
-    /// Thread IDs (PRRT_...) or comment database IDs
+    /// Thread IDs (PRRT_...), comment database IDs, or comment URLs
     #[arg(required = true)]
     pub targets: Vec<String>,
 
