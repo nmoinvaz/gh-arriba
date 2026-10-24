@@ -274,6 +274,50 @@ fn details_query(batch: &[(String, u64)]) -> Result<String> {
     Ok(query)
 }
 
+const ENABLE_AUTO_MERGE: &str = r#"
+mutation($id: ID!, $method: PullRequestMergeMethod!) {
+  enablePullRequestAutoMerge(input: {pullRequestId: $id, mergeMethod: $method}) {
+    clientMutationId
+  }
+}"#;
+
+/// Comment on a PR, as `@dependabot rebase`.
+pub fn comment(client: &Client, repo: &Repo, number: u64, body: &str) -> Result<()> {
+    let path = format!("{}/issues/{number}/comments", repo.api());
+    client.post(&path, &json!({ "body": body }))?;
+    Ok(())
+}
+
+/// Submit an approving review.
+pub fn approve(client: &Client, repo: &Repo, number: u64) -> Result<()> {
+    let path = format!("{}/pulls/{number}/reviews", repo.api());
+    client.post(&path, &json!({ "event": "APPROVE" }))?;
+    Ok(())
+}
+
+/// Merge a PR now with a REST merge method: `merge`, `squash`, or `rebase`.
+pub fn merge(client: &Client, repo: &Repo, number: u64, method: &str) -> Result<()> {
+    let path = format!("{}/pulls/{number}/merge", repo.api());
+    client.put(&path, &json!({ "merge_method": method }))?;
+    Ok(())
+}
+
+/// Delete a branch by name.
+pub fn delete_branch(client: &Client, repo: &Repo, branch: &str) -> Result<()> {
+    client.delete(&format!("{}/git/refs/heads/{branch}", repo.api()))?;
+    Ok(())
+}
+
+/// Turn on auto-merge for a PR by node ID. `method` is the REST merge method name, whose
+/// uppercase form is the GraphQL enum value.
+pub fn enable_auto_merge(client: &Client, node_id: &str, method: &str) -> Result<()> {
+    client.graphql(
+        ENABLE_AUTO_MERGE,
+        json!({ "id": node_id, "method": method.to_uppercase() }),
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
