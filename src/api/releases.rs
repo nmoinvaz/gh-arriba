@@ -33,6 +33,7 @@ fn latest_published(releases: Vec<Release>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mockito::{Matcher, Server};
     use serde_json::json;
 
     #[test]
@@ -45,5 +46,24 @@ mod tests {
         .unwrap();
         assert_eq!(latest_published(releases).as_deref(), Some("v1.1.0"));
         assert_eq!(latest_published(Vec::new()), None);
+    }
+
+    #[test]
+    fn latest_tag_reads_the_newest_ten() {
+        let mut server = Server::new();
+        let mock = server
+            .mock("GET", "/repos/o/r/releases")
+            .match_query(Matcher::Exact("per_page=10".into()))
+            .with_body(
+                r#"[{"tag_name": "v3.0.0", "draft": true}, {"tag_name": "v2.1.0", "draft": false}]"#,
+            )
+            .create();
+        let client = Client::for_tests(&server.url());
+        let repo = Repo::parse("o/r").unwrap();
+        assert_eq!(
+            latest_tag(&client, &repo).unwrap().as_deref(),
+            Some("v2.1.0")
+        );
+        mock.assert();
     }
 }
