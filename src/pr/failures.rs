@@ -209,10 +209,7 @@ pub fn run(ctx: &Ctx, args: FailuresArgs) -> Result<()> {
         }
     }
 
-    let base = args
-        .out
-        .clone()
-        .unwrap_or_else(|| std::env::temp_dir().join("gh-arriba-logs"));
+    let base = args.out.clone().unwrap_or_else(log::default_dir);
     let actions: Vec<&FailedCheck> = failed.iter().filter(|c| c.actions).collect();
     // Each job costs a details call and a log download, so fetch a few at a time.
     let jobs = parallel::map(&actions, |check| {

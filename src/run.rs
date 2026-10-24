@@ -168,9 +168,7 @@ fn logs(ctx: &Ctx, args: LogsArgs) -> Result<()> {
         anyhow::bail!("No {what}{named} in run {run_id}");
     }
 
-    let base = args
-        .out
-        .unwrap_or_else(|| std::env::temp_dir().join("gh-arriba-logs"));
+    let base = args.out.unwrap_or_else(log::default_dir);
     let dir = base.join(run_id.to_string());
     fs::create_dir_all(&dir).with_context(|| format!("Failed to create {}", dir.display()))?;
 
