@@ -1,14 +1,15 @@
-use anyhow::Result;
-use chrono::{DateTime, Utc};
+use anyhow::{Result, bail};
+use chrono::{DateTime, TimeDelta, Utc};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
 
+use super::watch;
 use crate::cli::CachesArgs;
 use crate::context::{Ctx, Repo};
 use crate::github;
 use crate::json::{opt_time_of, str_of};
-use crate::output;
+use crate::{output, prompt};
 
 /// GitHub's default cache limit per repository. Past it, the least recently used caches are evicted.
 const LIMIT: u64 = 10 * 1024 * 1024 * 1024;
@@ -147,6 +148,9 @@ struct Summary<'a> {
 pub fn run(ctx: &Ctx, args: CachesArgs) -> Result<()> {
     let repo = ctx.repo()?;
     let caches = fetch(ctx, &repo, &args)?;
+    if args.prune {
+        return prune(ctx, &repo, &args, &caches);
+    }
     let usage = ctx
         .client
         .get(&format!("{}/actions/cache/usage", repo.api()))?;
@@ -204,6 +208,126 @@ fn render(s: &Summary, filtered: bool, now: DateTime<Utc>) -> String {
         out.push_str(&format!("\n{title}:\n{}\n", output::table(&rows, "  ")));
     }
     out
+}
+
+/// Caches to delete: those unused for longer than `unused_for` and created longer ago than
+/// `older_than`, each only when given. Least recently used first.
+fn prune_plan(
+    caches: &[Cache],
+    unused_for: Option<TimeDelta>,
+    older_than: Option<TimeDelta>,
+    now: DateTime<Utc>,
+) -> Vec<&Cache> {
+    let past = |t: Option<DateTime<Utc>>, span: Option<TimeDelta>| {
+        span.is_none_or(|span| t.is_some_and(|t| now - t > span))
+    };
+    let mut doomed: Vec<&Cache> = caches
+        .iter()
+        .filter(|c| past(c.last_accessed_at, unused_for) && past(c.created_at, older_than))
+        .collect();
+    doomed.sort_by_key(|c| c.last_accessed_at);
+    doomed
+}
+
+#[derive(Serialize)]
+struct Pruned<'a> {
+    repo: String,
+    freed_bytes: u64,
+    dry_run: bool,
+    caches: Vec<&'a Cache>,
+    /// IDs that failed to delete.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    failed: Vec<u64>,
+}
+
+/// Delete the caches the filters and pruning options select, after confirming.
+fn prune(ctx: &Ctx, repo: &Repo, args: &CachesArgs, caches: &[Cache]) -> Result<()> {
+    if args.git_ref.is_none()
+        && args.key.is_none()
+        && args.unused_for.is_none()
+        && args.older_than.is_none()
+    {
+        bail!("Pick the caches to prune with --unused-for, --older-than, --ref, or --key");
+    }
+    let now = Utc::now();
+    let plan = prune_plan(caches, args.unused_for, args.older_than, now);
+    let mut report = Pruned {
+        repo: repo.to_string(),
+        freed_bytes: plan.iter().map(|c| c.size).sum(),
+        dry_run: args.dry_run,
+        caches: plan,
+        failed: Vec::new(),
+    };
+    let say = |line: &str| watch::progress(ctx, line);
+    if report.caches.is_empty() {
+        say(&format!("{repo}: no caches to prune"));
+        return if ctx.json {
+            output::print_json(&report)
+        } else {
+            Ok(())
+        };
+    }
+    let rows: Vec<Vec<String>> = report
+        .caches
+        .iter()
+        .map(|c| {
+            vec![
+                c.key.clone(),
+                short_ref(&c.git_ref),
+                output::size(c.size),
+                c.last_accessed_at
+                    .map(|t| format!("used {} ago", output::age(now - t)))
+                    .unwrap_or_default(),
+            ]
+        })
+        .collect();
+    say(&output::table(&rows, "  "));
+    say(&format!(
+        "{repo}: pruning {} frees {}",
+        plural(report.caches.len(), "cache"),
+        output::size(report.freed_bytes)
+    ));
+
+    if args.dry_run {
+        return if ctx.json {
+            output::print_json(&report)
+        } else {
+            Ok(())
+        };
+    }
+    let question = format!("Delete {}?", plural(report.caches.len(), "cache"));
+    if !prompt::confirm(&question, ctx.yes)? {
+        say("Cancelled");
+        return Ok(());
+    }
+    for c in &report.caches {
+        let path = format!("{}/actions/caches/{}", repo.api(), c.id);
+        if let Err(e) = ctx.client.delete(&path) {
+            eprintln!("failed to delete {} ({}): {e:#}", c.key, c.id);
+            report.failed.push(c.id);
+        }
+    }
+    report.freed_bytes = report
+        .caches
+        .iter()
+        .filter(|c| !report.failed.contains(&c.id))
+        .map(|c| c.size)
+        .sum();
+    if ctx.json {
+        return output::print_json(&report);
+    }
+    println!(
+        "Deleted {}, freeing {}",
+        plural(report.caches.len() - report.failed.len(), "cache"),
+        output::size(report.freed_bytes)
+    );
+    if !report.failed.is_empty() {
+        bail!(
+            "{} could not be deleted",
+            plural(report.failed.len(), "cache")
+        );
+    }
+    Ok(())
 }
 
 /// `1 cache` or `3 caches`.
@@ -341,6 +465,36 @@ mod tests {
              \n\
              By key:\n  \
              a  1 cache  1.0 GB  used 1d ago\n"
+        );
+    }
+
+    #[test]
+    fn prune_plan_needs_every_given_age() {
+        let now = at("2026-10-24T00:00:00Z");
+        let mut old_unused = cache(1, "a", "refs/heads/main", 10, "2026-10-01T00:00:00Z");
+        old_unused.created_at = Some(at("2026-09-01T00:00:00Z"));
+        let old_used = cache(2, "b", "refs/heads/main", 10, "2026-10-23T00:00:00Z");
+        let mut new_unused = cache(3, "c", "refs/heads/main", 10, "2026-10-10T00:00:00Z");
+        new_unused.created_at = Some(at("2026-10-10T00:00:00Z"));
+        let all = vec![old_unused, old_used, new_unused];
+        let ids = |plan: Vec<&Cache>| plan.iter().map(|c| c.id).collect::<Vec<_>>();
+        assert_eq!(ids(prune_plan(&all, None, None, now)), vec![1, 3, 2]);
+        assert_eq!(
+            ids(prune_plan(&all, Some(TimeDelta::days(7),), None, now)),
+            vec![1, 3]
+        );
+        assert_eq!(
+            ids(prune_plan(
+                &all,
+                Some(TimeDelta::days(7)),
+                Some(TimeDelta::days(20)),
+                now
+            )),
+            vec![1]
+        );
+        assert_eq!(
+            ids(prune_plan(&all, None, Some(TimeDelta::days(20)), now)),
+            vec![1, 2]
         );
     }
 }
