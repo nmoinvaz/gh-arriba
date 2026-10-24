@@ -3,11 +3,13 @@ pub mod watch;
 use anyhow::{Context, Result};
 use serde::Serialize;
 use serde_json::Value;
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use crate::cli::{LogsArgs, RunCommand, WatchArgs};
-use crate::context::{Ctx, Repo};
+use crate::context::{Ctx, Repo, git};
 use crate::log::{self, Excerpt};
 use crate::output;
 
@@ -269,13 +271,133 @@ pub(crate) fn download(
 // -------------------------------------------------------------------------
 
 fn watch_runs(ctx: &Ctx, args: WatchArgs) -> Result<()> {
-    let runs = args
-        .runs
-        .iter()
-        .map(|r| resolve_run(ctx, r))
-        .collect::<Result<Vec<_>>>()?;
-    let states = watch::watch(ctx, &runs, &(&args.wait).into())?;
+    let wait: watch::Wait = (&args.wait).into();
+    let runs = if args.runs.is_empty() {
+        let repo = ctx.repo()?;
+        let commit = match (&args.sha, &args.branch) {
+            (Some(sha), _) => Commit::Sha(sha.clone()),
+            (None, Some(branch)) => Commit::Branch(branch.clone()),
+            (None, None) => Commit::Sha(git(&["rev-parse", "HEAD"])?),
+        };
+        find_runs(ctx, &repo, &commit, args.workflow.as_deref(), &wait)?
+            .into_iter()
+            .map(|id| (repo.clone(), id))
+            .collect()
+    } else {
+        args.runs
+            .iter()
+            .map(|r| resolve_run(ctx, r))
+            .collect::<Result<Vec<_>>>()?
+    };
+    let states = watch::watch(ctx, &runs, &wait)?;
     watch::report(ctx, &states)
+}
+
+/// Which commit's runs to watch.
+enum Commit {
+    Sha(String),
+    /// The newest commit on the branch that has runs.
+    Branch(String),
+}
+
+/// How long to wait for runs to show up after a push.
+const RUNS_GRACE: Duration = Duration::from_secs(120);
+
+/// Run IDs for a commit, polling for a while since runs appear some seconds after a push.
+fn find_runs(
+    ctx: &Ctx,
+    repo: &Repo,
+    commit: &Commit,
+    workflow: Option<&str>,
+    wait: &watch::Wait,
+) -> Result<Vec<u64>> {
+    let (path, what) = match commit {
+        Commit::Sha(sha) => (
+            format!("{}/actions/runs?head_sha={sha}", repo.api()),
+            format!("commit {}", &sha[..sha.len().min(10)]),
+        ),
+        Commit::Branch(b) => (
+            format!(
+                "{}/actions/runs?branch={}&per_page=100",
+                repo.api(),
+                encode(b)
+            ),
+            format!("branch {b}"),
+        ),
+    };
+    let for_workflow = workflow
+        .map(|w| format!(" for workflow {w}"))
+        .unwrap_or_default();
+    let deadline = Instant::now() + RUNS_GRACE;
+    let mut announced = false;
+    loop {
+        let runs = match commit {
+            Commit::Sha(_) => ctx.client.get_all_in(&path, "workflow_runs")?,
+            // Only the newest page matters, older commits are not watched.
+            Commit::Branch(_) => ctx.client.get(&path)?["workflow_runs"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default(),
+        };
+        let ids = select_runs(&runs, workflow);
+        if !ids.is_empty() {
+            return Ok(ids);
+        }
+        if Instant::now() >= deadline {
+            let seen: BTreeSet<&str> = runs.iter().filter_map(|r| r["name"].as_str()).collect();
+            let hint = if seen.is_empty() {
+                " Push the commit first, or pass --sha or --branch.".to_string()
+            } else {
+                format!(" Workflows with runs: {}", Vec::from_iter(seen).join(", "))
+            };
+            anyhow::bail!("No runs{for_workflow} on {what} in {repo}.{hint}");
+        }
+        if !announced {
+            watch::progress(ctx, &format!("Waiting for runs{for_workflow} on {what}..."));
+            announced = true;
+        }
+        std::thread::sleep(wait.interval.min(Duration::from_secs(10)));
+    }
+}
+
+/// Runs of the newest commit in `runs`, which the API lists newest first, narrowed to a workflow.
+fn select_runs(runs: &[Value], workflow: Option<&str>) -> Vec<u64> {
+    let runs: Vec<&Value> = runs
+        .iter()
+        .filter(|r| {
+            workflow.is_none_or(|w| {
+                crate::workflow::matches(
+                    r["name"].as_str().unwrap_or_default(),
+                    r["path"].as_str().unwrap_or_default(),
+                    w,
+                )
+            })
+        })
+        .collect();
+    let Some(sha) = runs.first().and_then(|r| r["head_sha"].as_str()) else {
+        return Vec::new();
+    };
+    let mut ids: Vec<u64> = runs
+        .iter()
+        .filter(|r| r["head_sha"].as_str() == Some(sha))
+        .filter_map(|r| r["id"].as_u64())
+        .collect();
+    ids.sort_unstable();
+    ids
+}
+
+/// Percent-encode a query value, keeping slashes so branch names stay readable.
+fn encode(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for b in value.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }
 
 /// The repository and run a RUN argument names. A job ID or URL stands for the run it belongs to.
@@ -377,6 +499,25 @@ mod tests {
         assert!(name_matches("lint", &patterns));
         assert!(!name_matches("Ubuntu GCC", &patterns));
         assert!(name_matches("anything", &[]));
+    }
+
+    #[test]
+    fn runs_of_newest_commit_and_workflow() {
+        use serde_json::json;
+        let runs = vec![
+            json!({"id": 30, "name": "Lint", "path": ".github/workflows/lint.yml", "head_sha": "bbb"}),
+            json!({"id": 20, "name": "Build", "path": ".github/workflows/build.yml", "head_sha": "bbb"}),
+            json!({"id": 10, "name": "Build", "path": ".github/workflows/build.yml", "head_sha": "aaa"}),
+        ];
+        assert_eq!(select_runs(&runs, None), vec![20, 30]);
+        assert_eq!(select_runs(&runs, Some("build.yml")), vec![20]);
+        assert!(select_runs(&runs, Some("deploy")).is_empty());
+        assert!(select_runs(&[], None).is_empty());
+    }
+
+    #[test]
+    fn encode_keeps_slashes() {
+        assert_eq!(encode("nathan/dev/fix#2"), "nathan/dev/fix%232");
     }
 
     #[test]

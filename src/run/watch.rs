@@ -163,7 +163,7 @@ fn queued_line(run: &RunState, job: &JobState, waited: i64) -> String {
 }
 
 /// Progress goes to stderr under --json so stdout carries only the final document.
-fn progress(ctx: &Ctx, line: &str) {
+pub fn progress(ctx: &Ctx, line: &str) {
     if ctx.json {
         eprintln!("{line}");
     } else {

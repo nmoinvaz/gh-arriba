@@ -9,6 +9,7 @@ use std::time::Duration;
 use crate::cli::{Bump, ReleaseArgs};
 use crate::context::{Ctx, Repo};
 use crate::github::Client;
+use crate::workflow::{self, Workflow};
 use crate::{output, prompt};
 
 // -------------------------------------------------------------------------
@@ -85,60 +86,10 @@ fn latest_release_tag(client: &Client, repo: &Repo) -> Result<Option<String>> {
 //  workflow
 // -------------------------------------------------------------------------
 
-#[derive(Clone, Debug)]
-struct Workflow {
-    id: u64,
-    name: String,
-    path: String,
-}
-
-impl Workflow {
-    /// File name without its directory or `.yml` extension.
-    fn stem(&self) -> &str {
-        let base = self.path.rsplit('/').next().unwrap_or(&self.path);
-        base.strip_suffix(".yml")
-            .or_else(|| base.strip_suffix(".yaml"))
-            .unwrap_or(base)
-    }
-
-    fn file(&self) -> &str {
-        self.path.rsplit('/').next().unwrap_or(&self.path)
-    }
-}
-
 /// Pick the workflow named by `-w`, or the one that looks like the release workflow.
 fn pick_workflow<'a>(workflows: &'a [Workflow], name: Option<&str>) -> Result<&'a Workflow> {
-    let list = || {
-        workflows
-            .iter()
-            .map(|w| format!("{} ({})", w.name, w.path))
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-    let one = |found: Vec<&'a Workflow>, what: &str| -> Result<&'a Workflow> {
-        match found.as_slice() {
-            [w] => Ok(*w),
-            [] => bail!("No workflow {what}. Workflows: {}", list()),
-            many => {
-                let names: Vec<&str> = many.iter().map(|w| w.name.as_str()).collect();
-                bail!(
-                    "Several workflows {what}: {}. Pick one with -w.",
-                    names.join(", ")
-                )
-            }
-        }
-    };
-
     if let Some(name) = name {
-        let found = workflows
-            .iter()
-            .filter(|w| {
-                w.name.eq_ignore_ascii_case(name)
-                    || w.file().eq_ignore_ascii_case(name)
-                    || w.stem().eq_ignore_ascii_case(name)
-            })
-            .collect();
-        return one(found, &format!("matches {name:?}"));
+        return workflow::find(workflows, name);
     }
 
     let exact: Vec<&Workflow> = workflows
@@ -148,7 +99,7 @@ fn pick_workflow<'a>(workflows: &'a [Workflow], name: Option<&str>) -> Result<&'
         })
         .collect();
     if !exact.is_empty() {
-        return one(exact, "is named release");
+        return workflow::one_of(exact, workflows, "is named release");
     }
     let partial = workflows
         .iter()
@@ -156,7 +107,7 @@ fn pick_workflow<'a>(workflows: &'a [Workflow], name: Option<&str>) -> Result<&'
             w.name.to_lowercase().contains("release") || w.stem().to_lowercase().contains("release")
         })
         .collect();
-    one(partial, "mentions release")
+    workflow::one_of(partial, workflows, "mentions release")
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -456,18 +407,7 @@ pub fn run(ctx: &Ctx, args: ReleaseArgs) -> Result<()> {
         (None, None) => "1.0.0".to_string(),
     };
 
-    let workflows: Vec<Workflow> = client
-        .get_all_in(&format!("{}/actions/workflows", repo.api()), "workflows")?
-        .iter()
-        .filter(|w| w["state"].as_str() == Some("active"))
-        .filter_map(|w| {
-            Some(Workflow {
-                id: w["id"].as_u64()?,
-                name: w["name"].as_str()?.to_string(),
-                path: w["path"].as_str()?.to_string(),
-            })
-        })
-        .collect();
+    let workflows = workflow::list(client, &repo)?;
     let workflow = pick_workflow(&workflows, args.workflow.as_deref())?;
 
     let yaml = client.get_raw(&format!(
