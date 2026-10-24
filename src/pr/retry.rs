@@ -3,39 +3,26 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
-use crate::api::json::str_of;
+use crate::api::pulls::{self, CheckRun, StatusContext};
 use crate::api::{Client, PrRef, Repo, is_failed, parse_pr_ref};
 use crate::cli::RetryArgs;
 use crate::context::{Ctx, git};
 use crate::output;
-use crate::pr::rollup::{self, CheckRun, latest};
-
-/// A commit status from an external service, which cannot be rerun.
-#[derive(Clone, Debug)]
-struct StatusContext {
-    context: String,
-    state: String,
-}
+use crate::pr::rollup::latest;
 
 struct Checks {
     title: String,
     runs: Vec<CheckRun>,
+    /// Commit statuses from external services, which cannot be rerun.
     statuses: Vec<StatusContext>,
 }
 
 fn fetch_checks(client: &Client, pr: &PrRef) -> Result<Checks> {
-    let rollup = rollup::fetch(client, pr, "title")?;
+    let rollup = pulls::checks_with_title(client, pr)?;
     Ok(Checks {
-        title: str_of(&rollup.pr, "title"),
+        title: rollup.pr.title,
         runs: rollup.runs,
-        statuses: rollup
-            .statuses
-            .iter()
-            .map(|s| StatusContext {
-                context: str_of(s, "context"),
-                state: str_of(s, "state"),
-            })
-            .collect(),
+        statuses: rollup.statuses,
     })
 }
 
@@ -194,39 +181,6 @@ fn local_branch_exists(name: &str) -> bool {
     .is_ok()
 }
 
-/// Open PRs authored by the viewer.
-fn my_prs(client: &Client, repo: &Repo) -> Result<Vec<PrRef>> {
-    let login = client.viewer()?;
-    let query = r#"
-      query($q: String!, $cursor: String) {
-        search(query: $q, type: ISSUE, first: 100, after: $cursor) {
-          pageInfo { hasNextPage endCursor }
-          nodes { ... on PullRequest { number } }
-        }
-      }"#;
-    let q = format!("is:pr is:open author:{login} repo:{repo}");
-    let mut prs = Vec::new();
-    let mut cursor = Value::Null;
-    loop {
-        let data = client.graphql(query, json!({ "q": q, "cursor": cursor }))?;
-        let search = &data["search"];
-        for node in search["nodes"].as_array().into_iter().flatten() {
-            if let Some(number) = node["number"].as_u64() {
-                prs.push(PrRef {
-                    repo: repo.clone(),
-                    number,
-                });
-            }
-        }
-        if search["pageInfo"]["hasNextPage"].as_bool() != Some(true) {
-            break;
-        }
-        cursor = search["pageInfo"]["endCursor"].clone();
-    }
-    prs.sort_by_key(|p| p.number);
-    Ok(prs)
-}
-
 /// Status of the Actions component on githubstatus.com.
 fn actions_status() -> Result<String> {
     let body: Value = reqwest::blocking::get("https://www.githubstatus.com/api/v2/components.json")
@@ -249,7 +203,7 @@ pub fn run(ctx: &Ctx, args: RetryArgs) -> Result<()> {
         Target::Pr(arg) => vec![ctx.pr(arg.as_deref())?],
         Target::Repo(repo) => {
             let repo = ctx.repo_or(repo)?;
-            let prs = my_prs(client, &repo)?;
+            let prs = pulls::my_open_prs(client, &repo)?;
             if prs.is_empty() {
                 println!("No open PRs by {} in {repo}", client.viewer()?);
                 return Ok(());
@@ -452,6 +406,7 @@ mod tests {
             statuses: vec![StatusContext {
                 context: "ci/jenkins".to_string(),
                 state: "ERROR".to_string(),
+                target_url: None,
             }],
         };
         let plan = plan(&pr(), checks);

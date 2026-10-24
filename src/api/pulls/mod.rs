@@ -7,7 +7,11 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Value, json};
 
-use crate::api::{Client, PrRef};
+use crate::api::{Client, PrRef, Repo};
+
+mod rollup;
+
+pub use rollup::{CheckRun, StatusContext, StatusFields, checks_with_status, checks_with_title};
 
 /// Pull request metadata most commands need.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -131,6 +135,80 @@ struct RepoData<T> {
 #[serde(rename_all = "camelCase")]
 struct PullRequestData<T> {
     pull_request: T,
+}
+
+/// One page of a GraphQL connection.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", bound(deserialize = "T: Deserialize<'de>"))]
+struct Connection<T> {
+    page_info: PageInfo,
+    #[serde(default, deserialize_with = "nullable")]
+    nodes: Vec<T>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PageInfo {
+    #[serde(default, deserialize_with = "nullable")]
+    has_next_page: bool,
+    end_cursor: Option<String>,
+}
+
+impl PageInfo {
+    /// Cursor of the next page, or None on the last one.
+    fn next_cursor(&self) -> Option<String> {
+        if self.has_next_page {
+            self.end_cursor.clone()
+        } else {
+            None
+        }
+    }
+}
+
+const MY_PRS_QUERY: &str = r#"
+  query($q: String!, $cursor: String) {
+    search(query: $q, type: ISSUE, first: 100, after: $cursor) {
+      pageInfo { hasNextPage endCursor }
+      nodes { ... on PullRequest { number } }
+    }
+  }"#;
+
+#[derive(Deserialize)]
+struct SearchData {
+    search: Connection<SearchNode>,
+}
+
+/// A search hit. Hits that are not pull requests come back empty.
+#[derive(Deserialize)]
+struct SearchNode {
+    number: Option<u64>,
+}
+
+/// Open PRs authored by the viewer in `repo`, by number.
+pub fn my_open_prs(client: &Client, repo: &Repo) -> Result<Vec<PrRef>> {
+    let login = client.viewer()?;
+    let q = format!("is:pr is:open author:{login} repo:{repo}");
+    let mut prs = Vec::new();
+    let mut cursor = Value::Null;
+    loop {
+        let data: SearchData = query(client, MY_PRS_QUERY, json!({ "q": q, "cursor": cursor }))?;
+        prs.extend(
+            data.search
+                .nodes
+                .iter()
+                .filter_map(|n| n.number)
+                .map(|number| PrRef {
+                    repo: repo.clone(),
+                    number,
+                }),
+        );
+        match data.search.page_info.next_cursor() {
+            Some(c) => cursor = Value::String(c),
+            None => break,
+        }
+    }
+    prs.sort_by_key(|p| p.number);
+    Ok(prs)
 }
 
 /// Run a GraphQL query and deserialize its `data`.

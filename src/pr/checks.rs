@@ -1,15 +1,14 @@
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
-use serde_json::Value;
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
-use crate::api::json::str_of;
+use crate::api::pulls::{self, CheckRun, StatusContext, StatusFields};
 use crate::api::{Client, PrRef, is_failed};
 use crate::cli::ChecksArgs;
 use crate::context::{Ctx, git};
 use crate::output;
-use crate::pr::rollup::{self, CheckRun, latest};
+use crate::pr::rollup::latest;
 
 /// Outcome of one check, folding check-run conclusions and commit-status states together.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -98,16 +97,18 @@ struct PrStatus {
     checks: Vec<Check>,
 }
 
-/// PR fields `pr checks` reports alongside the checks.
-const STATUS_FIELDS: &str = "title url state isDraft mergeable mergeStateStatus reviewDecision headRefOid commits { totalCount }";
-
 fn fetch_status(client: &Client, pr: &PrRef) -> Result<PrStatus> {
-    let rollup = rollup::fetch(client, pr, STATUS_FIELDS)?;
+    let rollup = pulls::checks_with_status(client, pr)?;
     Ok(build(pr, &rollup.pr, rollup.runs, &rollup.statuses))
 }
 
 /// Fold the PR fields and its head's checks into one status.
-fn build(pr: &PrRef, p: &Value, runs: Vec<CheckRun>, statuses: &[Value]) -> PrStatus {
+fn build(
+    pr: &PrRef,
+    p: &StatusFields,
+    runs: Vec<CheckRun>,
+    statuses: &[StatusContext],
+) -> PrStatus {
     let mut checks: Vec<Check> = latest(runs)
         .iter()
         .map(|r| Check {
@@ -125,9 +126,9 @@ fn build(pr: &PrRef, p: &Value, runs: Vec<CheckRun>, statuses: &[Value]) -> PrSt
         })
         .collect();
     checks.extend(statuses.iter().map(|s| Check {
-        name: str_of(s, "context"),
-        state: State::of_status(s["state"].as_str().unwrap_or_default()),
-        url: s["targetUrl"].as_str().map(str::to_string),
+        name: s.context.clone(),
+        state: State::of_status(&s.state),
+        url: s.target_url.clone(),
         seconds: None,
     }));
 
@@ -141,32 +142,32 @@ fn build(pr: &PrRef, p: &Value, runs: Vec<CheckRun>, statuses: &[Value]) -> PrSt
         }
     }
 
-    let state = match p["state"].as_str() {
-        Some("OPEN") if p["isDraft"].as_bool() == Some(true) => "draft".to_string(),
+    let state = match p.state.as_deref() {
+        Some("OPEN") if p.is_draft == Some(true) => "draft".to_string(),
         Some(s) => s.to_lowercase(),
         None => "unknown".to_string(),
     };
     PrStatus {
         repo: pr.repo.to_string(),
         number: pr.number,
-        title: str_of(p, "title"),
-        url: str_of(p, "url"),
+        title: p.title.clone(),
+        url: p.url.clone(),
         state,
         mergeable: merge_state(p),
-        review: p["reviewDecision"].as_str().map(|r| r.to_lowercase()),
-        head_oid: str_of(p, "headRefOid"),
-        commits: p["commits"]["totalCount"].as_u64().unwrap_or(0),
+        review: p.review_decision.as_deref().map(str::to_lowercase),
+        head_oid: p.head_ref_oid.clone(),
+        commits: p.commits.as_ref().map_or(0, |c| c.total_count),
         counts,
         checks,
     }
 }
 
 /// Merge state in plain words. GitHub calls a conflicting PR "dirty".
-fn merge_state(p: &Value) -> String {
-    if p["mergeable"].as_str() == Some("CONFLICTING") {
+fn merge_state(p: &StatusFields) -> String {
+    if p.mergeable.as_deref() == Some("CONFLICTING") {
         return "conflicting".to_string();
     }
-    match p["mergeStateStatus"].as_str() {
+    match p.merge_state_status.as_deref() {
         Some("DIRTY") => "conflicting".to_string(),
         Some(s) => s.to_lowercase(),
         None => "unknown".to_string(),
@@ -446,8 +447,19 @@ fn is_settled(status: &PrStatus, waited: Duration) -> bool {
 mod tests {
     use super::*;
     use crate::api::Repo;
-    use crate::pr::rollup::parse_check_run;
-    use serde_json::json;
+    use serde_json::{Value, json};
+
+    fn parse_check_run(node: &Value) -> CheckRun {
+        serde_json::from_value(node.clone()).unwrap()
+    }
+
+    fn parse_status(node: Value) -> StatusContext {
+        serde_json::from_value(node).unwrap()
+    }
+
+    fn fields(p: &Value) -> StatusFields {
+        serde_json::from_value(p.clone()).unwrap()
+    }
 
     fn pr() -> PrRef {
         PrRef {
@@ -494,8 +506,9 @@ mod tests {
             json!({"context": "ci/jenkins", "state": "ERROR", "targetUrl": "https://ci"}),
             json!({"context": "codecov", "state": "PENDING", "targetUrl": null}),
             json!({"context": "license", "state": "SUCCESS", "targetUrl": null}),
-        ];
-        let status = build(&pr(), &header(), runs, &statuses);
+        ]
+        .map(parse_status);
+        let status = build(&pr(), &fields(&header()), runs, &statuses);
         assert_eq!(
             status.counts,
             Counts {
@@ -520,7 +533,7 @@ mod tests {
         .iter()
         .map(parse_check_run)
         .collect();
-        let status = build(&pr(), &header(), runs, &[]);
+        let status = build(&pr(), &fields(&header()), runs, &[]);
         assert_eq!(
             render(&status, false),
             "#42 Fix thing  open  mergeable=blocked  head=1a2b3c4d (3 commits)  review=review_required  checks: 1 pass, 1 fail, 1 pending\n  \
@@ -537,7 +550,7 @@ mod tests {
         p["mergeStateStatus"] = json!("DIRTY");
         p["reviewDecision"] = Value::Null;
         p["commits"]["totalCount"] = json!(1);
-        let status = build(&pr(), &p, Vec::new(), &[]);
+        let status = build(&pr(), &fields(&p), Vec::new(), &[]);
         assert_eq!(
             render(&status, true),
             "zlib-ng/zlib-ng#42 Fix thing  draft  mergeable=conflicting  head=1a2b3c4d (1 commit)  checks: none\n"
@@ -551,7 +564,7 @@ mod tests {
         let mut passed = run_node("Ubuntu", "Build", "COMPLETED", Some("SUCCESS"));
         passed["startedAt"] = json!("2026-01-01T01:00:00Z");
         let runs = [failed, passed].iter().map(parse_check_run).collect();
-        let status = build(&pr(), &header(), runs, &[]);
+        let status = build(&pr(), &fields(&header()), runs, &[]);
         assert_eq!(status.counts.fail, 0);
         assert_eq!(status.counts.pass, 1);
     }
@@ -559,7 +572,7 @@ mod tests {
     fn status_of(nodes: &[Value]) -> PrStatus {
         build(
             &pr(),
-            &header(),
+            &fields(&header()),
             nodes.iter().map(parse_check_run).collect(),
             &[],
         )
