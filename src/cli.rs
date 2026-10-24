@@ -54,6 +54,9 @@ pub enum PrCommand {
     Reply(ReplyArgs),
     /// Resolve or unresolve review threads
     Resolve(ResolveArgs),
+    /// Show or edit one comment by URL or ID
+    #[command(subcommand)]
+    Comment(CommentCommand),
     /// Manage your pending review and its inline comments
     #[command(subcommand)]
     Review(ReviewCommand),
@@ -125,6 +128,19 @@ pub struct ResolveArgs {
     /// Unresolve instead
     #[arg(long)]
     pub undo: bool,
+}
+
+#[derive(Subcommand)]
+pub enum CommentCommand {
+    /// Print a review comment, issue comment, or review body
+    Show(CommentShowArgs),
+}
+
+#[derive(Args)]
+pub struct CommentShowArgs {
+    /// Comment URL (#discussion_r..., #issuecomment-..., #pullrequestreview-...) or ID
+    #[arg(value_name = "URL|ID")]
+    pub target: String,
 }
 
 #[derive(Subcommand)]
