@@ -27,6 +27,17 @@ impl From<&crate::cli::WaitArgs> for Wait {
     }
 }
 
+impl Default for Wait {
+    /// The `run watch` defaults: poll every 20 seconds for up to an hour, for every job.
+    fn default() -> Self {
+        Self {
+            interval: Duration::from_secs(20),
+            timeout: Duration::from_secs(60 * 60),
+            job: None,
+        }
+    }
+}
+
 impl Wait {
     fn wants(&self, job: &str) -> bool {
         self.job
