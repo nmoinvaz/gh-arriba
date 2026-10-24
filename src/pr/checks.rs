@@ -8,8 +8,8 @@ use crate::cli::ChecksArgs;
 use crate::context::{Ctx, PrRef, git};
 use crate::github::Client;
 use crate::output;
-use crate::pr::model::{str_of, vars};
-use crate::pr::retry::{CheckRun, is_failed, latest, parse_check_run};
+use crate::pr::model::str_of;
+use crate::pr::rollup::{self, CheckRun, is_failed, latest};
 
 /// Outcome of one check, folding check-run conclusions and commit-status states together.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -98,70 +98,12 @@ struct PrStatus {
     checks: Vec<Check>,
 }
 
-const STATUS_QUERY: &str = r#"
-query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
-  repository(owner: $owner, name: $repo) {
-    pullRequest(number: $number) {
-      title url state isDraft mergeable mergeStateStatus reviewDecision headRefOid
-      commits { totalCount }
-      last: commits(last: 1) {
-        nodes {
-          commit {
-            statusCheckRollup {
-              contexts(first: 100, after: $cursor) {
-                pageInfo { hasNextPage endCursor }
-                nodes {
-                  __typename
-                  ... on CheckRun {
-                    name status conclusion startedAt completedAt detailsUrl
-                    checkSuite { workflowRun { databaseId event workflow { name } } }
-                  }
-                  ... on StatusContext { context state targetUrl }
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-  }
-}"#;
+/// PR fields `pr checks` reports alongside the checks.
+const STATUS_FIELDS: &str = "title url state isDraft mergeable mergeStateStatus reviewDecision headRefOid commits { totalCount }";
 
 fn fetch_status(client: &Client, pr: &PrRef) -> Result<PrStatus> {
-    let mut header = None;
-    let mut runs = Vec::new();
-    let mut statuses = Vec::new();
-    let mut cursor = Value::Null;
-    loop {
-        let mut variables = vars(pr);
-        variables["cursor"] = cursor;
-        let data = client.graphql(STATUS_QUERY, variables)?;
-        let p = &data["repository"]["pullRequest"];
-        if p.is_null() {
-            bail!("Pull request {pr} not found");
-        }
-        if header.is_none() {
-            header = Some(p.clone());
-        }
-        let contexts = &p["last"]["nodes"][0]["commit"]["statusCheckRollup"]["contexts"];
-        // A commit with no checks at all has a null rollup.
-        if contexts.is_null() {
-            break;
-        }
-        for node in contexts["nodes"].as_array().into_iter().flatten() {
-            match node["__typename"].as_str() {
-                Some("CheckRun") => runs.push(parse_check_run(node)),
-                Some("StatusContext") => statuses.push(node.clone()),
-                _ => {}
-            }
-        }
-        if contexts["pageInfo"]["hasNextPage"].as_bool() != Some(true) {
-            break;
-        }
-        cursor = contexts["pageInfo"]["endCursor"].clone();
-    }
-    let p = header.unwrap_or_default();
-    Ok(build(pr, &p, runs, &statuses))
+    let rollup = rollup::fetch(client, pr, STATUS_FIELDS)?;
+    Ok(build(pr, &rollup.pr, rollup.runs, &rollup.statuses))
 }
 
 /// Fold the PR fields and its head's checks into one status.
@@ -514,6 +456,7 @@ fn duration(seconds: i64) -> String {
 mod tests {
     use super::*;
     use crate::context::Repo;
+    use crate::pr::rollup::parse_check_run;
     use serde_json::json;
 
     fn pr() -> PrRef {
