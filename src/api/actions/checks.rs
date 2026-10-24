@@ -85,6 +85,7 @@ pub fn commit_statuses(client: &Client, repo: &Repo, sha: &str) -> Result<Vec<Co
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mockito::{Matcher, Server};
     use serde_json::json;
 
     #[test]
@@ -114,5 +115,42 @@ mod tests {
             ("ci/jenkins", "error")
         );
         assert_eq!(s.target_url, None);
+    }
+
+    #[test]
+    fn checks_and_statuses_for_a_commit() {
+        let mut server = Server::new();
+        let checks = server
+            .mock("GET", "/repos/o/r/commits/abc/check-runs")
+            .match_query(Matcher::AllOf(vec![
+                Matcher::UrlEncoded("filter".into(), "latest".into()),
+                Matcher::UrlEncoded("per_page".into(), "100".into()),
+            ]))
+            .with_body(
+                r#"{"total_count": 1, "check_runs": [{"id": 1, "name": "Ubuntu",
+                    "app": {"slug": "github-actions"}, "html_url": "https://h/1"}]}"#,
+            )
+            .create();
+        server
+            .mock("GET", "/repos/o/r/commits/abc/status")
+            .with_body(
+                r#"{"state": "failure", "statuses": [{"context": "ci/x", "state": "failure"}]}"#,
+            )
+            .create();
+        server
+            .mock("GET", "/repos/o/r/commits/def/status")
+            .with_body(r#"{"state": "pending", "statuses": null}"#)
+            .create();
+        let client = Client::for_tests(&server.url());
+        let repo = Repo::parse("o/r").unwrap();
+        let runs = check_runs(&client, &repo, "abc").unwrap();
+        assert!(runs[0].is_actions());
+        assert_eq!(runs[0].url(), "https://h/1");
+        assert_eq!(
+            commit_statuses(&client, &repo, "abc").unwrap()[0].context,
+            "ci/x"
+        );
+        assert!(commit_statuses(&client, &repo, "def").unwrap().is_empty());
+        checks.assert();
     }
 }

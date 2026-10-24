@@ -69,6 +69,7 @@ pub fn delete_cache(client: &Client, repo: &Repo, id: u64) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mockito::{Matcher, Server};
     use serde_json::json;
 
     #[test]
@@ -106,5 +107,69 @@ mod tests {
             (u.active_caches_size_in_bytes, u.active_caches_count),
             (10, 2)
         );
+    }
+
+    #[test]
+    fn listing_filters_are_encoded() {
+        let mut server = Server::new();
+        let all = server
+            .mock("GET", "/repos/o/r/actions/caches")
+            .match_query(Matcher::Exact("per_page=100".into()))
+            .with_body(r#"{"total_count": 1, "actions_caches": [{"id": 1, "size_in_bytes": 5}]}"#)
+            .create();
+        let filtered = server
+            .mock("GET", "/repos/o/r/actions/caches")
+            .match_query(Matcher::Exact(
+                "ref=refs%2Fpull%2F3%2Fmerge&key=Linux%20cargo&per_page=100".into(),
+            ))
+            .with_body(r#"{"actions_caches": []}"#)
+            .create();
+        let key_only = server
+            .mock("GET", "/repos/o/r/actions/caches")
+            .match_query(Matcher::Exact("key=sccache&per_page=100".into()))
+            .with_body(r#"{"actions_caches": [{"id": 2}]}"#)
+            .create();
+        let client = Client::for_tests(&server.url());
+        let repo = Repo::parse("o/r").unwrap();
+        assert_eq!(caches(&client, &repo, None, None).unwrap()[0].size, 5);
+        assert!(
+            caches(
+                &client,
+                &repo,
+                Some("refs/pull/3/merge"),
+                Some("Linux cargo")
+            )
+            .unwrap()
+            .is_empty()
+        );
+        assert_eq!(
+            caches(&client, &repo, None, Some("sccache")).unwrap()[0].id,
+            2
+        );
+        for m in [all, filtered, key_only] {
+            m.assert();
+        }
+    }
+
+    #[test]
+    fn usage_and_delete() {
+        let mut server = Server::new();
+        server
+            .mock("GET", "/repos/o/r/actions/cache/usage")
+            .with_body(r#"{"active_caches_size_in_bytes": 100, "active_caches_count": null}"#)
+            .create();
+        let delete = server
+            .mock("DELETE", "/repos/o/r/actions/caches/4")
+            .with_status(204)
+            .create();
+        let client = Client::for_tests(&server.url());
+        let repo = Repo::parse("o/r").unwrap();
+        let usage = cache_usage(&client, &repo).unwrap();
+        assert_eq!(
+            (usage.active_caches_size_in_bytes, usage.active_caches_count),
+            (100, 0)
+        );
+        delete_cache(&client, &repo, 4).unwrap();
+        delete.assert();
     }
 }
