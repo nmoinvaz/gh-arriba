@@ -452,6 +452,9 @@ fn dispatch(ctx: &Ctx, args: DispatchArgs) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::Client;
+    use crate::cli::WaitArgs;
+    use mockito::{Matcher, Server, ServerGuard};
 
     fn repo() -> Option<Repo> {
         Some(Repo {
@@ -546,5 +549,445 @@ mod tests {
         assert_eq!(select_runs(&runs, Some("build.yml")), vec![20]);
         assert!(select_runs(&runs, Some("deploy")).is_empty());
         assert!(select_runs(&[], None).is_empty());
+    }
+
+    fn ctx(server: &ServerGuard, json: bool) -> Ctx {
+        Ctx {
+            client: Client::for_tests(&server.url()),
+            repo_flag: Some("o/r".into()),
+            json,
+            yes: true,
+        }
+    }
+
+    fn temp_dir(test: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("gh-arriba-run-{test}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        dir
+    }
+
+    fn logs_args(target: &str, out: &Path) -> LogsArgs {
+        LogsArgs {
+            target: target.to_string(),
+            failed: false,
+            out: Some(out.to_path_buf()),
+            jobs: Vec::new(),
+            errors: false,
+            grep: None,
+            context: log::CONTEXT,
+            max: log::MAX,
+            refresh: false,
+        }
+    }
+
+    fn wait_args() -> WaitArgs {
+        WaitArgs {
+            interval: 1,
+            timeout: 1,
+            job: None,
+        }
+    }
+
+    /// A run 9 with a failed and a passing job, each with a log.
+    fn run_with_jobs(server: &mut ServerGuard) {
+        server
+            .mock("GET", "/repos/o/r/actions/runs/9")
+            .with_body(r#"{"id": 9, "name": "CI", "status": "completed"}"#)
+            .create();
+        server
+            .mock("GET", "/repos/o/r/actions/runs/9/jobs")
+            .match_query(Matcher::Any)
+            .with_body(
+                r#"{"jobs": [
+                    {"id": 1, "run_id": 9, "name": "Build / Linux", "status": "completed",
+                     "conclusion": "failure"},
+                    {"id": 2, "run_id": 9, "name": "Lint", "status": "completed",
+                     "conclusion": "success"}
+                ]}"#,
+            )
+            .create();
+    }
+
+    #[test]
+    fn logs_saves_failed_jobs_and_reuses_them() {
+        let mut server = Server::new();
+        run_with_jobs(&mut server);
+        let log1 = server
+            .mock("GET", "/repos/o/r/actions/jobs/1/logs")
+            .with_body("2026-01-01T00:00:00Z compiling\n2026-01-01T00:00:01Z error: boom\n")
+            .expect(2)
+            .create();
+        let log2 = server
+            .mock("GET", "/repos/o/r/actions/jobs/2/logs")
+            .expect(0)
+            .create();
+        let ctx = ctx(&server, true);
+        let out = temp_dir("logs");
+        let path = out.join("9").join("Build-Linux-1.log");
+
+        let mut args = logs_args("9", &out);
+        args.failed = true;
+        args.grep = Some(regex::Regex::new("boom").unwrap());
+        logs(&ctx, args).unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "2026-01-01T00:00:00Z compiling\n2026-01-01T00:00:01Z error: boom\n"
+        );
+        assert!(!out.join("9").join("Build-Linux-1.log.part").exists());
+
+        // A finished job's saved log is reused instead of downloaded again...
+        let mut args = logs_args("9", &out);
+        args.failed = true;
+        args.errors = true;
+        logs(&ctx, args).unwrap();
+        // ...unless asked to refresh it.
+        let mut args = logs_args("9", &out);
+        args.failed = true;
+        args.refresh = true;
+        logs(&ctx, args).unwrap();
+        log1.assert();
+        log2.assert();
+        fs::remove_dir_all(&out).unwrap();
+    }
+
+    #[test]
+    fn logs_by_job_url_and_name_filter() {
+        let mut server = Server::new();
+        run_with_jobs(&mut server);
+        server
+            .mock("GET", "/repos/o/r/actions/jobs/2")
+            .with_body(r#"{"id": 2, "run_id": 9, "name": "Lint", "status": "completed"}"#)
+            .create();
+        let lint = server
+            .mock("GET", "/repos/o/r/actions/jobs/2/logs")
+            .with_body("ok\n")
+            .expect(2)
+            .create();
+        let ctx = ctx(&server, false);
+        let out = temp_dir("logs-job");
+
+        logs(
+            &ctx,
+            logs_args("https://github.com/o/r/actions/runs/9/job/2", &out),
+        )
+        .unwrap();
+        assert!(out.join("9").join("Lint-2.log").exists());
+
+        let mut args = logs_args("9", &out);
+        args.jobs = vec!["lint".to_string()];
+        args.refresh = true;
+        logs(&ctx, args).unwrap();
+
+        let mut args = logs_args("9", &out);
+        args.jobs = vec!["windows".to_string()];
+        let err = logs(&ctx, args).unwrap_err().to_string();
+        assert_eq!(err, "No jobs matching windows in run 9");
+        lint.assert();
+        fs::remove_dir_all(&out).unwrap();
+    }
+
+    #[test]
+    fn logs_of_a_bare_job_id_and_unknown_ids() {
+        let mut server = Server::new();
+        server
+            .mock("GET", "/repos/o/r/actions/runs/1")
+            .with_status(404)
+            .create();
+        server
+            .mock("GET", "/repos/o/r/actions/runs/5")
+            .with_status(404)
+            .create();
+        server
+            .mock("GET", "/repos/o/r/actions/jobs/5")
+            .with_status(404)
+            .create();
+        server
+            .mock("GET", "/repos/o/r/actions/jobs/1")
+            .with_body(r#"{"id": 1, "run_id": 9, "name": "Build", "status": "in_progress"}"#)
+            .create();
+        // A job that never started has no log, which is skipped with a warning.
+        server
+            .mock("GET", "/repos/o/r/actions/jobs/1/logs")
+            .with_status(404)
+            .create();
+        let ctx = ctx(&server, true);
+        let out = temp_dir("logs-bare");
+        logs(&ctx, logs_args("1", &out)).unwrap();
+        assert!(!out.join("9").join("Build-1.log").exists());
+        let err = logs(&ctx, logs_args("5", &out)).unwrap_err().to_string();
+        assert_eq!(err, "No run or job 5 in o/r");
+        fs::remove_dir_all(&out).unwrap();
+    }
+
+    #[test]
+    fn logs_with_no_failed_jobs() {
+        let mut server = Server::new();
+        server
+            .mock("GET", "/repos/o/r/actions/runs/9/attempts/2/jobs")
+            .match_query(Matcher::Any)
+            .with_body(r#"{"jobs": [{"id": 1, "name": "Lint", "conclusion": "success"}]}"#)
+            .create();
+        let ctx = ctx(&server, true);
+        let out = temp_dir("logs-none");
+        let mut args = logs_args("https://github.com/o/r/actions/runs/9/attempts/2", &out);
+        args.failed = true;
+        let err = logs(&ctx, args).unwrap_err().to_string();
+        assert_eq!(err, "No failed jobs in run 9");
+        assert!(!out.exists());
+    }
+
+    #[test]
+    fn short_errors() {
+        let not_found = anyhow::anyhow!("GitHub API 404 on GET x: Not Found");
+        assert_eq!(
+            short_error(&not_found),
+            "no log available, the job may not have started"
+        );
+        let long = anyhow::anyhow!("{}\nsecond line", "x".repeat(200));
+        assert_eq!(short_error(&long), format!("{}...", "x".repeat(120)));
+        assert_eq!(short_error(&anyhow::anyhow!("timed out")), "timed out");
+    }
+
+    #[test]
+    fn resolve_run_from_runs_jobs_and_urls() {
+        let mut server = Server::new();
+        server
+            .mock("GET", "/repos/o/r/actions/runs/9")
+            .with_body(r#"{"id": 9}"#)
+            .create();
+        for id in [1, 3] {
+            server
+                .mock("GET", format!("/repos/o/r/actions/runs/{id}").as_str())
+                .with_status(404)
+                .create();
+        }
+        server
+            .mock("GET", "/repos/o/r/actions/jobs/1")
+            .with_body(r#"{"id": 1, "run_id": 9}"#)
+            .create();
+        server
+            .mock("GET", "/repos/o/r/actions/jobs/3")
+            .with_status(404)
+            .create();
+        let ctx = ctx(&server, true);
+        let o_r = Repo::parse("o/r").unwrap();
+        assert_eq!(resolve_run(&ctx, "9").unwrap(), (o_r.clone(), 9));
+        assert_eq!(resolve_run(&ctx, "1").unwrap(), (o_r.clone(), 9));
+        assert_eq!(
+            resolve_run(&ctx, "https://github.com/o/r/actions/runs/9/job/1").unwrap(),
+            (o_r, 9)
+        );
+        // A URL names its own repository, which is not looked up.
+        assert_eq!(
+            resolve_run(&ctx, "https://github.com/a/b/actions/runs/4").unwrap(),
+            (Repo::parse("a/b").unwrap(), 4)
+        );
+        assert_eq!(
+            resolve_run(&ctx, "3").unwrap_err().to_string(),
+            "No run or job 3 in o/r"
+        );
+        assert_eq!(
+            resolve_run(&ctx, "https://github.com/o/r/actions/runs/9/job/3")
+                .unwrap_err()
+                .to_string(),
+            "No job 3 in o/r"
+        );
+    }
+
+    #[test]
+    fn find_runs_once_names_what_it_saw() {
+        let mut server = Server::new();
+        server
+            .mock("GET", "/repos/o/r/actions/runs")
+            .match_query(Matcher::UrlEncoded("head_sha".into(), "abc".into()))
+            .with_body(
+                r#"{"workflow_runs": [
+                    {"id": 2, "name": "Lint", "path": ".github/workflows/lint.yml", "head_sha": "abc"},
+                    {"id": 1, "name": "CI", "path": ".github/workflows/ci.yml", "head_sha": "abc"}
+                ]}"#,
+            )
+            .create();
+        server
+            .mock("GET", "/repos/o/r/actions/runs")
+            .match_query(Matcher::UrlEncoded("head_sha".into(), "def".into()))
+            .with_body(r#"{"workflow_runs": []}"#)
+            .create();
+        server
+            .mock("GET", "/repos/o/r/actions/runs")
+            .match_query(Matcher::UrlEncoded("branch".into(), "main".into()))
+            .with_body(r#"{"workflow_runs": [{"id": 5, "name": "CI", "head_sha": "x"}]}"#)
+            .create();
+        let ctx = ctx(&server, true);
+        let repo = Repo::parse("o/r").unwrap();
+        let sha = |s: &str| Commit::Sha(s.to_string());
+        assert_eq!(
+            find_runs(&ctx, &repo, &sha("abc"), None, None).unwrap(),
+            vec![1, 2]
+        );
+        assert_eq!(
+            find_runs(&ctx, &repo, &sha("abc"), Some("ci"), None).unwrap(),
+            vec![1]
+        );
+        assert_eq!(
+            find_runs(&ctx, &repo, &sha("abc"), Some("deploy"), None)
+                .unwrap_err()
+                .to_string(),
+            "No runs for workflow deploy on commit abc in o/r. Workflows with runs: CI, Lint"
+        );
+        assert_eq!(
+            find_runs(&ctx, &repo, &sha("def"), None, None)
+                .unwrap_err()
+                .to_string(),
+            "No runs on commit def in o/r. Push the commit first, or pass --sha or --branch."
+        );
+        let branch = Commit::Branch("main".to_string());
+        assert_eq!(
+            find_runs(&ctx, &repo, &branch, None, None).unwrap(),
+            vec![5]
+        );
+    }
+
+    #[test]
+    fn watch_named_runs_that_already_finished() {
+        let mut server = Server::new();
+        server
+            .mock("GET", "/repos/o/r/actions/runs/9")
+            .with_body(r#"{"id": 9, "name": "CI", "status": "completed", "conclusion": "failure"}"#)
+            .create();
+        server
+            .mock("GET", "/repos/o/r/actions/runs/9/jobs")
+            .match_query(Matcher::Any)
+            .with_body(
+                r#"{"jobs": [{"id": 1, "name": "Build", "status": "completed",
+                    "conclusion": "failure"}]}"#,
+            )
+            .create();
+        let ctx = ctx(&server, true);
+        let args = WatchArgs {
+            runs: vec!["https://github.com/o/r/actions/runs/9".to_string()],
+            sha: None,
+            branch: None,
+            workflow: None,
+            wait: wait_args(),
+        };
+        let err = watch_runs(&ctx, args).unwrap_err().to_string();
+        assert_eq!(err, "Failed: CI: Build");
+
+        // Watching a commit finds its runs first.
+        server
+            .mock("GET", "/repos/o/r/actions/runs")
+            .match_query(Matcher::UrlEncoded("head_sha".into(), "abc".into()))
+            .with_body(r#"{"workflow_runs": [{"id": 9, "name": "CI", "head_sha": "abc"}]}"#)
+            .create();
+        let args = WatchArgs {
+            runs: Vec::new(),
+            sha: Some("abc".to_string()),
+            branch: None,
+            workflow: None,
+            wait: wait_args(),
+        };
+        assert!(watch_runs(&ctx, args).is_err());
+    }
+
+    /// A repository with a release workflow that takes a required `version` input.
+    fn release_workflow(server: &mut ServerGuard) {
+        server
+            .mock("GET", "/repos/o/r/actions/workflows")
+            .match_query(Matcher::Any)
+            .with_body(
+                r#"{"workflows": [{"id": 7, "name": "Release",
+                    "path": ".github/workflows/release.yml", "state": "active"}]}"#,
+            )
+            .create();
+        server
+            .mock("GET", "/repos/o/r")
+            .with_body(r#"{"default_branch": "main"}"#)
+            .create();
+        server
+            .mock("GET", "/repos/o/r/contents/.github/workflows/release.yml")
+            .match_query(Matcher::UrlEncoded("ref".into(), "main".into()))
+            .with_body(
+                "on:\n  workflow_dispatch:\n    inputs:\n      version:\n        required: true\n      \
+                 channel:\n        default: stable\n",
+            )
+            .create();
+    }
+
+    fn dispatch_args(fields: &[&str]) -> DispatchArgs {
+        DispatchArgs {
+            workflow: "release".to_string(),
+            git_ref: None,
+            fields: fields.iter().map(|f| f.to_string()).collect(),
+            watch: false,
+            wait: wait_args(),
+        }
+    }
+
+    #[test]
+    fn dispatch_validates_inputs_before_sending() {
+        let mut server = Server::new();
+        release_workflow(&mut server);
+        let sent = server
+            .mock("POST", "/repos/o/r/actions/workflows/7/dispatches")
+            .expect(0)
+            .create();
+        let ctx = ctx(&server, true);
+        assert_eq!(
+            dispatch(&ctx, dispatch_args(&[])).unwrap_err().to_string(),
+            "Required inputs have no value: version. Set them with -f KEY=VALUE."
+        );
+        assert_eq!(
+            dispatch(&ctx, dispatch_args(&["version=1.0", "target=prod"]))
+                .unwrap_err()
+                .to_string(),
+            "target is not an input of this workflow. Inputs: version, channel"
+        );
+        let mut args = dispatch_args(&["version=1.0"]);
+        args.workflow = "deploy".to_string();
+        assert!(
+            dispatch(&ctx, args)
+                .unwrap_err()
+                .to_string()
+                .starts_with("No workflow matches \"deploy\"")
+        );
+        sent.assert();
+    }
+
+    #[test]
+    fn dispatch_sends_inputs_and_finds_the_new_run() {
+        let mut server = Server::new();
+        release_workflow(&mut server);
+        // The run listing before dispatching, then once the new run shows up.
+        server
+            .mock("GET", "/repos/o/r/actions/workflows/7/runs")
+            .match_query(Matcher::Any)
+            .with_body(r#"{"workflow_runs": [{"id": 1, "actor": {"login": "me"}}]}"#)
+            .expect(1)
+            .create();
+        server
+            .mock("GET", "/repos/o/r/actions/workflows/7/runs")
+            .match_query(Matcher::Any)
+            .with_body(
+                r#"{"workflow_runs": [
+                    {"id": 3, "actor": {"login": "someone"}},
+                    {"id": 2, "actor": {"login": "me"}, "html_url": "https://h/2"},
+                    {"id": 1, "actor": {"login": "me"}}
+                ]}"#,
+            )
+            .create();
+        let sent = server
+            .mock("POST", "/repos/o/r/actions/workflows/7/dispatches")
+            .match_body(Matcher::Json(
+                serde_json::json!({"ref": "main", "inputs": {"version": "1.0"}}),
+            ))
+            .with_status(204)
+            .create();
+        server
+            .mock("POST", "/graphql")
+            .with_body(r#"{"data": {"viewer": {"login": "me"}}}"#)
+            .create();
+        let ctx = ctx(&server, true);
+        dispatch(&ctx, dispatch_args(&["version=1.0"])).unwrap();
+        sent.assert();
     }
 }
