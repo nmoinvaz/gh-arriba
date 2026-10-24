@@ -10,10 +10,6 @@ use crate::github::Client;
 use crate::output;
 use crate::pr::model::vars;
 
-// -------------------------------------------------------------------------
-//  checks
-// -------------------------------------------------------------------------
-
 /// One check run on the PR's head commit.
 #[derive(Clone, Debug)]
 pub(super) struct CheckRun {
@@ -163,10 +159,6 @@ pub(super) fn is_failed(conclusion: Option<&str>) -> bool {
     )
 }
 
-// -------------------------------------------------------------------------
-//  plan
-// -------------------------------------------------------------------------
-
 #[derive(Debug, Serialize)]
 struct FailedJob {
     name: String,
@@ -277,10 +269,6 @@ fn render(plan: &PrPlan) -> String {
     }
     out
 }
-
-// -------------------------------------------------------------------------
-//  run
-// -------------------------------------------------------------------------
 
 /// What the positional argument names.
 #[derive(Debug, PartialEq)]

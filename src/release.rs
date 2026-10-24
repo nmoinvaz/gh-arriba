@@ -9,10 +9,6 @@ use crate::run::watch;
 use crate::workflow::{self, Input, Workflow};
 use crate::{output, prompt};
 
-// -------------------------------------------------------------------------
-//  versions
-// -------------------------------------------------------------------------
-
 #[derive(Debug, PartialEq)]
 struct Version {
     /// Text before the first digit, such as `v` or `release-`.
@@ -79,10 +75,6 @@ fn latest_release_tag(client: &Client, repo: &Repo) -> Result<Option<String>> {
         .map(str::to_string))
 }
 
-// -------------------------------------------------------------------------
-//  workflow
-// -------------------------------------------------------------------------
-
 /// Pick the workflow named by `-w`, or the one that looks like the release workflow.
 fn pick_workflow<'a>(workflows: &'a [Workflow], name: Option<&str>) -> Result<&'a Workflow> {
     if let Some(name) = name {
@@ -138,10 +130,6 @@ fn version_input(inputs: &[Input]) -> Result<&Input> {
         names.join(", ")
     )
 }
-
-// -------------------------------------------------------------------------
-//  plan
-// -------------------------------------------------------------------------
 
 #[derive(Debug, Serialize)]
 struct PlanInput {
@@ -290,10 +278,6 @@ fn render(plan: &Plan) -> String {
     }
     out
 }
-
-// -------------------------------------------------------------------------
-//  run
-// -------------------------------------------------------------------------
 
 pub fn run(ctx: &Ctx, args: ReleaseArgs) -> Result<()> {
     let repo = ctx.repo()?;

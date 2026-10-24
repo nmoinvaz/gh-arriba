@@ -122,10 +122,6 @@ pub fn run(ctx: &Ctx, args: DependabotMergeArgs) -> Result<()> {
     Ok(())
 }
 
-// -------------------------------------------------------------------------
-//  planning
-// -------------------------------------------------------------------------
-
 /// Pick what to merge. Explicit numbers come first, in the order given. Otherwise take lock-step
 /// groups and then lone PRs. `--all-ready` skips work that needs a rebase unless `--auto` lets it
 /// wait for one, and the interactive flow offers both.
@@ -239,10 +235,6 @@ fn describe(p: &DepPr, action: Action, comment: bool, method: MergeMethod) -> St
     }
     parts.join(", ")
 }
-
-// -------------------------------------------------------------------------
-//  interactive
-// -------------------------------------------------------------------------
 
 fn run_interactive(
     merger: &Merger,
@@ -358,10 +350,6 @@ fn print_summary(repo: &Repo, outcomes: &[Outcome], blocked: &[&DepPr]) {
         println!("{}", table(&rows, "  "));
     }
 }
-
-// -------------------------------------------------------------------------
-//  execution
-// -------------------------------------------------------------------------
 
 const ENABLE_AUTO_MERGE: &str = r#"
 mutation($id: ID!, $method: PullRequestMergeMethod!) {

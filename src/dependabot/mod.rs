@@ -31,10 +31,6 @@ pub fn run(ctx: &Ctx, cmd: DependabotCommand) -> Result<()> {
 /// Comment that asks Dependabot to rebase its PR.
 const REBASE_COMMENT: &str = "@dependabot rebase";
 
-// -------------------------------------------------------------------------
-//  scope
-// -------------------------------------------------------------------------
-
 /// One repository, or every repository in an organization.
 pub enum Scope {
     Repo(Repo),
@@ -62,10 +58,6 @@ impl fmt::Display for Scope {
         }
     }
 }
-
-// -------------------------------------------------------------------------
-//  model
-// -------------------------------------------------------------------------
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -257,10 +249,6 @@ impl Overview {
     }
 }
 
-// -------------------------------------------------------------------------
-//  fetch
-// -------------------------------------------------------------------------
-
 macro_rules! dep_fragment {
     () => {
         r#"
@@ -441,10 +429,6 @@ fn parse_pr(node: &Value) -> Result<DepPr> {
         reason,
     })
 }
-
-// -------------------------------------------------------------------------
-//  classification
-// -------------------------------------------------------------------------
 
 /// Sort a PR into ready, needs rebase, or blocked, with a reason for blocked ones.
 pub fn categorize(
@@ -677,10 +661,6 @@ pub fn build_groups(prs: &[DepPr]) -> Vec<LockStep> {
     groups.sort_by(|a, b| (&a.repo, a.prs[0]).cmp(&(&b.repo, b.prs[0])));
     groups
 }
-
-// -------------------------------------------------------------------------
-//  display
-// -------------------------------------------------------------------------
 
 /// Align rows into columns separated by two spaces. The last column is left unpadded.
 pub fn table(rows: &[Vec<String>], indent: &str) -> String {

@@ -103,10 +103,6 @@ fn outcome(pr: &PrRef, info: &PrInfo, method: &'static str, result: &'static str
     }
 }
 
-// -------------------------------------------------------------------------
-//  remote
-// -------------------------------------------------------------------------
-
 const UPDATE_BRANCH: &str = r#"
 mutation($id: ID!, $oid: GitObjectID!) {
   updatePullRequestBranch(input: {pullRequestId: $id, expectedHeadOid: $oid, updateMethod: REBASE}) {
@@ -135,10 +131,6 @@ fn remote(ctx: &Ctx, pr: &PrRef, info: &PrInfo) -> Result<Outcome> {
         .map(str::to_string);
     Ok(o)
 }
-
-// -------------------------------------------------------------------------
-//  local
-// -------------------------------------------------------------------------
 
 /// Rebase with the local git config, so commits keep the user's signature.
 fn local(pr: &PrRef, info: &PrInfo, check: bool) -> Result<Outcome> {

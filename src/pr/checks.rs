@@ -11,10 +11,6 @@ use crate::output;
 use crate::pr::model::{str_of, vars};
 use crate::pr::retry::{CheckRun, is_failed, latest, parse_check_run};
 
-// -------------------------------------------------------------------------
-//  model
-// -------------------------------------------------------------------------
-
 /// Outcome of one check, folding check-run conclusions and commit-status states together.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -235,10 +231,6 @@ fn merge_state(p: &Value) -> String {
     }
 }
 
-// -------------------------------------------------------------------------
-//  render
-// -------------------------------------------------------------------------
-
 /// One summary line, then the failing and pending checks indented below it.
 fn render(status: &PrStatus, full_ref: bool) -> String {
     let id = if full_ref {
@@ -283,10 +275,6 @@ fn counts_text(c: &Counts) -> String {
     }
     parts.join(", ")
 }
-
-// -------------------------------------------------------------------------
-//  run
-// -------------------------------------------------------------------------
 
 pub fn run(ctx: &Ctx, args: ChecksArgs) -> Result<()> {
     let prs = resolve_prs(ctx, &args.prs)?;
@@ -349,10 +337,6 @@ fn fail_on_failures(statuses: &[PrStatus]) -> Result<()> {
     }
     Ok(())
 }
-
-// -------------------------------------------------------------------------
-//  wait
-// -------------------------------------------------------------------------
 
 /// How long a PR with no checks, or with unknown mergeability, still counts as settling. Checks
 /// take a moment to register after a push, and GitHub computes mergeability lazily.

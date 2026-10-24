@@ -9,10 +9,6 @@ use crate::github::Client;
 use crate::output;
 use crate::pr::model::fetch_pr;
 
-// -------------------------------------------------------------------------
-//  list
-// -------------------------------------------------------------------------
-
 #[derive(Clone, Debug, PartialEq, Serialize)]
 struct Label {
     name: String,
@@ -90,10 +86,6 @@ fn parse_labels(all: &[Value], applied: &HashSet<String>) -> Vec<Label> {
     labels.sort_by_key(|l| l.name.to_lowercase());
     labels
 }
-
-// -------------------------------------------------------------------------
-//  add and remove
-// -------------------------------------------------------------------------
 
 /// Resolve every requested name first, so a typo adds or removes nothing.
 fn edit(ctx: &Ctx, pr: &PrRef, labels: &[Label], add: &[String], remove: &[String]) -> Result<()> {
@@ -282,10 +274,6 @@ fn encode_segment(s: &str) -> String {
     out
 }
 
-// -------------------------------------------------------------------------
-//  suggest
-// -------------------------------------------------------------------------
-
 #[derive(Debug, PartialEq, Serialize)]
 struct Suggestion {
     name: String,
@@ -387,10 +375,6 @@ const STOP_WORDS: &[&str] = &[
     "change", "changes", "code", "file", "files", "fix", "fixes", "main", "new", "pr", "pull",
     "request", "src", "update", "updates", "use", "uses",
 ];
-
-// -------------------------------------------------------------------------
-//  render
-// -------------------------------------------------------------------------
 
 /// One label per line, applied ones marked with `*`.
 fn render(labels: &[Label]) -> String {
