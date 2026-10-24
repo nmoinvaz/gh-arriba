@@ -133,6 +133,12 @@ Rerun every failed check across all your open PRs:
 gh arriba pr retry --mine
 ```
 
+Wait for CI after pushing, printing each check as it finishes and failing if any check fails:
+
+```
+gh arriba pr checks --wait --fail-fast
+```
+
 Download only the failed job logs from a run and search them:
 
 ```

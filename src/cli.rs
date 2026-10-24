@@ -255,6 +255,22 @@ pub struct ChecksArgs {
     /// Numbers, URLs, owner/repo#N, or branches (default: PR for the current branch)
     #[arg(value_name = "PR")]
     pub prs: Vec<String>,
+
+    /// Poll until no check is pending, printing each check as it completes
+    #[arg(long)]
+    pub wait: bool,
+
+    /// Seconds between polls
+    #[arg(long, value_name = "SECS", default_value_t = 20, value_parser = clap::value_parser!(u64).range(1..))]
+    pub interval: u64,
+
+    /// Minutes to wait before giving up
+    #[arg(long, value_name = "MINS", default_value_t = 30)]
+    pub timeout: u64,
+
+    /// Stop waiting as soon as a check fails
+    #[arg(long, requires = "wait")]
+    pub fail_fast: bool,
 }
 
 #[derive(Args)]

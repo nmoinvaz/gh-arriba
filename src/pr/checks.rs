@@ -2,6 +2,7 @@ use anyhow::{Result, bail};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashSet;
+use std::time::{Duration, Instant};
 
 use crate::cli::ChecksArgs;
 use crate::context::{Ctx, PrRef};
@@ -64,6 +65,16 @@ struct Check {
     name: String,
     state: State,
     url: Option<String>,
+    /// Run time of a completed check run. Commit statuses carry none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    seconds: Option<i64>,
+}
+
+impl Check {
+    /// Identity across polls. Names repeat when a workflow runs for several events.
+    fn key(&self) -> String {
+        format!("{}\t{}", self.name, self.url.as_deref().unwrap_or_default())
+    }
 }
 
 #[derive(Debug, Default, PartialEq, Serialize)]
@@ -106,7 +117,7 @@ query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
                 nodes {
                   __typename
                   ... on CheckRun {
-                    name status conclusion startedAt detailsUrl
+                    name status conclusion startedAt completedAt detailsUrl
                     checkSuite { workflowRun { databaseId event workflow { name } } }
                   }
                   ... on StatusContext { context state targetUrl }
@@ -169,12 +180,17 @@ fn build(pr: &PrRef, p: &Value, runs: Vec<CheckRun>, statuses: &[Value]) -> PrSt
             },
             state: State::of_run(r),
             url: r.url.clone(),
+            seconds: r
+                .started_at
+                .zip(r.completed_at)
+                .map(|(start, end)| (end - start).num_seconds()),
         })
         .collect();
     checks.extend(statuses.iter().map(|s| Check {
         name: str_of(s, "context"),
         state: State::of_status(s["state"].as_str().unwrap_or_default()),
         url: s["targetUrl"].as_str().map(str::to_string),
+        seconds: None,
     }));
 
     let mut counts = Counts::default();
@@ -274,11 +290,15 @@ fn counts_text(c: &Counts) -> String {
 
 pub fn run(ctx: &Ctx, args: ChecksArgs) -> Result<()> {
     let prs = resolve_prs(ctx, &args.prs)?;
-    let statuses = prs
-        .iter()
-        .map(|pr| fetch_status(&ctx.client, pr))
-        .collect::<Result<Vec<_>>>()?;
-    report(ctx, &statuses)
+    if !args.wait {
+        let statuses = fetch_all(&ctx.client, &prs)?;
+        return report(ctx, &statuses);
+    }
+    wait(ctx, &prs, &args)
+}
+
+fn fetch_all(client: &Client, prs: &[PrRef]) -> Result<Vec<PrStatus>> {
+    prs.iter().map(|pr| fetch_status(client, pr)).collect()
 }
 
 /// Each PR argument, or the current branch's PR when there are none.
@@ -291,20 +311,159 @@ fn resolve_prs(ctx: &Ctx, args: &[String]) -> Result<Vec<PrRef>> {
 
 /// Print the statuses, failing when any check failed so scripts can branch on the exit code.
 fn report(ctx: &Ctx, statuses: &[PrStatus]) -> Result<()> {
+    print_statuses(ctx, statuses)?;
+    fail_on_failures(statuses)
+}
+
+fn print_statuses(ctx: &Ctx, statuses: &[PrStatus]) -> Result<()> {
     if ctx.json {
-        output::print_json(statuses)?;
-    } else {
-        let repos: HashSet<&str> = statuses.iter().map(|s| s.repo.as_str()).collect();
-        for s in statuses {
-            print!("{}", render(s, repos.len() > 1));
-        }
+        return output::print_json(statuses);
     }
+    let full_ref = spans_repos(statuses);
+    for s in statuses {
+        print!("{}", render(s, full_ref));
+    }
+    Ok(())
+}
+
+/// Whether the PRs live in more than one repository, so `#N` alone would be ambiguous.
+fn spans_repos(statuses: &[PrStatus]) -> bool {
+    let repos: HashSet<&str> = statuses.iter().map(|s| s.repo.as_str()).collect();
+    repos.len() > 1
+}
+
+fn fail_on_failures(statuses: &[PrStatus]) -> Result<()> {
     let failed: usize = statuses.iter().map(|s| s.counts.fail).sum();
     if failed > 0 {
         let plural = if failed == 1 { "" } else { "s" };
         bail!("{failed} check{plural} failed");
     }
     Ok(())
+}
+
+// -------------------------------------------------------------------------
+//  wait
+// -------------------------------------------------------------------------
+
+/// How long a PR with no checks, or with unknown mergeability, still counts as settling. Checks
+/// take a moment to register after a push, and GitHub computes mergeability lazily.
+const SETTLE: Duration = Duration::from_secs(120);
+
+/// What one PR looked like on the previous poll.
+struct Seen {
+    head: String,
+    /// When this head was first seen, so a new push restarts the settle window.
+    since: Instant,
+    /// Keys of checks already reported complete.
+    done: HashSet<String>,
+}
+
+/// Poll until every PR has settled, printing checks as they complete.
+fn wait(ctx: &Ctx, prs: &[PrRef], args: &ChecksArgs) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(args.timeout * 60);
+    let mut seen: Vec<Option<Seen>> = prs.iter().map(|_| None).collect();
+    loop {
+        let statuses = fetch_all(&ctx.client, prs)?;
+        let full_ref = spans_repos(&statuses);
+        let mut settled = true;
+        for (status, seen) in statuses.iter().zip(seen.iter_mut()) {
+            for line in progress(status, seen, full_ref, prs.len() > 1) {
+                // With --json, stdout carries only the final document.
+                if ctx.json {
+                    eprintln!("{line}");
+                } else {
+                    println!("{line}");
+                }
+            }
+            let since = seen.as_ref().map_or_else(Instant::now, |s| s.since);
+            settled &= is_settled(status, since.elapsed());
+        }
+
+        let failed = statuses.iter().any(|s| s.counts.fail > 0);
+        if settled || (args.fail_fast && failed) {
+            return report(ctx, &statuses);
+        }
+        if Instant::now() >= deadline {
+            print_statuses(ctx, &statuses)?;
+            fail_on_failures(&statuses)?;
+            let pending: usize = statuses.iter().map(|s| s.counts.pending).sum();
+            bail!(
+                "Timed out after {} minutes with {pending} checks pending",
+                args.timeout
+            );
+        }
+        std::thread::sleep(Duration::from_secs(args.interval));
+    }
+}
+
+/// Lines for checks that completed since the last poll. The first poll of a head only notes
+/// what is already done, and says how much is left.
+fn progress(status: &PrStatus, seen: &mut Option<Seen>, full_ref: bool, tag: bool) -> Vec<String> {
+    let id = if full_ref {
+        format!("{}#{}", status.repo, status.number)
+    } else {
+        format!("#{}", status.number)
+    };
+    // A lone PR's completions need no prefix, several PRs' do.
+    let tag = if tag { format!("{id} ") } else { String::new() };
+    let done: HashSet<String> = status
+        .checks
+        .iter()
+        .filter(|c| c.state != State::Pending)
+        .map(Check::key)
+        .collect();
+
+    let Some(prev) = seen.as_mut().filter(|s| s.head == status.head_oid) else {
+        let head: String = status.head_oid.chars().take(8).collect();
+        let verb = if seen.is_some() { "moved to" } else { "is" };
+        *seen = Some(Seen {
+            head: status.head_oid.clone(),
+            since: Instant::now(),
+            done,
+        });
+        let left = if status.checks.is_empty() {
+            "no checks yet".to_string()
+        } else {
+            format!("{} checks pending", status.counts.pending)
+        };
+        return vec![format!("{id} head {verb} {head}, {left}")];
+    };
+
+    let mut lines = Vec::new();
+    for c in &status.checks {
+        if c.state != State::Pending && !prev.done.contains(&c.key()) {
+            let took = c
+                .seconds
+                .map(|s| format!(" ({})", duration(s)))
+                .unwrap_or_default();
+            lines.push(format!("{tag}{:<8} {}{took}", c.state.label(), c.name));
+        }
+    }
+    // A rerun turns a completed check pending again, so it reports once more when it finishes.
+    prev.done = done;
+    lines
+}
+
+/// Done when nothing is pending, unless the PR is still settling after a push.
+fn is_settled(status: &PrStatus, waited: Duration) -> bool {
+    if status.counts.pending > 0 {
+        return false;
+    }
+    if waited >= SETTLE {
+        return true;
+    }
+    let open = matches!(status.state.as_str(), "open" | "draft");
+    !status.checks.is_empty() && !(open && status.mergeable == "unknown")
+}
+
+/// Compact duration such as `45s`, `4m12s`, or `1h3m`.
+fn duration(seconds: i64) -> String {
+    let s = seconds.max(0);
+    match (s / 3600, s / 60 % 60, s % 60) {
+        (0, 0, sec) => format!("{sec}s"),
+        (0, min, sec) => format!("{min}m{sec}s"),
+        (h, min, _) => format!("{h}h{min}m"),
+    }
 }
 
 #[cfg(test)]
@@ -418,5 +577,74 @@ mod tests {
         let status = build(&pr(), &header(), runs, &[]);
         assert_eq!(status.counts.fail, 0);
         assert_eq!(status.counts.pass, 1);
+    }
+
+    fn status_of(nodes: &[Value]) -> PrStatus {
+        build(
+            &pr(),
+            &header(),
+            nodes.iter().map(parse_check_run).collect(),
+            &[],
+        )
+    }
+
+    #[test]
+    fn progress_reports_each_completion_once() {
+        let mut seen = None;
+        let running = [
+            run_node("Ubuntu", "Build", "IN_PROGRESS", None),
+            run_node("macOS", "Build", "COMPLETED", Some("SUCCESS")),
+        ];
+        assert_eq!(
+            progress(&status_of(&running), &mut seen, false, false),
+            vec!["#42 head is 1a2b3c4d, 1 checks pending"]
+        );
+
+        let mut ubuntu = run_node("Ubuntu", "Build", "COMPLETED", Some("FAILURE"));
+        ubuntu["completedAt"] = json!("2026-01-01T00:04:12Z");
+        let finished = [
+            ubuntu,
+            run_node("macOS", "Build", "COMPLETED", Some("SUCCESS")),
+        ];
+        assert_eq!(
+            progress(&status_of(&finished), &mut seen, false, false),
+            vec!["fail     Build / Ubuntu (4m12s)"]
+        );
+        assert!(progress(&status_of(&finished), &mut seen, false, true).is_empty());
+
+        // A push resets what has been reported.
+        let mut pushed = status_of(&finished);
+        pushed.head_oid = "ffff0000aaaa".to_string();
+        assert_eq!(
+            progress(&pushed, &mut seen, false, true),
+            vec!["#42 head moved to ffff0000, 0 checks pending"]
+        );
+    }
+
+    #[test]
+    fn settling_waits_for_checks_and_mergeability() {
+        let done = status_of(&[run_node("Ubuntu", "Build", "COMPLETED", Some("SUCCESS"))]);
+        assert!(is_settled(&done, Duration::ZERO));
+
+        let pending = status_of(&[run_node("Ubuntu", "Build", "QUEUED", None)]);
+        assert!(!is_settled(&pending, SETTLE * 10));
+
+        let empty = status_of(&[]);
+        assert!(!is_settled(&empty, Duration::ZERO));
+        assert!(is_settled(&empty, SETTLE));
+
+        let mut unknown = status_of(&[run_node("Ubuntu", "Build", "COMPLETED", Some("SUCCESS"))]);
+        unknown.mergeable = "unknown".to_string();
+        assert!(!is_settled(&unknown, Duration::ZERO));
+        unknown.state = "merged".to_string();
+        assert!(is_settled(&unknown, Duration::ZERO));
+    }
+
+    #[test]
+    fn durations_are_compact() {
+        assert_eq!(duration(45), "45s");
+        assert_eq!(duration(252), "4m12s");
+        assert_eq!(duration(3780), "1h3m");
+        assert_eq!(duration(-3), "0s");
     }
 }
