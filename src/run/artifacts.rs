@@ -258,9 +258,9 @@ fn prune(ctx: &Ctx, args: &ArtifactsArgs) -> Result<()> {
     let summary = format!(
         "{repo}: {} artifacts use {}. Pruning {} frees {}.",
         report.total_count,
-        size(total_bytes),
+        output::size(total_bytes),
         report.artifacts.len(),
-        size(freed_bytes)
+        output::size(freed_bytes)
     );
     let say = |line: &str| watch::progress(ctx, line);
     if report.artifacts.is_empty() {
@@ -277,9 +277,9 @@ fn prune(ctx: &Ctx, args: &ArtifactsArgs) -> Result<()> {
         .map(|a| {
             vec![
                 a.name.clone(),
-                size(a.size),
+                output::size(a.size),
                 a.created_at
-                    .map(|t| format!("{} ago", age(now - t)))
+                    .map(|t| format!("{} ago", output::age(now - t)))
                     .unwrap_or_default(),
                 format!("run {}", a.run_id),
                 a.id.to_string(),
@@ -320,7 +320,7 @@ fn prune(ctx: &Ctx, args: &ArtifactsArgs) -> Result<()> {
     println!(
         "Deleted {} artifacts, freeing {}",
         report.artifacts.len() - report.failed.len(),
-        size(report.freed_bytes)
+        output::size(report.freed_bytes)
     );
     if !report.failed.is_empty() {
         bail!("{} artifacts could not be deleted", report.failed.len());
@@ -420,7 +420,7 @@ fn download(ctx: &Ctx, found: &[((Repo, u64), Vec<Artifact>)], dir: &Path) -> Re
             println!(
                 "{} ({}, {files} files) -> {}",
                 a.name,
-                size(a.size),
+                output::size(a.size),
                 dest.display()
             );
         }
@@ -481,9 +481,9 @@ fn render(found: &[((Repo, u64), Vec<Artifact>)], now: DateTime<Utc>) -> String 
             .map(|a| {
                 vec![
                     a.name.clone(),
-                    size(a.size),
+                    output::size(a.size),
                     a.created_at
-                        .map(|t| format!("{} ago", age(now - t)))
+                        .map(|t| format!("{} ago", output::age(now - t)))
                         .unwrap_or_default(),
                     expiry(a, now),
                     a.id.to_string(),
@@ -501,33 +501,8 @@ fn expiry(a: &Artifact, now: DateTime<Utc>) -> String {
     match a.expires_at {
         _ if a.expired => "expired".to_string(),
         Some(t) if t <= now => "expired".to_string(),
-        Some(t) => format!("expires in {}", age(t - now)),
+        Some(t) => format!("expires in {}", output::age(t - now)),
         None => String::new(),
-    }
-}
-
-/// Byte count with a binary unit, as in `512 B` or `1.5 MB`.
-fn size(bytes: u64) -> String {
-    const UNITS: [&str; 4] = ["KB", "MB", "GB", "TB"];
-    if bytes < 1024 {
-        return format!("{bytes} B");
-    }
-    let mut value = bytes as f64 / 1024.0;
-    let mut unit = 0;
-    while value >= 1024.0 && unit + 1 < UNITS.len() {
-        value /= 1024.0;
-        unit += 1;
-    }
-    format!("{value:.1} {}", UNITS[unit])
-}
-
-/// A span in its largest whole unit, as in `45s`, `12m`, `5h`, or `3d`.
-fn age(span: chrono::TimeDelta) -> String {
-    match span.num_seconds().max(0) {
-        s if s < 60 => format!("{s}s"),
-        s if s < 3600 => format!("{}m", s / 60),
-        s if s < 86400 => format!("{}h", s / 3600),
-        s => format!("{}d", s / 86400),
     }
 }
 
@@ -664,15 +639,6 @@ mod tests {
             ids(prune_plan(&all, TimeDelta::days(7), 0, now)),
             vec![7, 5, 1, 3, 2]
         );
-    }
-
-    #[test]
-    fn sizes_use_binary_units() {
-        assert_eq!(size(0), "0 B");
-        assert_eq!(size(1023), "1023 B");
-        assert_eq!(size(1536), "1.5 KB");
-        assert_eq!(size(5 * 1024 * 1024), "5.0 MB");
-        assert_eq!(size(3 * 1024 * 1024 * 1024), "3.0 GB");
     }
 
     #[test]
