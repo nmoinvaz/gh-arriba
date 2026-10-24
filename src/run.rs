@@ -1,10 +1,12 @@
+pub mod watch;
+
 use anyhow::{Context, Result};
 use serde::Serialize;
 use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::cli::{LogsArgs, RunCommand};
+use crate::cli::{LogsArgs, RunCommand, WatchArgs};
 use crate::context::{Ctx, Repo};
 use crate::log::{self, Excerpt};
 use crate::output;
@@ -12,6 +14,7 @@ use crate::output;
 pub fn run(ctx: &Ctx, cmd: RunCommand) -> Result<()> {
     match cmd {
         RunCommand::Logs(args) => logs(ctx, args),
+        RunCommand::Watch(args) => watch_runs(ctx, args),
     }
 }
 
@@ -259,6 +262,51 @@ pub(crate) fn download(
     let path = dir.join(format!("{}-{job_id}.log", sanitize(name)));
     fs::write(&path, text).with_context(|| format!("Failed to write {}", path.display()))?;
     Ok(path)
+}
+
+// -------------------------------------------------------------------------
+//  watch
+// -------------------------------------------------------------------------
+
+fn watch_runs(ctx: &Ctx, args: WatchArgs) -> Result<()> {
+    let runs = args
+        .runs
+        .iter()
+        .map(|r| resolve_run(ctx, r))
+        .collect::<Result<Vec<_>>>()?;
+    let states = watch::watch(ctx, &runs, &(&args.wait).into())?;
+    watch::report(ctx, &states)
+}
+
+/// The repository and run a RUN argument names. A job ID or URL stands for the run it belongs to.
+fn resolve_run(ctx: &Ctx, s: &str) -> Result<(Repo, u64)> {
+    let (url_repo, target) = parse_target(s)?;
+    let repo = match url_repo {
+        Some(r) => r,
+        None => ctx.repo()?,
+    };
+    let job_run = |id: u64| -> Result<Option<u64>> {
+        Ok(ctx
+            .client
+            .get_opt(&format!("{}/actions/jobs/{id}", repo.api()))?
+            .and_then(|job| job["run_id"].as_u64()))
+    };
+    let id = match target {
+        Target::Run { id, .. } => id,
+        Target::Job(id) => job_run(id)?.with_context(|| format!("No job {id} in {repo}"))?,
+        Target::Unknown(id) => {
+            if ctx
+                .client
+                .get_opt(&format!("{}/actions/runs/{id}", repo.api()))?
+                .is_some()
+            {
+                id
+            } else {
+                job_run(id)?.with_context(|| format!("No run or job {id} in {repo}"))?
+            }
+        }
+    };
+    Ok((repo, id))
 }
 
 #[cfg(test)]
