@@ -83,7 +83,7 @@ pub fn select(raw: &str, pattern: Option<&Regex>, context: usize, max: usize) ->
 }
 
 /// What to say when [`select`] found nothing.
-pub fn nothing_found(pattern: Option<&str>) -> String {
+fn nothing_found(pattern: Option<&str>) -> String {
     match pattern {
         Some(re) => format!("no lines match {re}"),
         None => "no error lines found".to_string(),
@@ -118,8 +118,12 @@ fn blocks(lines: &[String], hits: Vec<usize>, context: usize, max: usize) -> Exc
     Excerpt { blocks, dropped }
 }
 
-/// Render an excerpt with raw-log line numbers, indented by `prefix`.
-pub fn render(excerpt: &Excerpt, prefix: &str) -> String {
+/// Render an excerpt with raw-log line numbers, indented by `prefix`, or say that nothing was
+/// found. `pattern` is the `--grep` the excerpt was cut with, if any.
+pub fn render(excerpt: &Excerpt, pattern: Option<&str>, prefix: &str) -> String {
+    if excerpt.blocks.is_empty() {
+        return format!("{prefix}{}\n", nothing_found(pattern));
+    }
     let mut out = String::new();
     for (i, block) in excerpt.blocks.iter().enumerate() {
         if i > 0 {
@@ -198,7 +202,7 @@ mod tests {
         let e = excerpt(LOG, 0, 1);
         assert_eq!(e.blocks.len(), 1);
         assert_eq!(e.dropped, 1);
-        assert!(render(&e, "  ").ends_with("  [+1 more errors]\n"));
+        assert!(render(&e, None, "  ").ends_with("  [+1 more errors]\n"));
     }
 
     #[test]
@@ -209,7 +213,7 @@ mod tests {
         let starts: Vec<usize> = e.blocks.iter().map(|b| b.line).collect();
         assert_eq!(starts, vec![2, 4]);
         assert_eq!(
-            render(&e, ""),
+            render(&e, None, ""),
             "line 2:\n  error[E0308]: mismatched types\n...\nline 4:\n  test foo ... FAILED\n"
         );
     }
