@@ -16,7 +16,7 @@ use std::time::Duration;
 use crate::cli::DependabotCommand;
 use crate::context::{Ctx, Repo};
 use crate::github::Client;
-use crate::pr::model::{str_of, time_of};
+use crate::json::{str_of, time_of};
 
 pub fn run(ctx: &Ctx, cmd: DependabotCommand) -> Result<()> {
     match cmd {

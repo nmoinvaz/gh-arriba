@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use crate::context::Repo;
 use crate::github::Client;
+use crate::json::str_of;
 
 /// An Actions workflow, as the workflows API lists it.
 #[derive(Clone, Debug)]
@@ -265,7 +266,7 @@ pub fn dispatch(
         if let Some(r) = new_run {
             return Ok(Some(NewRun {
                 id: r["id"].as_u64().unwrap_or(0),
-                url: r["html_url"].as_str().unwrap_or_default().to_string(),
+                url: str_of(r, "html_url"),
             }));
         }
     }

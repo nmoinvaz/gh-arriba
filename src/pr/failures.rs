@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use crate::cli::FailuresArgs;
 use crate::context::{Ctx, Repo};
 use crate::github::is_failed;
+use crate::json::str_of;
 use crate::log::{self, Excerpt};
 use crate::pr::model::fetch_pr;
 use crate::run::{download, name_matches, short_error};
@@ -202,7 +203,7 @@ pub fn run(ctx: &Ctx, args: FailuresArgs) -> Result<()> {
             Some(state @ ("failure" | "error")) => skipped.push(Skipped {
                 name: name.to_string(),
                 conclusion: state.to_string(),
-                url: s["target_url"].as_str().unwrap_or_default().to_string(),
+                url: str_of(s, "target_url"),
             }),
             _ => {}
         }
