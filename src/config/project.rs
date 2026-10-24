@@ -154,4 +154,68 @@ mod tests {
         assert_ne!(mac, generic);
         assert_ne!(win, generic);
     }
+
+    #[test]
+    fn gist_filename_ignores_a_leading_dot_slash() {
+        let c = config();
+        assert_eq!(c.gist_filename("./a/b.txt", None), "proj_a_b.txt");
+    }
+
+    #[test]
+    fn names_derive_from_the_project_name() {
+        let c = config();
+        assert_eq!(c.gist_description(), "proj config-sync");
+        assert_eq!(c.manifest_name(), ".proj-config-sync.yaml");
+    }
+
+    #[test]
+    fn relative_path_strips_root_and_prefixes() {
+        let c = config();
+        assert_eq!(
+            c.relative_path("/tmp/proj/.vscode/a.json"),
+            ".vscode/a.json"
+        );
+        assert_eq!(c.relative_path("./.vscode/a.json"), ".vscode/a.json");
+        assert_eq!(c.relative_path("/a.json"), "a.json");
+        assert_eq!(c.relative_path("a.json"), "a.json");
+    }
+
+    #[test]
+    fn new_defaults_the_name_to_the_root_basename() {
+        let root = std::env::temp_dir().join(format!("arriba-project-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+
+        // The trailing `.` is canonicalized away.
+        let c = ProjectConfig::new(None, Some(root.join(".")), true).unwrap();
+        assert_eq!(c.root, root.canonicalize().unwrap());
+        assert_eq!(c.name, format!("arriba-project-{}", std::process::id()));
+        assert!(!c.public);
+
+        let c = ProjectConfig::new(Some("named".into()), Some(root.clone()), false).unwrap();
+        assert_eq!(c.name, "named");
+        assert!(c.public);
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn tilde_expands_to_home() {
+        let Some(home) = std::env::var_os("HOME") else {
+            return;
+        };
+        let home = PathBuf::from(home);
+        assert_eq!(expand_tilde(Path::new("~/x/y")), home.join("x/y"));
+        assert_eq!(expand_tilde(Path::new("~")), home.join(""));
+        assert_eq!(expand_tilde(Path::new("a/~/b")), PathBuf::from("a/~/b"));
+        assert_eq!(expand_tilde(Path::new("~user")), PathBuf::from("~user"));
+    }
+
+    #[test]
+    fn repo_url_is_none_outside_a_checkout() {
+        let c = ProjectConfig {
+            root: PathBuf::from("/nonexistent/arriba"),
+            ..config()
+        };
+        assert_eq!(c.repo_url(), None);
+    }
 }
