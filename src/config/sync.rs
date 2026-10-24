@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 
-use crate::config::gist::GistClient;
+use crate::api::gists::GistClient;
 use crate::config::manifest::{Manifest, ManifestFile, current_platform};
 use crate::config::project::ProjectConfig;
 
@@ -60,7 +60,7 @@ fn read_manifest(
 ) -> Result<Option<Manifest>> {
     let gist = client.get_gist(gist_id)?;
     let manifest_name = config.manifest_name();
-    match client.get_file_content(&gist, &manifest_name) {
+    match gist.file_content(&manifest_name) {
         Some(yaml) => Ok(Manifest::from_yaml(yaml)),
         None => Ok(None),
     }
@@ -69,7 +69,7 @@ fn read_manifest(
 /// Check whether a gist is private (i.e. not public).
 fn is_gist_private(client: &GistClient, gist_id: &str) -> Result<bool> {
     let gist = client.get_gist(gist_id)?;
-    Ok(!gist["public"].as_bool().unwrap_or(true))
+    Ok(gist.is_private())
 }
 
 /// Print the gist URL, marking private gists.
@@ -122,7 +122,7 @@ fn remove_stale_files(
     manifest: &Manifest,
 ) -> Result<()> {
     let gist = client.get_gist(gist_id)?;
-    let remote_files = client.get_file_names(&gist);
+    let remote_files = gist.file_names();
 
     let mut expected: HashSet<String> = HashSet::new();
     expected.insert(config.manifest_name());
@@ -250,7 +250,7 @@ pub fn do_sync(
         let gist = client.get_gist(id)?;
         for idx in &pull_indices {
             let entry = &manifest.files[*idx];
-            let Some(content) = client.get_file_content(&gist, &entry.gist) else {
+            let Some(content) = gist.file_content(&entry.gist) else {
                 eprintln!("  warning: {} not found in gist", entry.gist);
                 continue;
             };
@@ -395,7 +395,7 @@ pub fn do_status(
         expected.insert(entry.gist.clone());
     }
     let mut stale = 0usize;
-    for name in client.get_file_names(&gist) {
+    for name in gist.file_names() {
         if !expected.contains(&name) {
             println!("  stale {name} (not in manifest, run `gh arriba config cleanup`)");
             stale += 1;
@@ -452,7 +452,7 @@ pub fn do_restore(
             continue;
         }
 
-        let Some(content) = client.get_file_content(&gist, &entry.gist) else {
+        let Some(content) = gist.file_content(&entry.gist) else {
             eprintln!("  warning: {} not found in gist", entry.gist);
             continue;
         };

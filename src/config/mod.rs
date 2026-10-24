@@ -1,14 +1,13 @@
-mod gist;
 mod manifest;
 mod project;
 mod sync;
 
 use anyhow::Result;
 
+use crate::api::gists::GistClient;
 use crate::cli::{ConfigArgs, ConfigCommand};
 use crate::context::Ctx;
 use crate::prompt;
-use gist::GistClient;
 use project::ProjectConfig;
 
 pub fn run(ctx: &Ctx, args: ConfigArgs) -> Result<()> {
