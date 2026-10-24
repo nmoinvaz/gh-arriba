@@ -216,9 +216,153 @@ fn stamp(at: &DateTime<Utc>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::Client;
     use crate::api::pulls::Comment;
+    use mockito::{Matcher, Server};
     use serde::de::DeserializeOwned;
     use serde_json::Value;
+
+    fn ctx(server: &Server, json: bool) -> Ctx {
+        Ctx {
+            client: Client::for_tests(&server.url()),
+            repo_flag: Some("o/r".into()),
+            json,
+            yes: true,
+        }
+    }
+
+    /// Mocks for every call `pr dump` makes on o/r#7.
+    fn mock_pr(server: &mut Server) {
+        server
+            .mock("POST", "/graphql")
+            .match_body(Matcher::Regex("isCrossRepository".into()))
+            .with_body(
+                json!({"data": {"repository": {"pullRequest": {
+                    "id": "PR_7", "number": 7, "title": "Fix it", "url": "u", "state": "OPEN",
+                    "isDraft": true, "body": "Why.", "createdAt": "2026-01-01T00:00:00Z",
+                    "author": {"login": "alice"}, "baseRefName": "main", "headRefName": "fix"
+                }}}})
+                .to_string(),
+            )
+            .create();
+        server
+            .mock("GET", "/repos/o/r/issues/7/comments")
+            .match_query(Matcher::Any)
+            .with_body(
+                r#"[{"user": {"login": "carol"}, "created_at": "2026-01-03T00:00:00Z",
+                     "html_url": "c", "body": "Thanks"}]"#,
+            )
+            .create();
+        server
+            .mock("GET", "/repos/o/r/pulls/7/reviews")
+            .match_query(Matcher::Any)
+            .with_body(
+                r#"[{"id": 1, "user": {"login": "bob"}, "state": "CHANGES_REQUESTED",
+                     "submitted_at": "2026-01-04T00:00:00Z", "html_url": "r", "body": "No."}]"#,
+            )
+            .create();
+        server
+            .mock("POST", "/graphql")
+            .match_body(Matcher::Regex("reviewThreads".into()))
+            .with_body(
+                json!({"data": {"repository": {"pullRequest": {
+                    "id": "PR_7", "headRefOid": "abc",
+                    "reviewThreads": {"pageInfo": {"hasNextPage": false}, "nodes": [
+                        {"id": "PRRT_1", "isResolved": true, "path": "a.c", "line": 3,
+                         "comments": {"nodes": [{"databaseId": 9, "body": "Fix\r\nthis",
+                            "createdAt": "2026-01-02T00:00:00Z", "url": "t",
+                            "author": {"login": "bob"}}]}},
+                        {"id": "PRRT_2", "isOutdated": true, "path": "b.c", "line": null,
+                         "originalLine": 5, "comments": {"nodes": []}}
+                    ]}
+                }}}})
+                .to_string(),
+            )
+            .create();
+    }
+
+    fn out_path(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("gh-arriba-dump-{tag}-{}.txt", std::process::id()))
+    }
+
+    #[test]
+    fn dump_writes_the_conversation_in_order() {
+        let mut server = Server::new();
+        mock_pr(&mut server);
+        let path = out_path("text");
+        let args = DumpArgs {
+            pr: Some("7".into()),
+            out: Some(path.clone()),
+        };
+        run(&ctx(&server, false), args).unwrap();
+        let written = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        // A thread without comments is left out.
+        let expected = "\
+pr      #7 Fix it (OPEN draft) by alice  main <- fix  u
+        | Why.
+thread  resolved a.c:3 PRRT_1
+        2026-01-02T00:00:00Z bob  t
+        | Fix
+        | this
+comment 2026-01-03T00:00:00Z carol  c
+        | Thanks
+review  2026-01-04T00:00:00Z bob CHANGES_REQUESTED  r
+        | No.
+";
+        assert_eq!(written, expected);
+    }
+
+    #[test]
+    fn dump_as_json() {
+        let mut server = Server::new();
+        mock_pr(&mut server);
+        let path = out_path("json");
+        let args = DumpArgs {
+            pr: Some("o/r#7".into()),
+            out: Some(path.clone()),
+        };
+        run(&ctx(&server, true), args).unwrap();
+        let written: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(written["pr"]["number"], 7);
+        let kinds: Vec<&str> = written["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["kind"].as_str().unwrap())
+            .collect();
+        assert_eq!(kinds, ["thread", "comment", "review"]);
+        assert_eq!(written["items"][0]["state"], "resolved");
+        assert_eq!(written["items"][0]["path"], "a.c");
+    }
+
+    #[test]
+    fn dump_to_stdout_and_unwritable_paths() {
+        let mut server = Server::new();
+        mock_pr(&mut server);
+        let c = ctx(&server, false);
+        let args = DumpArgs {
+            pr: Some("7".into()),
+            out: None,
+        };
+        run(&c, args).unwrap();
+        let dir = std::env::temp_dir();
+        let args = DumpArgs {
+            pr: Some("7".into()),
+            out: Some(dir.clone()),
+        };
+        let err = run(&c, args).unwrap_err().to_string();
+        assert_eq!(err, format!("Failed to write {}", dir.display()));
+    }
+
+    #[test]
+    fn submitted_reviews_need_a_time() {
+        let reviews = vec![json!({"id": 1, "state": "APPROVED", "body": ""})];
+        let err = collect(&[], &parse(reviews), vec![]).unwrap_err();
+        assert_eq!(err.to_string(), "submitted_at missing");
+    }
 
     fn parse<T: DeserializeOwned>(values: Vec<Value>) -> Vec<T> {
         values
