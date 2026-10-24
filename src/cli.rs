@@ -276,11 +276,11 @@ pub struct FailuresArgs {
     pub out: Option<PathBuf>,
 
     /// Lines of log to show before each error
-    #[arg(long, value_name = "N", default_value_t = 8)]
+    #[arg(long, value_name = "N", default_value_t = crate::log::CONTEXT)]
     pub context: usize,
 
     /// Error blocks to show per job
-    #[arg(long, value_name = "N", default_value_t = 5)]
+    #[arg(long, value_name = "N", default_value_t = crate::log::MAX)]
     pub max: usize,
 }
 
@@ -343,6 +343,10 @@ pub struct LogsArgs {
     /// Only jobs whose name contains this text, repeatable
     #[arg(long = "job", value_name = "PATTERN")]
     pub jobs: Vec<String>,
+
+    /// Print each job's error lines after saving its log
+    #[arg(long)]
+    pub errors: bool,
 }
 
 // -------------------------------------------------------------------------

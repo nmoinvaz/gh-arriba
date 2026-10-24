@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use crate::cli::{LogsArgs, RunCommand};
 use crate::context::{Ctx, Repo};
+use crate::log::{self, Excerpt};
 use crate::output;
 
 pub fn run(ctx: &Ctx, cmd: RunCommand) -> Result<()> {
@@ -68,6 +69,8 @@ struct Downloaded {
     name: String,
     conclusion: Option<String>,
     path: PathBuf,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    excerpt: Option<Excerpt>,
 }
 
 /// Conclusions `--failed` keeps.
@@ -191,15 +194,28 @@ fn logs(ctx: &Ctx, args: LogsArgs) -> Result<()> {
             let conclusion = job["conclusion"].as_str().map(str::to_string);
             match result {
                 Ok(path) => {
+                    let excerpt = if args.errors {
+                        let text = fs::read_to_string(&path)
+                            .with_context(|| format!("Failed to read {}", path.display()))?;
+                        Some(log::excerpt(&text, log::CONTEXT, log::MAX))
+                    } else {
+                        None
+                    };
                     if !ctx.json {
                         let label = conclusion.as_deref().unwrap_or("running");
                         println!("{label:<10} {}", path.display());
+                        match &excerpt {
+                            Some(x) if x.blocks.is_empty() => println!("  no error lines found"),
+                            Some(x) => print!("{}", log::render(x, "  ")),
+                            None => {}
+                        }
                     }
                     downloaded.push(Downloaded {
                         job_id: id,
                         name,
                         conclusion,
                         path,
+                        excerpt,
                     });
                 }
                 Err(e) => eprintln!("warning: skipped {name} ({id}): {}", short_error(&e)),
