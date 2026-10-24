@@ -94,6 +94,9 @@ struct Report {
     head_sha: String,
     pending: usize,
     jobs: Vec<FailedJob>,
+    /// The `--grep` pattern the excerpts were cut with, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    grep: Option<String>,
     /// Failed checks from other apps and commit statuses, which have no Actions log.
     skipped: Vec<Skipped>,
 }
@@ -115,9 +118,7 @@ fn inspect(
     repo: &Repo,
     check: &FailedCheck,
     base: &std::path::Path,
-    context: usize,
-    max: usize,
-    refresh: bool,
+    args: &FailuresArgs,
 ) -> FailedJob {
     let mut job = FailedJob {
         job_id: check.id,
@@ -153,7 +154,7 @@ fn inspect(
     let saved = fs::create_dir_all(&dir)
         .with_context(|| format!("Failed to create {}", dir.display()))
         // A failed job has finished, so its saved log is complete.
-        .and_then(|_| download(ctx, repo, check.id, &dir, &check.name, !refresh))
+        .and_then(|_| download(ctx, repo, check.id, &dir, &check.name, !args.refresh))
         .and_then(|(path, cached)| {
             let text = fs::read_to_string(&path)
                 .with_context(|| format!("Failed to read {}", path.display()))?;
@@ -161,7 +162,12 @@ fn inspect(
         });
     match saved {
         Ok((path, cached, text)) => {
-            job.excerpt = Some(log::excerpt(&text, context, max));
+            job.excerpt = Some(log::select(
+                &text,
+                args.grep.as_ref(),
+                args.context,
+                args.max,
+            ));
             job.log_path = Some(path);
             job.cached = cached;
         }
@@ -211,6 +217,7 @@ pub fn run(ctx: &Ctx, args: FailuresArgs) -> Result<()> {
 
     let base = args
         .out
+        .clone()
         .unwrap_or_else(|| std::env::temp_dir().join("gh-arriba-logs"));
     let actions: Vec<&FailedCheck> = failed.iter().filter(|c| c.actions).collect();
     let mut jobs = Vec::new();
@@ -220,10 +227,8 @@ pub fn run(ctx: &Ctx, args: FailuresArgs) -> Result<()> {
             let handles: Vec<_> = batch
                 .iter()
                 .map(|check| {
-                    let (repo, base) = (&pr.repo, &base);
-                    s.spawn(move || {
-                        inspect(ctx, repo, check, base, args.context, args.max, args.refresh)
-                    })
+                    let (repo, base, args) = (&pr.repo, &base, &args);
+                    s.spawn(move || inspect(ctx, repo, check, base, args))
                 })
                 .collect();
             handles.into_iter().map(|h| h.join().unwrap()).collect()
@@ -237,6 +242,7 @@ pub fn run(ctx: &Ctx, args: FailuresArgs) -> Result<()> {
         head_sha: sha.clone(),
         pending,
         jobs,
+        grep: args.grep.as_ref().map(|re| re.as_str().to_string()),
         skipped,
     };
     if ctx.json {
@@ -279,7 +285,10 @@ fn render(report: &Report) -> String {
             out.push_str(&format!("  {e}\n"));
         }
         match &job.excerpt {
-            Some(x) if x.blocks.is_empty() => out.push_str("  no error lines found\n"),
+            Some(x) if x.blocks.is_empty() => out.push_str(&format!(
+                "  {}\n",
+                log::nothing_found(report.grep.as_deref())
+            )),
             Some(x) => out.push_str(&log::render(x, "  ")),
             None => {}
         }
@@ -389,6 +398,7 @@ mod tests {
                 conclusion: "error".to_string(),
                 url: "https://ci.example.com/1".to_string(),
             }],
+            grep: None,
         };
         assert_eq!(
             render(&report),
