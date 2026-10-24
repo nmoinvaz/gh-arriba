@@ -57,28 +57,32 @@ jobs:
           git push origin "$VERSION"
 
   build:
-    name: Build ${{ matrix.asset }}
+    name: Build ${{ matrix.platform }}
     needs: prepare
     strategy:
       fail-fast: true
       matrix:
         include:
-          # gh picks the asset whose name ends in its own OS and architecture.
           - os: macos-latest
             target: aarch64-apple-darwin
-            asset: gh-arriba-darwin-arm64
+            platform: darwin-arm64
+
           - os: macos-latest
             target: x86_64-apple-darwin
-            asset: gh-arriba-darwin-amd64
+            platform: darwin-amd64
+
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
-            asset: gh-arriba-linux-amd64
+            platform: linux-amd64
+
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
-            asset: gh-arriba-linux-arm64
+            platform: linux-arm64
+
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            asset: gh-arriba-windows-amd64.exe
+            platform: windows-amd64
+
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -104,21 +108,22 @@ jobs:
           fi
           cargo build --release --locked --target "$TARGET"
 
+      # gh picks the asset whose name ends in its own platform, plus .exe on Windows.
       - name: Stage
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
-          ASSET: ${{ matrix.asset }}
+          PLATFORM: ${{ matrix.platform }}
         run: |
           ext=""
           [[ "$TARGET" == *windows* ]] && ext=".exe"
           mkdir dist
-          cp "target/$TARGET/release/gh-arriba$ext" "dist/$ASSET"
+          cp "target/$TARGET/release/gh-arriba$ext" "dist/gh-arriba-$PLATFORM$ext"
 
       - uses: actions/upload-artifact@v7
         with:
-          name: ${{ matrix.asset }}
-          path: dist/${{ matrix.asset }}
+          name: ${{ matrix.platform }}
+          path: dist/*
           if-no-files-found: error
 
   release:
