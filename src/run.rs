@@ -108,10 +108,7 @@ fn sanitize(name: &str) -> String {
 
 fn logs(ctx: &Ctx, args: LogsArgs) -> Result<()> {
     let (url_repo, target) = parse_target(&args.target)?;
-    let repo = match url_repo {
-        Some(r) => r,
-        None => ctx.repo()?,
-    };
+    let repo = ctx.repo_or(url_repo)?;
     let client = &ctx.client;
 
     // A bare number is tried as a run, then as a job.
@@ -391,10 +388,7 @@ fn select_runs(runs: &[Value], workflow: Option<&str>) -> Vec<u64> {
 /// The repository and run a RUN argument names. A job ID or URL stands for the run it belongs to.
 fn resolve_run(ctx: &Ctx, s: &str) -> Result<(Repo, u64)> {
     let (url_repo, target) = parse_target(s)?;
-    let repo = match url_repo {
-        Some(r) => r,
-        None => ctx.repo()?,
-    };
+    let repo = ctx.repo_or(url_repo)?;
     let job_run = |id: u64| -> Result<Option<u64>> {
         Ok(ctx
             .client
