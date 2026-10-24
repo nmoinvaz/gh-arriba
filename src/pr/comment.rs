@@ -1,16 +1,18 @@
 use anyhow::{Context, Result, bail};
 use regex::Regex;
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::sync::LazyLock;
 
-use crate::cli::{CommentCommand, CommentShowArgs};
+use crate::cli::{CommentCommand, CommentEditArgs, CommentShowArgs};
 use crate::context::{Ctx, Repo};
 use crate::output::{indent, print_json};
+use crate::prompt;
 
 pub fn run(ctx: &Ctx, cmd: CommentCommand) -> Result<()> {
     match cmd {
         CommentCommand::Show(args) => show(ctx, args),
+        CommentCommand::Edit(args) => edit(ctx, args),
     }
 }
 
@@ -313,6 +315,47 @@ fn show(ctx: &Ctx, args: CommentShowArgs) -> Result<()> {
     Ok(())
 }
 
+// -------------------------------------------------------------------------
+//  edit
+// -------------------------------------------------------------------------
+
+/// Method and path that replace a found comment's body.
+fn edit_endpoint(found: &Found) -> Result<(&'static str, String)> {
+    let api = found.repo.api();
+    let id = found.value["id"].as_u64().unwrap_or_default();
+    Ok(match found.kind {
+        Kind::ReviewComment => ("PATCH", format!("{api}/pulls/comments/{id}")),
+        Kind::IssueComment => ("PATCH", format!("{api}/issues/comments/{id}")),
+        Kind::Review => {
+            let number = trailing_number(&found.value["pull_request_url"])
+                .context("Review has no pull request")?;
+            ("PUT", format!("{api}/pulls/{number}/reviews/{id}"))
+        }
+    })
+}
+
+fn edit(ctx: &Ctx, args: CommentEditArgs) -> Result<()> {
+    let body = prompt::read_body(args.body.as_deref(), "comment")?;
+    let target = parse_target(&args.target)?;
+    let found = find(ctx, &target)?;
+    let (method, path) = edit_endpoint(&found)?;
+    let payload = json!({ "body": body });
+    let resp = match method {
+        "PUT" => ctx.client.put(&path, &payload)?,
+        _ => ctx.client.patch(&path, &payload)?,
+    };
+    let edited = normalize(&Found {
+        repo: found.repo,
+        kind: found.kind,
+        value: resp,
+    });
+    if ctx.json {
+        return print_json(&edited);
+    }
+    println!("{}", edited.url);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -410,6 +453,38 @@ mod tests {
         let shown = normalize(&found);
         assert!(shown.outdated);
         assert_eq!((shown.start_line, shown.line), (Some(3), Some(5)));
+    }
+
+    #[test]
+    fn edit_endpoints_by_kind() {
+        let found = |kind, value| Found {
+            repo: repo().unwrap(),
+            kind,
+            value,
+        };
+        let pr = "https://api.github.com/repos/zlib-ng/zlib-ng/pulls/42";
+        let cases = [
+            (
+                found(
+                    Kind::ReviewComment,
+                    json!({ "id": 7, "pull_request_url": pr }),
+                ),
+                ("PATCH", "repos/zlib-ng/zlib-ng/pulls/comments/7"),
+            ),
+            (
+                found(Kind::IssueComment, json!({ "id": 8 })),
+                ("PATCH", "repos/zlib-ng/zlib-ng/issues/comments/8"),
+            ),
+            (
+                found(Kind::Review, json!({ "id": 9, "pull_request_url": pr })),
+                ("PUT", "repos/zlib-ng/zlib-ng/pulls/42/reviews/9"),
+            ),
+        ];
+        for (f, (method, path)) in cases {
+            let (m, p) = edit_endpoint(&f).unwrap();
+            assert_eq!((m, p.as_str()), (method, path));
+        }
+        assert!(edit_endpoint(&found(Kind::Review, json!({ "id": 9 }))).is_err());
     }
 
     #[test]

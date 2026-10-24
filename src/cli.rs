@@ -134,6 +134,8 @@ pub struct ResolveArgs {
 pub enum CommentCommand {
     /// Print a review comment, issue comment, or review body
     Show(CommentShowArgs),
+    /// Replace the body of a comment or review you posted
+    Edit(CommentEditArgs),
 }
 
 #[derive(Args)]
@@ -141,6 +143,16 @@ pub struct CommentShowArgs {
     /// Comment URL (#discussion_r..., #issuecomment-..., #pullrequestreview-...) or ID
     #[arg(value_name = "URL|ID")]
     pub target: String,
+}
+
+#[derive(Args)]
+pub struct CommentEditArgs {
+    /// Comment URL (#discussion_r..., #issuecomment-..., #pullrequestreview-...) or ID
+    #[arg(value_name = "URL|ID")]
+    pub target: String,
+
+    /// New text, or - to read stdin (default: stdin)
+    pub body: Option<String>,
 }
 
 #[derive(Subcommand)]
