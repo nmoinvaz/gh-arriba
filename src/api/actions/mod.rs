@@ -1,8 +1,9 @@
 //! GitHub Actions: workflows and their dispatch, workflow runs, jobs and their logs, artifacts,
-//! caches, and self-hosted runners.
+//! caches, self-hosted runners, and the check runs and commit statuses of a commit.
 
 mod artifacts;
 mod caches;
+mod checks;
 mod runners;
 mod runs;
 mod workflows;
@@ -17,6 +18,7 @@ use super::{Client, Repo};
 
 pub use artifacts::{Artifact, artifacts, delete_artifact, download_artifact, run_artifacts};
 pub use caches::{Cache, cache_usage, caches, delete_cache, pull_state};
+pub use checks::{CheckRun, check_runs, commit_statuses};
 pub use runners::{
     OrgRepo, Runner, org_repos, org_runners, recently_pushed_org_repos, repo_runners,
 };

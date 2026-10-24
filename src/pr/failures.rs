@@ -1,10 +1,9 @@
 use anyhow::{Context, Result};
 use serde::Serialize;
-use serde_json::Value;
 use std::fs;
 use std::path::PathBuf;
 
-use crate::api::json::str_of;
+use crate::api::actions::{self, CheckRun, Job};
 use crate::api::{Repo, is_failed};
 use crate::cli::FailuresArgs;
 use crate::context::Ctx;
@@ -25,32 +24,27 @@ struct FailedCheck {
 }
 
 /// Failed checks and the number still running.
-fn classify(check_runs: &[Value], patterns: &[String]) -> (Vec<FailedCheck>, usize) {
+fn classify(check_runs: &[CheckRun], patterns: &[String]) -> (Vec<FailedCheck>, usize) {
     let mut failed = Vec::new();
     let mut pending = 0;
     for c in check_runs {
-        let name = c["name"].as_str().unwrap_or_default();
-        if !name_matches(name, patterns) {
+        if !name_matches(&c.name, patterns) {
             continue;
         }
-        if c["status"].as_str() != Some("completed") {
+        if c.status != "completed" {
             pending += 1;
             continue;
         }
-        let conclusion = c["conclusion"].as_str();
+        let conclusion = c.conclusion.as_deref();
         if !is_failed(conclusion) {
             continue;
         }
-        let url = c["html_url"]
-            .as_str()
-            .or(c["details_url"].as_str())
-            .unwrap_or_default();
         failed.push(FailedCheck {
-            id: c["id"].as_u64().unwrap_or(0),
-            name: name.to_string(),
+            id: c.id,
+            name: c.name.clone(),
             conclusion: conclusion.unwrap_or_default().to_string(),
-            url: url.to_string(),
-            actions: c["app"]["slug"].as_str() == Some("github-actions"),
+            url: c.url().to_string(),
+            actions: c.is_actions(),
         });
     }
     (failed, pending)
@@ -96,13 +90,11 @@ struct Report {
 }
 
 /// Steps of a job that did not succeed.
-fn failed_steps(job: &Value) -> Vec<String> {
-    job["steps"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|s| is_failed(s["conclusion"].as_str()))
-        .filter_map(|s| s["name"].as_str().map(str::to_string))
+fn failed_steps(job: &Job) -> Vec<String> {
+    job.steps
+        .iter()
+        .filter(|s| is_failed(s.conclusion.as_deref()))
+        .filter_map(|s| s.name.clone())
         .collect()
 }
 
@@ -127,22 +119,16 @@ fn inspect(
         excerpt: None,
         error: None,
     };
-    let details = match ctx
-        .client
-        .get(&format!("{}/actions/jobs/{}", repo.api(), check.id))
-    {
+    let details = match actions::job(&ctx.client, repo, check.id) {
         Ok(d) => d,
         Err(e) => {
             job.error = Some(short_error(&e));
             return job;
         }
     };
-    job.run_id = details["run_id"].as_u64().unwrap_or(0);
-    job.workflow = details["workflow_name"]
-        .as_str()
-        .unwrap_or_default()
-        .to_string();
+    job.run_id = details.run_id;
     job.failed_steps = failed_steps(&details);
+    job.workflow = details.workflow_name.unwrap_or_default();
 
     let dir = base.join(job.run_id.to_string());
     let saved = fs::create_dir_all(&dir)
@@ -176,10 +162,7 @@ pub fn run(ctx: &Ctx, args: FailuresArgs) -> Result<()> {
     let info = fetch_pr(client, &pr)?;
     let sha = &info.head_oid;
 
-    let check_runs = client.get_all_in(
-        &format!("{}/commits/{sha}/check-runs?filter=latest", pr.repo.api()),
-        "check_runs",
-    )?;
+    let check_runs = actions::check_runs(client, &pr.repo, sha)?;
     let (failed, mut pending) = classify(&check_runs, &args.jobs);
 
     let mut skipped: Vec<Skipped> = failed
@@ -192,18 +175,16 @@ pub fn run(ctx: &Ctx, args: FailuresArgs) -> Result<()> {
         })
         .collect();
     // Commit statuses come from external services and never have an Actions log.
-    let status = client.get(&format!("{}/commits/{sha}/status", pr.repo.api()))?;
-    for s in status["statuses"].as_array().into_iter().flatten() {
-        let name = s["context"].as_str().unwrap_or_default();
-        if !name_matches(name, &args.jobs) {
+    for s in actions::commit_statuses(client, &pr.repo, sha)? {
+        if !name_matches(&s.context, &args.jobs) {
             continue;
         }
-        match s["state"].as_str() {
-            Some("pending") => pending += 1,
-            Some(state @ ("failure" | "error")) => skipped.push(Skipped {
-                name: name.to_string(),
-                conclusion: state.to_string(),
-                url: str_of(s, "target_url"),
+        match s.state.as_str() {
+            "pending" => pending += 1,
+            "failure" | "error" => skipped.push(Skipped {
+                name: s.context,
+                conclusion: s.state,
+                url: s.target_url.unwrap_or_default(),
             }),
             _ => {}
         }
@@ -288,13 +269,14 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn check(id: u64, name: &str, status: &str, conclusion: Option<&str>, app: &str) -> Value {
-        json!({
+    fn check(id: u64, name: &str, status: &str, conclusion: Option<&str>, app: &str) -> CheckRun {
+        serde_json::from_value(json!({
             "id": id, "name": name, "status": status, "conclusion": conclusion,
             "html_url": format!("https://github.com/o/r/runs/{id}"),
             "details_url": format!("https://example.com/{id}"),
             "app": { "slug": app },
-        })
+        }))
+        .unwrap()
     }
 
     #[test]
@@ -337,11 +319,12 @@ mod tests {
 
     #[test]
     fn failed_steps_by_conclusion() {
-        let job = json!({ "steps": [
+        let job: Job = serde_json::from_value(json!({ "id": 1, "steps": [
             { "name": "Checkout", "conclusion": "success" },
             { "name": "Build", "conclusion": "failure" },
             { "name": "Test", "conclusion": "skipped" },
-        ]});
+        ]}))
+        .unwrap();
         assert_eq!(failed_steps(&job), vec!["Build"]);
     }
 
