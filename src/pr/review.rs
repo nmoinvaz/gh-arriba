@@ -441,6 +441,294 @@ fn discard(ctx: &Ctx, args: PrArg) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mockito::{Matcher, Mock, Server};
+    use serde_json::Value;
+
+    fn ctx(server: &Server, json: bool) -> Ctx {
+        Ctx {
+            client: Client::for_tests(&server.url()),
+            repo_flag: Some("o/r".into()),
+            json,
+            yes: true,
+        }
+    }
+
+    fn gql(server: &mut Server, needle: &str, data: Value) -> Mock {
+        server
+            .mock("POST", "/graphql")
+            .match_body(Matcher::Regex(needle.into()))
+            .with_body(json!({ "data": data }).to_string())
+            .create()
+    }
+
+    fn mock_files(server: &mut Server) -> Mock {
+        server
+            .mock("GET", "/repos/o/r/pulls/7/files")
+            .match_query(Matcher::Any)
+            .with_body(
+                json!([
+                    {"filename": "src/a.c", "patch": "@@ -1,3 +1,5 @@\n x\n+y\n@@ -20,2 +22,0 @@\n-z"},
+                    {"filename": "logo.png"}
+                ])
+                .to_string(),
+            )
+            .create()
+    }
+
+    /// The pending-review query, with a review of `count` comments when `pending` is set.
+    fn mock_pending(server: &mut Server, author: &str, pending: Option<u64>) -> Mock {
+        let reviews = match pending {
+            Some(count) => json!({"nodes": [{
+                "id": "PRR_1", "url": "https://r/1", "body": "Overall fine.",
+                "viewerDidAuthor": true,
+                "comments": {"totalCount": count, "nodes": [{
+                    "databaseId": 5, "path": "src/a.c", "startLine": 1, "line": 2,
+                    "body": "nit"
+                }]}
+            }]}),
+            None => json!({"nodes": []}),
+        };
+        gql(
+            server,
+            "states: PENDING",
+            json!({"repository": {"pullRequest": {
+                "id": "PR_7", "author": {"login": author}, "reviews": reviews
+            }}}),
+        )
+    }
+
+    fn mock_viewer(server: &mut Server, login: &str) -> Mock {
+        gql(
+            server,
+            r"query \{ viewer",
+            json!({"viewer": {"login": login}}),
+        )
+    }
+
+    fn add_args(args: &[&str], side: Side) -> ReviewAddArgs {
+        ReviewAddArgs {
+            args: args.iter().map(|s| s.to_string()).collect(),
+            side,
+        }
+    }
+
+    #[test]
+    fn lines_lists_commentable_ranges() {
+        let mut server = Server::new();
+        let files = mock_files(&mut server).expect(2);
+        let lines_of = fetch_file_lines(&Client::for_tests(&server.url()), &pr()).unwrap();
+        assert_eq!(lines_of[0].right, vec![(1, 5)]);
+        assert_eq!(lines_of[0].left, vec![(1, 3), (20, 21)]);
+        assert!(lines_of[1].right.is_empty() && lines_of[1].left.is_empty());
+        let arg = PrArg {
+            pr: Some("7".into()),
+        };
+        run(&ctx(&server, false), ReviewCommand::Lines(arg)).unwrap();
+        files.assert();
+    }
+
+    fn pr() -> PrRef {
+        PrRef {
+            repo: crate::api::Repo::parse("o/r").unwrap(),
+            number: 7,
+        }
+    }
+
+    #[test]
+    fn add_joins_the_existing_pending_review() {
+        let mut server = Server::new();
+        mock_files(&mut server);
+        mock_pending(&mut server, "alice", Some(2));
+        let start = gql(&mut server, r"pullRequestId: \$pr \}", json!({})).expect(0);
+        let thread = server
+            .mock("POST", "/graphql")
+            .match_body(Matcher::PartialJson(json!({"variables": {"input": {
+                "pullRequestReviewId": "PRR_1", "path": "src/a.c", "line": 3,
+                "startLine": 2, "side": "RIGHT", "body": "Rename"
+            }}})))
+            .with_body(r#"{"data": {"addPullRequestReviewThread": {"thread": {"id": "PRRT_9"}}}}"#)
+            .create();
+        let args = add_args(&["o/r#7", "src/a.c:2-3", "Rename"], Side::Right);
+        run(&ctx(&server, true), ReviewCommand::Add(args)).unwrap();
+        thread.assert();
+        start.assert();
+    }
+
+    #[test]
+    fn add_starts_a_pending_review_when_none_exists() {
+        let mut server = Server::new();
+        mock_files(&mut server);
+        mock_pending(&mut server, "alice", None);
+        let start = server
+            .mock("POST", "/graphql")
+            .match_body(Matcher::AllOf(vec![
+                Matcher::Regex(r"pullRequestId: \$pr \}".into()),
+                Matcher::PartialJson(json!({"variables": {"pr": "PR_7"}})),
+            ]))
+            .with_body(
+                r#"{"data": {"addPullRequestReview": {"pullRequestReview": {"id": "PRR_new"}}}}"#,
+            )
+            .create();
+        let thread = server
+            .mock("POST", "/graphql")
+            .match_body(Matcher::PartialJson(json!({"variables": {"input": {
+                "pullRequestReviewId": "PRR_new", "line": 21, "side": "LEFT"
+            }}})))
+            .with_body(r#"{"data": {"addPullRequestReviewThread": {"thread": null}}}"#)
+            .create();
+        let args = add_args(&["7", "src/a.c:21", "Why removed?"], Side::Left);
+        run(&ctx(&server, false), ReviewCommand::Add(args)).unwrap();
+        start.assert();
+        thread.assert();
+    }
+
+    #[test]
+    fn add_outside_the_diff_fails_before_any_mutation() {
+        let mut server = Server::new();
+        mock_files(&mut server);
+        let pending = mock_pending(&mut server, "alice", None).expect(0);
+        let args = add_args(&["7", "src/a.c:9", "x"], Side::Right);
+        let err = run(&ctx(&server, true), ReviewCommand::Add(args))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            err,
+            "src/a.c:9 is outside the diff. RIGHT lines that accept comments in src/a.c: 1-5"
+        );
+        let args = add_args(&["7", "logo.png:1", "x"], Side::Right);
+        let err = run(&ctx(&server, true), ReviewCommand::Add(args))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            err,
+            "logo.png:1 is not commentable, logo.png has no RIGHT lines in the diff"
+        );
+        pending.assert();
+    }
+
+    #[test]
+    fn show_prints_the_pending_review_or_none() {
+        let mut server = Server::new();
+        let m = mock_pending(&mut server, "alice", Some(3));
+        let arg = || PrArg {
+            pr: Some("7".into()),
+        };
+        run(&ctx(&server, false), ReviewCommand::Show(arg())).unwrap();
+        run(&ctx(&server, true), ReviewCommand::Show(arg())).unwrap();
+        m.expect(2).assert();
+        let mut server = Server::new();
+        mock_pending(&mut server, "alice", None);
+        run(&ctx(&server, false), ReviewCommand::Show(arg())).unwrap();
+    }
+
+    fn submit_args(event: ReviewEvent, body: Option<&str>) -> ReviewSubmitArgs {
+        ReviewSubmitArgs {
+            pr: Some("7".into()),
+            event,
+            body: body.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn submit_refuses_to_approve_your_own_pr() {
+        let mut server = Server::new();
+        mock_pending(&mut server, "me", Some(1));
+        mock_viewer(&mut server, "me");
+        let submit = gql(&mut server, "submitPullRequestReview", json!({})).expect(0);
+        let args = submit_args(ReviewEvent::Approve, None);
+        let err = run(&ctx(&server, true), ReviewCommand::Submit(args))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(err, "You can't approve your own pull request");
+        let args = submit_args(ReviewEvent::RequestChanges, Some("x"));
+        let err = run(&ctx(&server, true), ReviewCommand::Submit(args))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(err, "You can't request changes on your own pull request");
+        submit.assert();
+    }
+
+    #[test]
+    fn submit_sends_the_pending_review() {
+        let mut server = Server::new();
+        mock_pending(&mut server, "alice", Some(2));
+        mock_viewer(&mut server, "me");
+        let submit = server
+            .mock("POST", "/graphql")
+            .match_body(Matcher::PartialJson(json!({"variables": {
+                "id": "PRR_1", "event": "APPROVE", "body": "LGTM"
+            }})))
+            .with_body(
+                r#"{"data": {"submitPullRequestReview": {"pullRequestReview": {
+                    "id": "PRR_1", "state": "APPROVED", "url": "u"}}}}"#,
+            )
+            .create();
+        let args = submit_args(ReviewEvent::Approve, Some("  LGTM \n"));
+        run(&ctx(&server, false), ReviewCommand::Submit(args)).unwrap();
+        submit.assert();
+    }
+
+    #[test]
+    fn submit_creates_a_review_when_none_is_pending() {
+        let mut server = Server::new();
+        mock_pending(&mut server, "alice", None);
+        let create = server
+            .mock("POST", "/graphql")
+            .match_body(Matcher::AllOf(vec![
+                Matcher::Regex(r"pullRequestId: \$pr, event".into()),
+                Matcher::PartialJson(json!({"variables": {
+                    "pr": "PR_7", "event": "COMMENT", "body": "Thoughts"
+                }})),
+            ]))
+            .with_body(
+                r#"{"data": {"addPullRequestReview": {"pullRequestReview": {
+                    "id": "PRR_2", "state": "COMMENTED", "url": "u"}}}}"#,
+            )
+            .create();
+        let args = submit_args(ReviewEvent::Comment, Some("Thoughts"));
+        run(&ctx(&server, true), ReviewCommand::Submit(args)).unwrap();
+        create.assert();
+        // Nothing pending and no body is refused before any mutation.
+        let args = submit_args(ReviewEvent::Comment, None);
+        assert!(run(&ctx(&server, true), ReviewCommand::Submit(args)).is_err());
+        create.assert();
+    }
+
+    #[test]
+    fn discard_deletes_the_pending_review() {
+        let mut server = Server::new();
+        mock_pending(&mut server, "alice", Some(2));
+        let delete = server
+            .mock("POST", "/graphql")
+            .match_body(Matcher::AllOf(vec![
+                Matcher::Regex("deletePullRequestReview".into()),
+                Matcher::PartialJson(json!({"variables": {"id": "PRR_1"}})),
+            ]))
+            .with_body(
+                r#"{"data": {"deletePullRequestReview": {"pullRequestReview": {"id": "PRR_1"}}}}"#,
+            )
+            .expect(2)
+            .create();
+        let arg = || PrArg {
+            pr: Some("7".into()),
+        };
+        run(&ctx(&server, true), ReviewCommand::Discard(arg())).unwrap();
+        run(&ctx(&server, false), ReviewCommand::Discard(arg())).unwrap();
+        delete.assert();
+    }
+
+    #[test]
+    fn discard_without_a_pending_review_deletes_nothing() {
+        let mut server = Server::new();
+        mock_pending(&mut server, "alice", None);
+        let delete = gql(&mut server, "deletePullRequestReview", json!({})).expect(0);
+        let arg = || PrArg {
+            pr: Some("7".into()),
+        };
+        run(&ctx(&server, true), ReviewCommand::Discard(arg())).unwrap();
+        run(&ctx(&server, false), ReviewCommand::Discard(arg())).unwrap();
+        delete.assert();
+    }
 
     #[test]
     fn hunk_ranges_cover_both_sides() {
