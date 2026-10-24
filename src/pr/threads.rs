@@ -608,6 +608,343 @@ fn find_thread<'a>(threads: &'a PrThreads, id: &str) -> Result<&'a Thread> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mockito::{Matcher, Mock, Server};
+    use serde_json::Value;
+
+    fn ctx(server: &Server) -> Ctx {
+        Ctx {
+            client: Client::for_tests(&server.url()),
+            repo_flag: Some("o/r".into()),
+            json: true,
+            yes: true,
+        }
+    }
+
+    /// A GraphQL mock for the query whose text contains `needle`.
+    fn gql(server: &mut Server, needle: &str, data: Value) -> Mock {
+        server
+            .mock("POST", "/graphql")
+            .match_body(Matcher::Regex(needle.into()))
+            .with_body(json!({ "data": data }).to_string())
+            .create()
+    }
+
+    fn mock_pr(server: &mut Server) -> Mock {
+        gql(
+            server,
+            "isCrossRepository",
+            json!({"repository": {"pullRequest": {
+                "id": "PR_7", "number": 7, "title": "Fix", "url": "u", "state": "OPEN",
+                "createdAt": "2026-01-01T00:00:00Z", "author": {"login": "alice"}
+            }}}),
+        )
+    }
+
+    fn thread_node(id: &str, db: u64, login: &str, typename: &str, extra: Value) -> Value {
+        let mut node = json!({
+            "id": id, "isResolved": false, "isOutdated": false, "path": "a.c",
+            "diffSide": "RIGHT", "line": 3, "startLine": 1,
+            "comments": { "nodes": [
+                {
+                    "id": format!("C_{db}"), "databaseId": db,
+                    "body": "<!-- meta -->Please fix.", "createdAt": "2026-01-05T00:00:00Z",
+                    "url": "u", "author": { "__typename": typename, "login": login }
+                },
+                {
+                    "id": "C_reply", "databaseId": db + 100, "body": "Done.\nMore.",
+                    "createdAt": "2026-01-06T00:00:00Z", "url": "u",
+                    "author": { "__typename": "User", "login": "alice" }
+                }
+            ]}
+        });
+        if let (Value::Object(n), Value::Object(e)) = (&mut node, extra) {
+            n.extend(e);
+        }
+        node
+    }
+
+    fn mock_threads(server: &mut Server) -> Mock {
+        gql(
+            server,
+            "reviewThreads",
+            json!({"repository": {"pullRequest": {
+                "id": "PR_7", "author": {"login": "alice"}, "headRefOid": "abc",
+                "reviewThreads": {
+                    "pageInfo": {"hasNextPage": false},
+                    "nodes": [
+                        thread_node("PRRT_bot", 10, "coderabbitai", "Bot", json!({})),
+                        thread_node("PRRT_human", 20, "bob", "User", json!({})),
+                        thread_node("PRRT_done", 30, "bob", "User", json!({"isResolved": true})),
+                        thread_node("PRRT_old", 40, "bob", "User",
+                            json!({"isOutdated": true, "line": null, "originalLine": 9})),
+                    ]
+                }
+            }}}),
+        )
+    }
+
+    fn threads_args(pr: &str) -> ThreadsArgs {
+        ThreadsArgs {
+            pr: Some(pr.into()),
+            bots: false,
+            humans: false,
+            author: None,
+            resolved: false,
+            outdated: false,
+            since_last_review: false,
+            review_bodies: false,
+        }
+    }
+
+    #[test]
+    fn threads_for_humans_skip_review_bodies() {
+        let mut server = Server::new();
+        mock_pr(&mut server);
+        let threads = mock_threads(&mut server);
+        let reviews = server
+            .mock("GET", "/repos/o/r/pulls/7/reviews")
+            .match_query(Matcher::Any)
+            .expect(0)
+            .create();
+        let args = ThreadsArgs {
+            humans: true,
+            review_bodies: true,
+            ..threads_args("7")
+        };
+        run_threads(&ctx(&server), args).unwrap();
+        threads.assert();
+        // CodeRabbit is a bot, so a human-only listing has no review-body findings to fetch.
+        reviews.assert();
+    }
+
+    #[test]
+    fn threads_since_my_last_review_with_findings() {
+        let mut server = Server::new();
+        mock_pr(&mut server);
+        mock_threads(&mut server);
+        gql(
+            &mut server,
+            r"query \{ viewer",
+            json!({"viewer": {"login": "me"}}),
+        );
+        let last = server
+            .mock("POST", "/graphql")
+            .match_body(Matcher::AllOf(vec![
+                Matcher::Regex(r"reviews\(last: 1".into()),
+                Matcher::PartialJson(json!({"variables": {"author": "me", "number": 7}})),
+            ]))
+            .with_body(
+                r#"{"data": {"repository": {"pullRequest": {"reviews": {"nodes": [
+                    {"submittedAt": "2026-01-02T00:00:00Z"}]}}}}}"#,
+            )
+            .create();
+        let body = "**Nitpick comments (1)**\n<summary>a.c (1)</summary>\n`4`: **Rename.**\n\nWhy.";
+        let reviews = server
+            .mock("GET", "/repos/o/r/pulls/7/reviews")
+            .match_query(Matcher::Any)
+            .with_body(
+                json!([
+                    // Too old, pending, and not CodeRabbit: all skipped.
+                    {"id": 1, "user": {"login": "coderabbitai[bot]"}, "body": body,
+                     "state": "COMMENTED", "submitted_at": "2026-01-01T00:00:00Z"},
+                    {"id": 2, "user": {"login": "coderabbitai[bot]"}, "body": body,
+                     "state": "PENDING", "submitted_at": null},
+                    {"id": 3, "user": {"login": "bob"}, "body": body,
+                     "state": "COMMENTED", "submitted_at": "2026-01-03T00:00:00Z"},
+                    {"id": 4, "user": {"login": "coderabbitai[bot]"}, "body": body,
+                     "state": "COMMENTED", "submitted_at": "2026-01-03T00:00:00Z",
+                     "html_url": "h"},
+                ])
+                .to_string(),
+            )
+            .create();
+        let since = Some("2026-01-02T00:00:00Z".parse().unwrap());
+        let findings = fetch_findings(&ctx(&server).client, &pr(), since).unwrap();
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].review_id, 4);
+        assert_eq!(findings[0].item.title, "Rename.");
+
+        // The same through the command, in human output, by author @me.
+        let mut c = ctx(&server);
+        c.json = false;
+        let args = ThreadsArgs {
+            author: Some("@me".into()),
+            since_last_review: true,
+            review_bodies: true,
+            outdated: true,
+            ..threads_args("o/r#7")
+        };
+        run_threads(&c, args).unwrap();
+        let args = ThreadsArgs {
+            since_last_review: true,
+            review_bodies: true,
+            resolved: true,
+            outdated: true,
+            ..threads_args("o/r#7")
+        };
+        run_threads(&c, args).unwrap();
+        last.expect(2).assert();
+        // The @me run filters out CodeRabbit, so only the direct call and the last run read reviews.
+        reviews.expect(2).assert();
+    }
+
+    fn pr() -> PrRef {
+        PrRef {
+            repo: Repo::parse("o/r").unwrap(),
+            number: 7,
+        }
+    }
+
+    fn mock_comment(server: &mut Server, id: u64, reply_to: Option<u64>) -> Mock {
+        server
+            .mock("GET", format!("/repos/o/r/pulls/comments/{id}").as_str())
+            .with_body(
+                json!({
+                    "id": id, "in_reply_to_id": reply_to,
+                    "pull_request_url": "https://api.github.com/repos/o/r/pulls/7"
+                })
+                .to_string(),
+            )
+            .create()
+    }
+
+    fn mock_resolve(server: &mut Server, mutation: &str, id: &str, resolved: bool) -> Mock {
+        server
+            .mock("POST", "/graphql")
+            .match_body(Matcher::AllOf(vec![
+                Matcher::Regex(format!(" {mutation}")),
+                Matcher::PartialJson(json!({"variables": {"id": id}})),
+            ]))
+            .with_body(
+                json!({"data": {mutation: {"thread": {
+                    "id": id, "isResolved": resolved, "path": "a.c", "line": null,
+                    "originalLine": 9
+                }}}})
+                .to_string(),
+            )
+            .create()
+    }
+
+    #[test]
+    fn reply_to_a_reply_goes_to_the_top_comment_and_resolves() {
+        let mut server = Server::new();
+        mock_comment(&mut server, 120, Some(20));
+        let reply = server
+            .mock("POST", "/repos/o/r/pulls/7/comments/20/replies")
+            .match_body(Matcher::Json(json!({"body": "Fixed."})))
+            .with_body(r#"{"id": 121, "html_url": "https://h/121"}"#)
+            .create();
+        mock_threads(&mut server);
+        let resolve = mock_resolve(&mut server, "resolveReviewThread", "PRRT_human", true);
+        let args = ReplyArgs {
+            target: "120".into(),
+            body: Some("Fixed.".into()),
+            resolve: true,
+        };
+        run_reply(&ctx(&server), args).unwrap();
+        reply.assert();
+        resolve.assert();
+    }
+
+    #[test]
+    fn reply_to_a_thread_id_uses_graphql() {
+        let mut server = Server::new();
+        let reply = server
+            .mock("POST", "/graphql")
+            .match_body(Matcher::PartialJson(
+                json!({"variables": {"id": "PRRT_x", "body": "Thanks"}}),
+            ))
+            .with_body(
+                r#"{"data": {"addPullRequestReviewThreadReply": {
+                    "comment": {"databaseId": 5, "url": "https://h/5"}}}}"#,
+            )
+            .create();
+        let mut c = ctx(&server);
+        c.json = false;
+        let args = ReplyArgs {
+            target: "PRRT_x".into(),
+            body: Some("Thanks\n".into()),
+            resolve: false,
+        };
+        run_reply(&c, args).unwrap();
+        reply.assert();
+    }
+
+    #[test]
+    fn resolve_fetches_each_prs_threads_once() {
+        let mut server = Server::new();
+        mock_comment(&mut server, 10, None);
+        mock_comment(&mut server, 120, Some(20));
+        let threads = mock_threads(&mut server).expect(1);
+        let bot = mock_resolve(&mut server, "unresolveReviewThread", "PRRT_bot", false);
+        let human = mock_resolve(&mut server, "unresolveReviewThread", "PRRT_human", false);
+        let direct = mock_resolve(&mut server, "unresolveReviewThread", "PRRT_z", false);
+        let args = ResolveArgs {
+            targets: vec!["10".into(), "120".into(), "PRRT_z".into()],
+            undo: true,
+        };
+        let mut c = ctx(&server);
+        c.json = false;
+        run_resolve(&c, args).unwrap();
+        threads.assert();
+        bot.assert();
+        human.assert();
+        direct.assert();
+    }
+
+    #[test]
+    fn resolve_reports_missing_comments_and_threads() {
+        let mut server = Server::new();
+        server
+            .mock("GET", "/repos/o/r/pulls/comments/99")
+            .with_status(404)
+            .create();
+        mock_comment(&mut server, 55, None);
+        mock_threads(&mut server);
+        let c = ctx(&server);
+        let err = run_resolve(
+            &c,
+            ResolveArgs {
+                targets: vec!["99".into()],
+                undo: false,
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        // -R was given, so there is no hint to pass it.
+        assert_eq!(err, "Review comment 99 not found in o/r.");
+        let err = run_resolve(
+            &c,
+            ResolveArgs {
+                targets: vec!["55".into()],
+                undo: false,
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert_eq!(err, "No review thread contains comment 55");
+    }
+
+    #[test]
+    fn resolved_falls_back_to_the_request() {
+        let r = resolved("PRRT_a", true, None);
+        assert_eq!(
+            (r.thread_id.as_str(), r.resolved, r.line),
+            ("PRRT_a", true, None)
+        );
+        let t = ResolvedThread {
+            id: Some("PRRT_b".into()),
+            is_resolved: Some(false),
+            path: "a.c".into(),
+            line: None,
+            original_line: Some(4),
+        };
+        let r = resolved("PRRT_a", true, Some(t));
+        assert_eq!(
+            (r.thread_id.as_str(), r.resolved, r.line),
+            ("PRRT_b", false, Some(4))
+        );
+    }
     use crate::api::pulls::Comment;
 
     /// Trimmed from a 2024 CodeRabbit review on zlib-ng/zlib-ng#1813.
