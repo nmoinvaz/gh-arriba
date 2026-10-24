@@ -71,6 +71,7 @@ pub fn delete_artifact(client: &Client, repo: &Repo, id: u64) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mockito::{Matcher, Server};
     use serde_json::json;
 
     #[test]
@@ -91,5 +92,45 @@ mod tests {
         let bare: Artifact =
             serde_json::from_value(json!({"id": 6, "workflow_run": null})).unwrap();
         assert_eq!(bare.run_id(), 0);
+    }
+
+    #[test]
+    fn listings_download_and_delete() {
+        let mut server = Server::new();
+        let run = server
+            .mock("GET", "/repos/o/r/actions/runs/9/artifacts")
+            .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
+            .with_body(r#"{"total_count": 1, "artifacts": [{"id": 1, "name": "logs"}]}"#)
+            .create();
+        let all = server
+            .mock("GET", "/repos/o/r/actions/artifacts")
+            .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
+            .with_body(r#"{"artifacts": [{"id": 1, "expired": true}, {"id": 2}]}"#)
+            .create();
+        let zip = server
+            .mock("GET", "/repos/o/r/actions/artifacts/1/zip")
+            .with_body("PK-bytes")
+            .create();
+        let delete = server
+            .mock("DELETE", "/repos/o/r/actions/artifacts/2")
+            .with_status(204)
+            .create();
+        let client = Client::for_tests(&server.url());
+        let repo = Repo::parse("o/r").unwrap();
+        assert_eq!(run_artifacts(&client, &repo, 9).unwrap()[0].name, "logs");
+        let listed = artifacts(&client, &repo).unwrap();
+        assert_eq!(
+            listed.iter().map(|a| a.expired).collect::<Vec<_>>(),
+            vec![true, false]
+        );
+        let dest =
+            std::env::temp_dir().join(format!("arriba-api-artifact-{}.zip", std::process::id()));
+        assert_eq!(download_artifact(&client, &repo, 1, &dest).unwrap(), 8);
+        assert_eq!(std::fs::read(&dest).unwrap(), b"PK-bytes");
+        std::fs::remove_file(&dest).unwrap();
+        delete_artifact(&client, &repo, 2).unwrap();
+        for m in [run, all, zip, delete] {
+            m.assert();
+        }
     }
 }

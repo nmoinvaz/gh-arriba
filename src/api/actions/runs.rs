@@ -227,7 +227,21 @@ pub fn job_log(client: &Client, repo: &Repo, job_id: u64) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mockito::{Matcher, Server};
     use serde_json::json;
+
+    fn repo() -> Repo {
+        Repo::parse("o/r").unwrap()
+    }
+
+    fn query(pairs: &[(&str, &str)]) -> Matcher {
+        Matcher::AllOf(
+            pairs
+                .iter()
+                .map(|(k, v)| Matcher::UrlEncoded(k.to_string(), v.to_string()))
+                .collect(),
+        )
+    }
 
     #[test]
     fn run_fields_and_starter() {
@@ -267,5 +281,130 @@ mod tests {
         assert_eq!(job.labels, vec!["self-hosted", "linux"]);
         assert!(job.started_at.is_some());
         assert_eq!(job.completed_at, None);
+    }
+
+    #[test]
+    fn run_lookup_maps_missing_to_none() {
+        let mut server = Server::new();
+        server
+            .mock("GET", "/repos/o/r/actions/runs/9")
+            .with_body(r#"{"id": 9, "name": "CI", "status": "completed"}"#)
+            .create();
+        server
+            .mock("GET", "/repos/o/r/actions/runs/10")
+            .with_status(404)
+            .with_body(r#"{"message": "Not Found"}"#)
+            .create();
+        let client = Client::for_tests(&server.url());
+        assert_eq!(workflow_run(&client, &repo(), 9).unwrap().name, "CI");
+        assert_eq!(
+            workflow_run_opt(&client, &repo(), 9).unwrap().unwrap().id,
+            9
+        );
+        assert!(workflow_run_opt(&client, &repo(), 10).unwrap().is_none());
+        assert!(workflow_run(&client, &repo(), 10).is_err());
+    }
+
+    #[test]
+    fn run_listings_send_their_filters() {
+        let mut server = Server::new();
+        let page = r#"{"total_count": 1, "workflow_runs": [{"id": 1, "head_sha": "abc"}]}"#;
+        let commit = server
+            .mock("GET", "/repos/o/r/actions/runs")
+            .match_query(query(&[("head_sha", "abc"), ("per_page", "100")]))
+            .with_body(page)
+            .create();
+        let branch = server
+            .mock("GET", "/repos/o/r/actions/runs")
+            .match_query(Matcher::Regex(
+                "^branch=feat/x%23y&per_page=100$".to_string(),
+            ))
+            .with_body(page)
+            .create();
+        let success = server
+            .mock("GET", "/repos/o/r/actions/runs")
+            .match_query(query(&[("branch", "main"), ("status", "success")]))
+            .with_body(page)
+            .create();
+        let status = server
+            .mock("GET", "/repos/o/r/actions/runs")
+            .match_query(query(&[("status", "queued"), ("per_page", "100")]))
+            .with_body(page)
+            .create();
+        let recent = server
+            .mock("GET", "/repos/o/r/actions/runs")
+            .match_query(Matcher::Exact("per_page=100".to_string()))
+            .with_body(page)
+            .expect(1)
+            .create();
+        let one = server
+            .mock("GET", "/repos/o/r/actions/runs")
+            .match_query(Matcher::Exact("per_page=1".to_string()))
+            .with_body(r#"{"workflow_runs": []}"#)
+            .create();
+        let client = Client::for_tests(&server.url());
+        let r = repo();
+        assert_eq!(commit_runs(&client, &r, "abc").unwrap()[0].head_sha, "abc");
+        assert_eq!(branch_runs(&client, &r, "feat/x#y").unwrap().len(), 1);
+        assert_eq!(
+            successful_branch_runs(&client, &r, "main").unwrap().len(),
+            1
+        );
+        assert_eq!(runs_with_status(&client, &r, "queued").unwrap().len(), 1);
+        // The count is clamped to what one page can hold.
+        assert_eq!(recent_runs(&client, &r, 500).unwrap().len(), 1);
+        assert!(recent_runs(&client, &r, 0).unwrap().is_empty());
+        for m in [commit, branch, success, status, recent, one] {
+            m.assert();
+        }
+    }
+
+    #[test]
+    fn jobs_and_logs() {
+        let mut server = Server::new();
+        server
+            .mock("GET", "/repos/o/r/actions/jobs/1")
+            .with_body(r#"{"id": 1, "name": "Ubuntu", "steps": null}"#)
+            .create();
+        server
+            .mock("GET", "/repos/o/r/actions/jobs/2")
+            .with_status(404)
+            .create();
+        let latest = server
+            .mock("GET", "/repos/o/r/actions/runs/9/jobs")
+            .match_query(query(&[("filter", "latest"), ("per_page", "100")]))
+            .with_body(r#"{"total_count": 2, "jobs": [{"id": 1}, {"id": 2}]}"#)
+            .create();
+        let attempt = server
+            .mock("GET", "/repos/o/r/actions/runs/9/attempts/2/jobs")
+            .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
+            .with_body(
+                r#"{"jobs": [{"id": 3, "steps": [{"name": "Build", "conclusion": "failure"}]}]}"#,
+            )
+            .create();
+        server
+            .mock("GET", "/repos/o/r/actions/jobs/1/logs")
+            .with_body("2026-01-01T00:00:00Z hello\n")
+            .create();
+        let client = Client::for_tests(&server.url());
+        let r = repo();
+        let j = job(&client, &r, 1).unwrap();
+        assert_eq!((j.name.as_str(), j.steps.len()), ("Ubuntu", 0));
+        assert!(job_opt(&client, &r, 2).unwrap().is_none());
+        assert_eq!(job_opt(&client, &r, 1).unwrap().unwrap().id, 1);
+        let ids: Vec<u64> = run_jobs(&client, &r, 9)
+            .unwrap()
+            .iter()
+            .map(|j| j.id)
+            .collect();
+        assert_eq!(ids, vec![1, 2]);
+        let jobs = attempt_jobs(&client, &r, 9, 2).unwrap();
+        assert_eq!(jobs[0].steps[0].conclusion.as_deref(), Some("failure"));
+        assert_eq!(
+            job_log(&client, &r, 1).unwrap(),
+            "2026-01-01T00:00:00Z hello\n"
+        );
+        latest.assert();
+        attempt.assert();
     }
 }

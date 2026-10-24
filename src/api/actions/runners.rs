@@ -70,6 +70,7 @@ pub fn recently_pushed_org_repos(client: &Client, org: &str) -> Result<Vec<OrgRe
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mockito::{Matcher, Server};
     use serde_json::json;
 
     #[test]
@@ -97,5 +98,51 @@ mod tests {
         .unwrap();
         let archived: Vec<bool> = repos.iter().map(|r| r.archived).collect();
         assert_eq!(archived, vec![true, false, false]);
+    }
+
+    #[test]
+    fn runner_and_repo_listings() {
+        let mut server = Server::new();
+        server
+            .mock("GET", "/repos/o/r/actions/runners")
+            .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
+            .with_body(r#"{"total_count": 1, "runners": [{"id": 1, "name": "repo-1"}]}"#)
+            .create();
+        server
+            .mock("GET", "/orgs/o/actions/runners")
+            .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
+            .with_body(r#"{"runners": [{"id": 2, "name": "org-1", "labels": null}]}"#)
+            .create();
+        let all = server
+            .mock("GET", "/orgs/o/repos")
+            .match_query(Matcher::Exact("type=all&per_page=100".into()))
+            .with_body(r#"[{"full_name": "o/a"}, {"full_name": "o/b", "archived": true}]"#)
+            .create();
+        let recent = server
+            .mock("GET", "/orgs/o/repos")
+            .match_query(Matcher::Exact(
+                "type=all&sort=pushed&direction=desc&per_page=100".into(),
+            ))
+            .with_body(r#"[{"full_name": "o/b"}]"#)
+            .create();
+        let client = Client::for_tests(&server.url());
+        let repo = Repo::parse("o/r").unwrap();
+        assert_eq!(repo_runners(&client, &repo).unwrap()[0].name, "repo-1");
+        let org = org_runners(&client, "o").unwrap();
+        assert_eq!((org[0].name.as_str(), org[0].labels.len()), ("org-1", 0));
+        let repos = org_repos(&client, "o").unwrap();
+        assert_eq!(
+            repos
+                .iter()
+                .map(|r| r.full_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["o/a", "o/b"]
+        );
+        assert_eq!(
+            recently_pushed_org_repos(&client, "o").unwrap()[0].full_name,
+            "o/b"
+        );
+        all.assert();
+        recent.assert();
     }
 }
