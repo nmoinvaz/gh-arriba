@@ -1,17 +1,17 @@
 use anyhow::{Context, Result, bail};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeDelta, Utc};
 use serde::Serialize;
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::{Commit, find_runs, resolve_run};
+use super::{Commit, find_runs, resolve_run, watch};
 use crate::cli::ArtifactsArgs;
 use crate::context::{Ctx, Repo, git};
 use crate::github;
-use crate::output;
 use crate::pr::model::fetch_pr;
+use crate::{output, prompt};
 
 /// An artifact uploaded by a workflow run.
 #[derive(Clone, Debug, Serialize)]
@@ -143,6 +143,9 @@ fn latest_success(ctx: &Ctx, args: &ArtifactsArgs) -> Result<((Repo, u64), Vec<A
 }
 
 pub fn run(ctx: &Ctx, args: ArtifactsArgs) -> Result<()> {
+    if args.prune {
+        return prune(ctx, &args);
+    }
     let mut found = Vec::new();
     if args.success {
         found.push(latest_success(ctx, &args)?);
@@ -164,6 +167,164 @@ pub fn run(ctx: &Ctx, args: ArtifactsArgs) -> Result<()> {
         return output::print_json(&all);
     }
     print!("{}", render(&found, Utc::now()));
+    Ok(())
+}
+
+/// Artifacts to delete: those older than `older_than`, past the `keep` newest of each name.
+/// Expired artifacts are left out, since they no longer use storage.
+fn prune_plan(
+    artifacts: &[Artifact],
+    older_than: TimeDelta,
+    keep: usize,
+    now: DateTime<Utc>,
+) -> Vec<&Artifact> {
+    let mut by_name: BTreeMap<(&str, &str), Vec<&Artifact>> = BTreeMap::new();
+    for a in artifacts.iter().filter(|a| !a.expired) {
+        by_name.entry((&a.repo, &a.name)).or_default().push(a);
+    }
+    let mut doomed: Vec<&Artifact> = Vec::new();
+    for group in by_name.values_mut() {
+        group.sort_by_key(|a| std::cmp::Reverse(a.created_at));
+        doomed.extend(
+            group
+                .iter()
+                .skip(keep)
+                .filter(|a| a.created_at.is_some_and(|t| now - t > older_than)),
+        );
+    }
+    doomed.sort_by_key(|a| a.created_at);
+    doomed
+}
+
+#[derive(Serialize)]
+struct Pruned<'a> {
+    repo: String,
+    /// Storage used by the repo's unexpired artifacts before pruning.
+    total_bytes: u64,
+    total_count: usize,
+    freed_bytes: u64,
+    dry_run: bool,
+    artifacts: Vec<&'a Artifact>,
+    /// IDs that failed to delete.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    failed: Vec<u64>,
+}
+
+/// Delete old artifacts across the repo, or only those of the runs the arguments select.
+fn prune(ctx: &Ctx, args: &ArtifactsArgs) -> Result<()> {
+    let scoped =
+        !args.runs.is_empty() || args.sha.is_some() || args.branch.is_some() || args.pr.is_some();
+    let selected = if scoped {
+        select(ctx, args)?
+    } else {
+        Vec::new()
+    };
+    let repo = match selected.first() {
+        Some((r, _)) => r.clone(),
+        None => ctx.repo()?,
+    };
+    if selected.iter().any(|(r, _)| *r != repo) {
+        bail!("--prune works on one repository at a time");
+    }
+    let runs: HashSet<u64> = selected.into_iter().map(|(_, id)| id).collect();
+    let all: Vec<Artifact> = ctx
+        .client
+        .get_all_in(&format!("{}/actions/artifacts", repo.api()), "artifacts")?
+        .iter()
+        .map(|v| parse_artifact(&repo, v))
+        .collect();
+    let live: Vec<&Artifact> = all.iter().filter(|a| !a.expired).collect();
+    let total_bytes: u64 = live.iter().map(|a| a.size).sum();
+
+    let candidates: Vec<Artifact> = all
+        .iter()
+        .filter(|a| !scoped || runs.contains(&a.run_id))
+        .filter(|a| wanted(args, &a.name))
+        .cloned()
+        .collect();
+    let now = Utc::now();
+    let plan = prune_plan(&candidates, args.older_than, args.keep_latest, now);
+    let freed_bytes: u64 = plan.iter().map(|a| a.size).sum();
+    let mut report = Pruned {
+        repo: repo.to_string(),
+        total_bytes,
+        total_count: live.len(),
+        freed_bytes,
+        dry_run: args.dry_run,
+        artifacts: plan,
+        failed: Vec::new(),
+    };
+
+    let summary = format!(
+        "{repo}: {} artifacts use {}. Pruning {} frees {}.",
+        report.total_count,
+        size(total_bytes),
+        report.artifacts.len(),
+        size(freed_bytes)
+    );
+    let say = |line: &str| watch::progress(ctx, line);
+    if report.artifacts.is_empty() {
+        say(&format!("{summary} Nothing is old enough."));
+        return if ctx.json {
+            output::print_json(&report)
+        } else {
+            Ok(())
+        };
+    }
+    let rows: Vec<Vec<String>> = report
+        .artifacts
+        .iter()
+        .map(|a| {
+            vec![
+                a.name.clone(),
+                size(a.size),
+                a.created_at
+                    .map(|t| format!("{} ago", age(now - t)))
+                    .unwrap_or_default(),
+                format!("run {}", a.run_id),
+                a.id.to_string(),
+            ]
+        })
+        .collect();
+    say(&output::table(&rows, "  "));
+    say(&summary);
+
+    if args.dry_run {
+        return if ctx.json {
+            output::print_json(&report)
+        } else {
+            Ok(())
+        };
+    }
+    let question = format!("Delete {} artifacts?", report.artifacts.len());
+    if !prompt::confirm(&question, ctx.yes)? {
+        say("Cancelled");
+        return Ok(());
+    }
+    for a in &report.artifacts {
+        let path = format!("{}/actions/artifacts/{}", repo.api(), a.id);
+        if let Err(e) = ctx.client.delete(&path) {
+            eprintln!("failed to delete {} ({}): {e:#}", a.name, a.id);
+            report.failed.push(a.id);
+        }
+    }
+    report.freed_bytes = report
+        .artifacts
+        .iter()
+        .filter(|a| !report.failed.contains(&a.id))
+        .map(|a| a.size)
+        .sum();
+    if ctx.json {
+        return output::print_json(&report);
+    }
+    println!(
+        "Deleted {} artifacts, freeing {}",
+        report.artifacts.len() - report.failed.len(),
+        size(report.freed_bytes)
+    );
+    if !report.failed.is_empty() {
+        bail!("{} artifacts could not be deleted", report.failed.len());
+    }
     Ok(())
 }
 
@@ -463,6 +624,46 @@ mod tests {
         assert!(extract(&zip, &out).is_err());
         assert!(!dir.join("evil").exists());
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn prune_keeps_newest_of_each_name_and_young_ones() {
+        let now = at("2026-10-24T00:00:00Z");
+        let artifact = |id, name: &str, created: &str, expired| Artifact {
+            id,
+            name: name.to_string(),
+            size: 10,
+            created_at: Some(at(created)),
+            expires_at: None,
+            expired,
+            run_id: id,
+            repo: "o/r".to_string(),
+        };
+        let all = vec![
+            artifact(1, "build", "2026-10-01T00:00:00Z", false),
+            artifact(2, "build", "2026-10-10T00:00:00Z", false),
+            artifact(3, "build", "2026-10-02T00:00:00Z", false),
+            artifact(4, "build", "2026-10-22T00:00:00Z", false),
+            artifact(5, "logs", "2026-09-01T00:00:00Z", false),
+            artifact(6, "logs", "2026-08-01T00:00:00Z", true),
+            artifact(7, "docs", "2026-09-01T00:00:00Z", false),
+        ];
+        let ids = |plan: Vec<&Artifact>| plan.iter().map(|a| a.id).collect::<Vec<_>>();
+        // Build keeps 4 as newest; 2, 3, and 1 are past a week. Logs keeps 5, 6 is expired.
+        assert_eq!(
+            ids(prune_plan(&all, TimeDelta::days(7), 1, now)),
+            vec![1, 3, 2]
+        );
+        // Keeping two of each spares 2 as well.
+        assert_eq!(
+            ids(prune_plan(&all, TimeDelta::days(7), 2, now)),
+            vec![1, 3]
+        );
+        // Keeping none still spares artifacts younger than the cutoff, like 4.
+        assert_eq!(
+            ids(prune_plan(&all, TimeDelta::days(7), 0, now)),
+            vec![7, 5, 1, 3, 2]
+        );
     }
 
     #[test]

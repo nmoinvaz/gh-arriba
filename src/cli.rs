@@ -373,7 +373,7 @@ pub enum RunCommand {
     Watch(WatchArgs),
     /// Dispatch a workflow and print the run it starts
     Dispatch(DispatchArgs),
-    /// List the artifacts of runs with their size and expiry
+    /// List, download, or prune the artifacts of runs
     Artifacts(ArtifactsArgs),
 }
 
@@ -506,6 +506,37 @@ pub struct ArtifactsArgs {
         requires = "download"
     )]
     pub dir: PathBuf,
+
+    /// Delete old artifacts across the repo, or of the selected runs
+    #[arg(long, conflicts_with_all = ["download", "success"])]
+    pub prune: bool,
+
+    /// Prune only artifacts older than this, as in 12h, 7d, or 2w
+    #[arg(long, value_name = "AGE", default_value = "7d", value_parser = parse_age, requires = "prune")]
+    pub older_than: chrono::TimeDelta,
+
+    /// Newest artifacts of each name to keep, however old
+    #[arg(long, value_name = "N", default_value_t = 1, requires = "prune")]
+    pub keep_latest: usize,
+
+    /// Print what --prune would delete without deleting it
+    #[arg(long, requires = "prune")]
+    pub dry_run: bool,
+}
+
+/// Parse an age such as `30m`, `12h`, `7d`, or `2w`.
+fn parse_age(s: &str) -> Result<chrono::TimeDelta, String> {
+    let (number, unit) = s.split_at(s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len()));
+    let n: i64 = number
+        .parse()
+        .map_err(|_| format!("expected a number and a unit such as 7d, got {s:?}"))?;
+    match unit {
+        "m" => Ok(chrono::TimeDelta::minutes(n)),
+        "h" => Ok(chrono::TimeDelta::hours(n)),
+        "d" => Ok(chrono::TimeDelta::days(n)),
+        "w" => Ok(chrono::TimeDelta::weeks(n)),
+        _ => Err(format!("expected a unit of m, h, d, or w, got {s:?}")),
+    }
 }
 
 #[derive(Args)]
@@ -748,4 +779,20 @@ pub enum ConfigCommand {
 /// Parse a `--grep` pattern, reporting a bad one as a usage error.
 fn parse_regex(s: &str) -> Result<regex::Regex, String> {
     regex::Regex::new(s).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ages_take_a_number_and_unit() {
+        assert_eq!(parse_age("30m"), Ok(chrono::TimeDelta::minutes(30)));
+        assert_eq!(parse_age("12h"), Ok(chrono::TimeDelta::hours(12)));
+        assert_eq!(parse_age("7d"), Ok(chrono::TimeDelta::days(7)));
+        assert_eq!(parse_age("2w"), Ok(chrono::TimeDelta::weeks(2)));
+        assert!(parse_age("7").is_err());
+        assert!(parse_age("d").is_err());
+        assert!(parse_age("7y").is_err());
+    }
 }
