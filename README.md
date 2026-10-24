@@ -61,6 +61,7 @@ gh arriba [options] <command>
 | Command | Description |
 |---------|-------------|
 | `run logs <RUN_OR_JOB>` | Download job logs to files for searching, picking jobs by name with `--job` and printing error lines with `--errors` |
+| `run watch <RUN>...` | Follow runs until their jobs finish, failing if any job fails |
 | `release` | Dispatch the repo's release workflow with a version bump, previewing with `--dry-run` |
 
 ### Dependabot
@@ -155,6 +156,12 @@ Download only the failed job logs from a run and search them:
 ```
 gh arriba run logs https://github.com/owner/repo/actions/runs/123456 --failed -o logs
 grep -rn "error:" logs
+```
+
+Follow a run and print each job as it finishes, exiting non-zero if any fails:
+
+```
+gh arriba run watch https://github.com/owner/repo/actions/runs/123456
 ```
 
 Cut a minor release through the repo's Release workflow:

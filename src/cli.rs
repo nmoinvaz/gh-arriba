@@ -30,7 +30,7 @@ pub enum Command {
     /// Review threads, pending reviews, retries, and rebases for pull requests
     #[command(subcommand)]
     Pr(PrCommand),
-    /// Download logs from workflow runs
+    /// Watch workflow runs and download their logs
     #[command(subcommand)]
     Run(RunCommand),
     /// Dispatch the repo's release workflow with a version bump
@@ -373,6 +373,8 @@ pub struct LabelsArgs {
 pub enum RunCommand {
     /// Download job logs to files for searching
     Logs(LogsArgs),
+    /// Follow runs until their jobs finish, failing if any job fails
+    Watch(WatchArgs),
 }
 
 #[derive(Args)]
@@ -396,6 +398,27 @@ pub struct LogsArgs {
     /// Print each job's error lines after saving its log
     #[arg(long)]
     pub errors: bool,
+}
+
+#[derive(Args)]
+pub struct WatchArgs {
+    /// Run IDs, job IDs, or Actions URLs
+    #[arg(value_name = "RUN", required = true)]
+    pub runs: Vec<String>,
+
+    #[command(flatten)]
+    pub wait: WaitArgs,
+}
+
+#[derive(Args)]
+pub struct WaitArgs {
+    /// Seconds between polls
+    #[arg(long, value_name = "SECS", default_value_t = 20, value_parser = clap::value_parser!(u64).range(1..))]
+    pub interval: u64,
+
+    /// Minutes to wait before giving up
+    #[arg(long, value_name = "MINS", default_value_t = 60)]
+    pub timeout: u64,
 }
 
 // -------------------------------------------------------------------------
