@@ -12,7 +12,7 @@ use crate::cli::{DispatchArgs, LogsArgs, RunCommand, WatchArgs};
 use crate::context::{Ctx, Repo, git};
 use crate::github::{encode_path, is_failed};
 use crate::log::{self, Excerpt};
-use crate::{output, workflow};
+use crate::{output, parallel, workflow};
 
 pub fn run(ctx: &Ctx, cmd: RunCommand) -> Result<()> {
     match cmd {
@@ -177,68 +177,56 @@ fn logs(ctx: &Ctx, args: LogsArgs) -> Result<()> {
     let refresh = args.refresh;
     let mut downloaded = Vec::new();
     // Each log is a redirect to blob storage, so fetch a few at a time.
-    for batch in jobs.chunks(PARALLEL_DOWNLOADS) {
-        let results: Vec<(&Value, Result<(PathBuf, bool)>)> = std::thread::scope(|s| {
-            let handles: Vec<_> = batch
-                .iter()
-                .map(|job| {
-                    let (repo, dir) = (&repo, &dir);
-                    s.spawn(move || {
-                        let id = job["id"].as_u64().unwrap_or(0);
-                        let name = job["name"].as_str().unwrap_or("job");
-                        // A running job's log is still growing, so only finished ones are reused.
-                        let reuse = !refresh && job["status"].as_str() == Some("completed");
-                        (job, download(ctx, repo, id, dir, name, reuse))
-                    })
-                })
-                .collect();
-            handles.into_iter().map(|h| h.join().unwrap()).collect()
-        });
-
-        for (job, result) in results {
-            let id = job["id"].as_u64().unwrap_or(0);
-            let name = job["name"].as_str().unwrap_or("job").to_string();
-            let conclusion = job["conclusion"].as_str().map(str::to_string);
-            match result {
-                Ok((path, cached)) => {
-                    let excerpt = if args.errors || args.grep.is_some() {
-                        let text = fs::read_to_string(&path)
-                            .with_context(|| format!("Failed to read {}", path.display()))?;
-                        Some(log::select(
-                            &text,
-                            args.grep.as_ref(),
-                            log::CONTEXT,
-                            log::MAX,
-                        ))
-                    } else {
-                        None
-                    };
-                    if !ctx.json {
-                        let label = conclusion.as_deref().unwrap_or("running");
-                        let note = if cached { " (saved earlier)" } else { "" };
-                        println!("{label:<10} {}{note}", path.display());
-                        match &excerpt {
-                            Some(x) if x.blocks.is_empty() => {
-                                println!(
-                                    "  {}",
-                                    log::nothing_found(args.grep.as_ref().map(|re| re.as_str()))
-                                )
-                            }
-                            Some(x) => print!("{}", log::render(x, "  ")),
-                            None => {}
+    let results = parallel::map(&jobs, |job| {
+        let id = job["id"].as_u64().unwrap_or(0);
+        let name = job["name"].as_str().unwrap_or("job");
+        // A running job's log is still growing, so only finished ones are reused.
+        let reuse = !refresh && job["status"].as_str() == Some("completed");
+        download(ctx, &repo, id, &dir, name, reuse)
+    });
+    for (job, result) in jobs.iter().zip(results) {
+        let id = job["id"].as_u64().unwrap_or(0);
+        let name = job["name"].as_str().unwrap_or("job").to_string();
+        let conclusion = job["conclusion"].as_str().map(str::to_string);
+        match result {
+            Ok((path, cached)) => {
+                let excerpt = if args.errors || args.grep.is_some() {
+                    let text = fs::read_to_string(&path)
+                        .with_context(|| format!("Failed to read {}", path.display()))?;
+                    Some(log::select(
+                        &text,
+                        args.grep.as_ref(),
+                        log::CONTEXT,
+                        log::MAX,
+                    ))
+                } else {
+                    None
+                };
+                if !ctx.json {
+                    let label = conclusion.as_deref().unwrap_or("running");
+                    let note = if cached { " (saved earlier)" } else { "" };
+                    println!("{label:<10} {}{note}", path.display());
+                    match &excerpt {
+                        Some(x) if x.blocks.is_empty() => {
+                            println!(
+                                "  {}",
+                                log::nothing_found(args.grep.as_ref().map(|re| re.as_str()))
+                            )
                         }
+                        Some(x) => print!("{}", log::render(x, "  ")),
+                        None => {}
                     }
-                    downloaded.push(Downloaded {
-                        job_id: id,
-                        name,
-                        conclusion,
-                        path,
-                        cached,
-                        excerpt,
-                    });
                 }
-                Err(e) => eprintln!("warning: skipped {name} ({id}): {}", short_error(&e)),
+                downloaded.push(Downloaded {
+                    job_id: id,
+                    name,
+                    conclusion,
+                    path,
+                    cached,
+                    excerpt,
+                });
             }
+            Err(e) => eprintln!("warning: skipped {name} ({id}): {}", short_error(&e)),
         }
     }
 
@@ -247,9 +235,6 @@ fn logs(ctx: &Ctx, args: LogsArgs) -> Result<()> {
     }
     Ok(())
 }
-
-/// Log downloads in flight at once.
-const PARALLEL_DOWNLOADS: usize = 8;
 
 /// One-line reason for a failed download. Jobs cancelled before they start have no log blob.
 pub(crate) fn short_error(e: &anyhow::Error) -> String {
