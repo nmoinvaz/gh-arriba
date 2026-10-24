@@ -18,10 +18,6 @@ use crate::prompt;
 /// Body lines shown per comment in human output.
 const BODY_LINES: usize = 12;
 
-// -------------------------------------------------------------------------
-//  threads
-// -------------------------------------------------------------------------
-
 pub fn run_threads(ctx: &Ctx, args: ThreadsArgs) -> Result<()> {
     let pr = ctx.pr(args.pr.as_deref())?;
     let info = fetch_pr(&ctx.client, &pr)?;
@@ -242,10 +238,6 @@ pub fn clean_body(body: &str) -> String {
     }
     out.join("\n").trim().to_string()
 }
-
-// -------------------------------------------------------------------------
-//  review-body findings
-// -------------------------------------------------------------------------
 
 /// A CodeRabbit finding that lives in a review body with no thread to reply to or resolve.
 #[derive(Clone, Debug, Serialize)]
@@ -492,10 +484,6 @@ fn print_finding(f: &Finding) {
     );
 }
 
-// -------------------------------------------------------------------------
-//  reply
-// -------------------------------------------------------------------------
-
 pub fn run_reply(ctx: &Ctx, args: ReplyArgs) -> Result<()> {
     let body = prompt::read_body(args.body.as_deref(), "reply")?;
 
@@ -557,10 +545,6 @@ struct NewComment {
     id: u64,
     url: String,
 }
-
-// -------------------------------------------------------------------------
-//  resolve
-// -------------------------------------------------------------------------
 
 pub fn run_resolve(ctx: &Ctx, args: ResolveArgs) -> Result<()> {
     let resolve = !args.undo;
@@ -636,10 +620,6 @@ fn print_resolved(r: &Resolved) {
     let line = r.line.map(|l| format!(":{l}")).unwrap_or_default();
     println!("{verb} {} ({}{line})", r.thread_id, r.path);
 }
-
-// -------------------------------------------------------------------------
-//  shared
-// -------------------------------------------------------------------------
 
 /// Database ID of a review comment, or None for a thread node ID.
 /// A review comment named by ID or `#discussion_r` link, with the link's repo, or None for a

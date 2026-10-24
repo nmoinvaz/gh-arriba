@@ -16,10 +16,6 @@ pub fn run(ctx: &Ctx, cmd: CommentCommand) -> Result<()> {
     }
 }
 
-// -------------------------------------------------------------------------
-//  targets
-// -------------------------------------------------------------------------
-
 /// Which endpoint a comment lives under.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -166,10 +162,6 @@ pub fn find(ctx: &Ctx, target: &Target) -> Result<Found> {
     }
 }
 
-// -------------------------------------------------------------------------
-//  show
-// -------------------------------------------------------------------------
-
 /// One comment in a shape shared by all three kinds.
 #[derive(Debug, Serialize)]
 struct Shown {
@@ -314,10 +306,6 @@ fn show(ctx: &Ctx, args: CommentShowArgs) -> Result<()> {
     print!("{}", render(&shown));
     Ok(())
 }
-
-// -------------------------------------------------------------------------
-//  edit
-// -------------------------------------------------------------------------
 
 /// Method and path that replace a found comment's body.
 fn edit_endpoint(found: &Found) -> Result<(&'static str, String)> {

@@ -19,10 +19,6 @@ pub fn run(ctx: &Ctx, cmd: ReviewCommand) -> Result<()> {
     }
 }
 
-// -------------------------------------------------------------------------
-//  lines
-// -------------------------------------------------------------------------
-
 /// Inclusive line range, serialized as `[start, end]`.
 pub type Range = (u64, u64);
 
@@ -120,10 +116,6 @@ fn lines(ctx: &Ctx, args: PrArg) -> Result<()> {
     Ok(())
 }
 
-// -------------------------------------------------------------------------
-//  pending review lookup
-// -------------------------------------------------------------------------
-
 #[derive(Debug, Serialize)]
 struct PendingComment {
     id: u64,
@@ -218,10 +210,6 @@ fn location(path: &str, start: Option<u64>, line: Option<u64>) -> String {
         _ => path.to_string(),
     }
 }
-
-// -------------------------------------------------------------------------
-//  add
-// -------------------------------------------------------------------------
 
 /// Parse `PATH:LINE` or `PATH:START-END` into the path and an inclusive range.
 fn parse_location(s: &str) -> Result<(String, Range)> {
@@ -368,10 +356,6 @@ fn add(ctx: &Ctx, args: ReviewAddArgs) -> Result<()> {
     Ok(())
 }
 
-// -------------------------------------------------------------------------
-//  show
-// -------------------------------------------------------------------------
-
 fn show(ctx: &Ctx, args: PrArg) -> Result<()> {
     let pr = ctx.pr(args.pr.as_deref())?;
     let state = fetch_pending(&ctx.client, &pr)?;
@@ -408,10 +392,6 @@ fn show(ctx: &Ctx, args: PrArg) -> Result<()> {
     }
     Ok(())
 }
-
-// -------------------------------------------------------------------------
-//  submit
-// -------------------------------------------------------------------------
 
 fn event_name(event: ReviewEvent) -> &'static str {
     match event {
@@ -527,10 +507,6 @@ fn submit(ctx: &Ctx, args: ReviewSubmitArgs) -> Result<()> {
     );
     Ok(())
 }
-
-// -------------------------------------------------------------------------
-//  discard
-// -------------------------------------------------------------------------
 
 const DELETE_REVIEW: &str = r#"
 mutation($id: ID!) {

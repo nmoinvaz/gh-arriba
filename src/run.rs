@@ -267,10 +267,6 @@ pub(crate) fn download(
     Ok(path)
 }
 
-// -------------------------------------------------------------------------
-//  watch
-// -------------------------------------------------------------------------
-
 fn watch_runs(ctx: &Ctx, args: WatchArgs) -> Result<()> {
     let wait: watch::Wait = (&args.wait).into();
     let runs = if args.runs.is_empty() {
@@ -431,10 +427,6 @@ fn resolve_run(ctx: &Ctx, s: &str) -> Result<(Repo, u64)> {
     };
     Ok((repo, id))
 }
-
-// -------------------------------------------------------------------------
-//  dispatch
-// -------------------------------------------------------------------------
 
 #[derive(Serialize)]
 struct Dispatched {

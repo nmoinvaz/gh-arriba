@@ -44,10 +44,6 @@ pub enum Command {
     Config(ConfigArgs),
 }
 
-// -------------------------------------------------------------------------
-//  pr
-// -------------------------------------------------------------------------
-
 #[derive(Subcommand)]
 pub enum PrCommand {
     /// List unresolved review threads from humans and bots
@@ -365,10 +361,6 @@ pub struct LabelsArgs {
     pub suggest: bool,
 }
 
-// -------------------------------------------------------------------------
-//  run
-// -------------------------------------------------------------------------
-
 #[derive(Subcommand)]
 pub enum RunCommand {
     /// Download job logs to files for searching
@@ -460,10 +452,6 @@ pub struct WaitArgs {
     pub job: Option<String>,
 }
 
-// -------------------------------------------------------------------------
-//  release
-// -------------------------------------------------------------------------
-
 #[derive(Args)]
 pub struct ReleaseArgs {
     /// Version part to increment
@@ -501,10 +489,6 @@ pub enum Bump {
     Minor,
     Major,
 }
-
-// -------------------------------------------------------------------------
-//  dependabot
-// -------------------------------------------------------------------------
 
 #[derive(Subcommand)]
 pub enum DependabotCommand {
@@ -606,10 +590,6 @@ pub enum DismissReason {
     TolerableRisk,
 }
 
-// -------------------------------------------------------------------------
-//  runners
-// -------------------------------------------------------------------------
-
 #[derive(Args)]
 pub struct RunnersArgs {
     /// Runners registered to an organization instead of the repo
@@ -632,10 +612,6 @@ pub struct RunnersArgs {
     #[arg(long, default_value_t = 10, value_name = "N")]
     pub repos: usize,
 }
-
-// -------------------------------------------------------------------------
-//  config
-// -------------------------------------------------------------------------
 
 #[derive(Args)]
 pub struct ConfigArgs {

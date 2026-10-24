@@ -11,10 +11,6 @@ use crate::dependabot::{Scope, table};
 use crate::github::Client;
 use crate::output;
 
-// -------------------------------------------------------------------------
-//  runners
-// -------------------------------------------------------------------------
-
 /// A self-hosted runner as the runners API reports it.
 #[derive(Debug, PartialEq, Serialize)]
 struct Runner {
@@ -83,10 +79,6 @@ fn access_hint(scope: &Scope) -> String {
         Scope::Repo(r) => format!("Listing runners for {r} needs admin access to the repo."),
     }
 }
-
-// -------------------------------------------------------------------------
-//  jobs
-// -------------------------------------------------------------------------
 
 /// A workflow job, usually one running or waiting for a runner.
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -229,10 +221,6 @@ fn assign(runners: &mut [Runner], jobs: Vec<Job>) -> Vec<Job> {
     queued.sort_by_key(|j| j.created_at);
     queued
 }
-
-// -------------------------------------------------------------------------
-//  inferred from jobs
-// -------------------------------------------------------------------------
 
 /// A workflow run whose jobs show which runners picked them up.
 struct RunRef {
@@ -400,10 +388,6 @@ fn render_inferred(report: &InferredReport, runs: usize, now: DateTime<Utc>) -> 
     out.push_str(&render_queue(&report.queued, now));
     out
 }
-
-// -------------------------------------------------------------------------
-//  run
-// -------------------------------------------------------------------------
 
 #[derive(Serialize)]
 struct Report {

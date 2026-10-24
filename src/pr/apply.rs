@@ -182,10 +182,6 @@ fn finish(ctx: &Ctx, dry_run: bool, applied: Vec<Applied>, skipped: Vec<Skipped>
     Ok(())
 }
 
-// -------------------------------------------------------------------------
-//  selection
-// -------------------------------------------------------------------------
-
 /// Turn threads into suggestions. Without filters only unresolved, current threads with a
 /// suggestion count, and others are passed over silently. Named threads always get a reason.
 fn select(threads: &[Thread], filters: &[String]) -> (Vec<Suggestion>, Vec<Skipped>) {
@@ -283,10 +279,6 @@ fn fits(s: &Suggestion, len: usize, accepted: &[Suggestion]) -> std::result::Res
     Ok(())
 }
 
-// -------------------------------------------------------------------------
-//  suggestion parsing
-// -------------------------------------------------------------------------
-
 /// Contents of every closed ```suggestion fence in a comment body, one entry per line.
 fn parse_suggestions(body: &str) -> Vec<Vec<String>> {
     let mut blocks = Vec::new();
@@ -347,10 +339,6 @@ fn strip_indent(line: &str, n: usize) -> &str {
     let spaces = line.len() - line.trim_start_matches(' ').len();
     &line[spaces.min(n)..]
 }
-
-// -------------------------------------------------------------------------
-//  file editing
-// -------------------------------------------------------------------------
 
 /// A line's text and the ending that followed it, empty for a final line without a newline.
 #[derive(Clone, Debug, PartialEq)]
@@ -442,10 +430,6 @@ fn span(path: &str, start: u64, end: u64) -> String {
         format!("{path}:{start}-{end}")
     }
 }
-
-// -------------------------------------------------------------------------
-//  checkout checks
-// -------------------------------------------------------------------------
 
 /// Fail unless HEAD is the PR head and no target file has local changes.
 fn check_worktree(root: &Path, head_oid: &str, edits: &[Suggestion], number: u64) -> Result<()> {

@@ -46,10 +46,6 @@ impl Alert {
     }
 }
 
-// -------------------------------------------------------------------------
-//  alerts
-// -------------------------------------------------------------------------
-
 pub fn run_alerts(ctx: &Ctx, args: DependabotAlertsArgs) -> Result<()> {
     let scope = Scope::new(ctx, args.org)?;
     let mut alerts = fetch_alerts(&ctx.client, &scope)?;
@@ -225,10 +221,6 @@ fn severity_rank(severity: &str) -> u8 {
         _ => 4,
     }
 }
-
-// -------------------------------------------------------------------------
-//  dismiss
-// -------------------------------------------------------------------------
 
 pub fn run_dismiss(ctx: &Ctx, args: DependabotDismissArgs) -> Result<()> {
     let repo = ctx.repo()?;
