@@ -622,7 +622,6 @@ fn print_resolved(r: &Resolved) {
     println!("{verb} {} ({}{line})", r.thread_id, r.path);
 }
 
-/// Database ID of a review comment, or None for a thread node ID.
 /// A review comment named by ID or `#discussion_r` link, with the link's repo, or None for a
 /// PRRT_ thread ID.
 fn comment_id(target: &str) -> Result<Option<(Option<Repo>, u64)>> {
@@ -661,10 +660,7 @@ fn lookup_comment(ctx: &Ctx, repo: Option<Repo>, id: u64) -> Result<CommentRef> 
         };
         format!("Review comment {id} not found in {repo}.{hint}")
     })?;
-    let number = comment["pull_request_url"]
-        .as_str()
-        .and_then(|u| u.rsplit('/').next())
-        .and_then(|n| n.parse().ok())
+    let number = comment::trailing_number(&comment["pull_request_url"])
         .with_context(|| format!("Review comment {id} has no pull request"))?;
     Ok(CommentRef {
         pr: PrRef { repo, number },

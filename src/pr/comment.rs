@@ -195,7 +195,7 @@ struct Shown {
 }
 
 /// Last path segment of an API URL as a number, as in `.../pulls/42`.
-fn trailing_number(url: &Value) -> Option<u64> {
+pub(super) fn trailing_number(url: &Value) -> Option<u64> {
     url.as_str()?.rsplit('/').next()?.parse().ok()
 }
 
