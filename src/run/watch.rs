@@ -5,9 +5,9 @@ use serde_json::Value;
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
+use crate::api::json::{opt_time_of, str_of};
 use crate::api::{Repo, is_failed};
 use crate::context::Ctx;
-use crate::json::{opt_time_of, str_of};
 use crate::output;
 
 /// How often to poll, how long to keep at it, and which jobs to wait for.

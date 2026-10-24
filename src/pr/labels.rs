@@ -3,10 +3,10 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use std::collections::HashSet;
 
+use crate::api::json::str_of;
 use crate::api::{Client, PrRef, Repo, encode_segment};
 use crate::cli::LabelsArgs;
 use crate::context::Ctx;
-use crate::json::str_of;
 use crate::output;
 use crate::pr::model::fetch_pr;
 

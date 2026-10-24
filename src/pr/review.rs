@@ -2,10 +2,10 @@ use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use serde_json::{Value, json};
 
+use crate::api::json::{login_of, str_of};
 use crate::api::{Client, PrRef};
 use crate::cli::{PrArg, ReviewAddArgs, ReviewCommand, ReviewEvent, ReviewSubmitArgs, Side};
 use crate::context::Ctx;
-use crate::json::{login_of, str_of};
 use crate::output;
 use crate::pr::model::vars;
 use crate::prompt;

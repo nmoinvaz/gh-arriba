@@ -5,10 +5,10 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use super::watch;
+use crate::api::json::{opt_time_of, str_of};
 use crate::api::{self, Repo};
 use crate::cli::CachesArgs;
 use crate::context::Ctx;
-use crate::json::{opt_time_of, str_of};
 use crate::{output, parallel, prompt};
 
 /// GitHub's default cache limit per repository. Past it, the least recently used caches are evicted.

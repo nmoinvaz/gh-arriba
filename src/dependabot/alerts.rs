@@ -6,9 +6,9 @@ use std::collections::HashSet;
 
 use super::{Scope, fetch_light, parse_title};
 use crate::api::Client;
+use crate::api::json::str_of;
 use crate::cli::{DependabotAlertsArgs, DependabotDismissArgs};
 use crate::context::Ctx;
-use crate::json::str_of;
 use crate::output::print_json;
 use crate::output::table;
 use crate::prompt;

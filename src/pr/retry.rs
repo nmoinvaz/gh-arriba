@@ -3,10 +3,10 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
+use crate::api::json::str_of;
 use crate::api::{Client, PrRef, Repo, is_failed, parse_pr_ref};
 use crate::cli::RetryArgs;
 use crate::context::{Ctx, git};
-use crate::json::str_of;
 use crate::output;
 use crate::pr::rollup::{self, CheckRun, latest};
 
