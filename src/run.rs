@@ -8,15 +8,16 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use crate::cli::{LogsArgs, RunCommand, WatchArgs};
+use crate::cli::{DispatchArgs, LogsArgs, RunCommand, WatchArgs};
 use crate::context::{Ctx, Repo, git};
 use crate::log::{self, Excerpt};
-use crate::output;
+use crate::{output, workflow};
 
 pub fn run(ctx: &Ctx, cmd: RunCommand) -> Result<()> {
     match cmd {
         RunCommand::Logs(args) => logs(ctx, args),
         RunCommand::Watch(args) => watch_runs(ctx, args),
+        RunCommand::Dispatch(args) => dispatch(ctx, args),
     }
 }
 
@@ -429,6 +430,78 @@ fn resolve_run(ctx: &Ctx, s: &str) -> Result<(Repo, u64)> {
         }
     };
     Ok((repo, id))
+}
+
+// -------------------------------------------------------------------------
+//  dispatch
+// -------------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct Dispatched {
+    repo: String,
+    workflow: String,
+    #[serde(rename = "ref")]
+    git_ref: String,
+    run: Option<workflow::NewRun>,
+}
+
+fn dispatch(ctx: &Ctx, args: DispatchArgs) -> Result<()> {
+    let repo = ctx.repo()?;
+    let client = &ctx.client;
+    let workflows = workflow::list(client, &repo)?;
+    let wf = workflow::find(&workflows, &args.workflow)?;
+    let git_ref = match args.git_ref {
+        Some(r) => r,
+        None => client.get(&repo.api())?["default_branch"]
+            .as_str()
+            .context("Repository has no default branch")?
+            .to_string(),
+    };
+
+    let inputs = workflow::inputs_at(client, &repo, wf, &git_ref)?;
+    let fields = workflow::parse_fields(&args.fields, &inputs)?;
+    let missing = workflow::missing(&inputs, &fields);
+    if !missing.is_empty() {
+        anyhow::bail!(
+            "Required inputs have no value: {}. Set them with -f KEY=VALUE.",
+            missing.join(", ")
+        );
+    }
+    let sent = fields
+        .into_iter()
+        .map(|(k, v)| (k, Value::String(v)))
+        .collect();
+    let run = workflow::dispatch(client, &repo, wf, &git_ref, sent)?;
+
+    let line = match &run {
+        Some(r) => format!(
+            "Dispatched {} on {git_ref}: run {} {}",
+            wf.name, r.id, r.url
+        ),
+        None => format!(
+            "Dispatched {} on {git_ref}. The run is not visible yet, see https://github.com/{repo}/actions/workflows/{}",
+            wf.name,
+            wf.file()
+        ),
+    };
+    if !args.watch {
+        if ctx.json {
+            return output::print_json(&Dispatched {
+                repo: repo.to_string(),
+                workflow: wf.name.clone(),
+                git_ref,
+                run,
+            });
+        }
+        println!("{line}");
+        return Ok(());
+    }
+
+    // The watch summary is the JSON document, so the dispatch line goes with the progress.
+    watch::progress(ctx, &line);
+    let run = run.context("Can't watch, the dispatched run did not appear in time")?;
+    let states = watch::watch(ctx, &[(repo, run.id)], &(&args.wait).into())?;
+    watch::report(ctx, &states)
 }
 
 #[cfg(test)]

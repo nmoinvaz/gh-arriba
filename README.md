@@ -60,6 +60,7 @@ gh arriba [options] <command>
 |---------|-------------|
 | `run logs <RUN_OR_JOB>` | Download job logs to files for searching, picking jobs by name with `--job` and printing error lines with `--errors` |
 | `run watch [RUN]...` | Follow runs until their jobs finish, by default every run for the local HEAD |
+| `run dispatch <WORKFLOW>` | Dispatch any workflow with `-f` inputs, printing its run and following it with `--watch` |
 | `release` | Dispatch the repo's release workflow with a version bump, previewing with `--dry-run` |
 
 ### Dependabot
@@ -153,6 +154,12 @@ git push && gh arriba run watch
 ```
 
 Add `--job "Export Check"` to return as soon as the matching jobs finish, ignoring the rest.
+
+Dispatch a workflow on a branch and follow the run it starts:
+
+```
+gh arriba run dispatch release.yaml --ref feature/self-update -f version=99.0.16 --watch
+```
 
 Cut a minor release through the repo's Release workflow:
 

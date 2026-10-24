@@ -1,15 +1,12 @@
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
-use serde_json::{Value, json};
-use serde_yaml::Value as Yaml;
-use std::collections::HashSet;
+use serde_json::Value;
 use std::process::Command;
-use std::time::Duration;
 
 use crate::cli::{Bump, ReleaseArgs};
 use crate::context::{Ctx, Repo};
 use crate::github::Client;
-use crate::workflow::{self, Workflow};
+use crate::workflow::{self, Input, Workflow};
 use crate::{output, prompt};
 
 // -------------------------------------------------------------------------
@@ -110,81 +107,6 @@ fn pick_workflow<'a>(workflows: &'a [Workflow], name: Option<&str>) -> Result<&'
     workflow::one_of(partial, workflows, "mentions release")
 }
 
-#[derive(Clone, Debug, PartialEq)]
-struct Input {
-    name: String,
-    description: String,
-    required: bool,
-    default: Option<String>,
-    kind: String,
-    options: Vec<String>,
-}
-
-/// Inputs of the `workflow_dispatch` trigger, in file order.
-fn dispatch_inputs(yaml: &str) -> Result<Vec<Input>> {
-    let doc: Yaml = serde_yaml::from_str(yaml).context("Failed to parse workflow YAML")?;
-    // YAML 1.1 parsers read a bare `on` key as true, so accept either spelling.
-    let on = doc
-        .get("on")
-        .or_else(|| doc.as_mapping().and_then(|m| m.get(Yaml::Bool(true))))
-        .context("Workflow has no `on` triggers")?;
-    let dispatch = match on {
-        Yaml::String(s) if s == "workflow_dispatch" => return Ok(Vec::new()),
-        Yaml::Sequence(items)
-            if items
-                .iter()
-                .any(|i| i.as_str() == Some("workflow_dispatch")) =>
-        {
-            return Ok(Vec::new());
-        }
-        Yaml::Mapping(m) => m
-            .get("workflow_dispatch")
-            .context("Workflow has no workflow_dispatch trigger")?,
-        _ => bail!("Workflow has no workflow_dispatch trigger"),
-    };
-    let Some(inputs) = dispatch.get("inputs").and_then(Yaml::as_mapping) else {
-        return Ok(Vec::new());
-    };
-    Ok(inputs
-        .iter()
-        .filter_map(|(name, spec)| {
-            Some(Input {
-                name: name.as_str()?.to_string(),
-                description: spec
-                    .get("description")
-                    .and_then(Yaml::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
-                required: spec
-                    .get("required")
-                    .and_then(Yaml::as_bool)
-                    .unwrap_or(false),
-                default: spec.get("default").and_then(scalar),
-                kind: spec
-                    .get("type")
-                    .and_then(Yaml::as_str)
-                    .unwrap_or("string")
-                    .to_string(),
-                options: spec
-                    .get("options")
-                    .and_then(Yaml::as_sequence)
-                    .map(|s| s.iter().filter_map(scalar).collect())
-                    .unwrap_or_default(),
-            })
-        })
-        .collect())
-}
-
-/// A YAML scalar as the string the dispatch API expects.
-fn scalar(v: &Yaml) -> Option<String> {
-    match v {
-        Yaml::String(s) => Some(s.clone()),
-        Yaml::Bool(b) => Some(b.to_string()),
-        Yaml::Number(n) => Some(n.to_string()),
-        _ => None,
-    }
-}
-
 /// The input that carries the version, by exact name, then by name containing version or tag.
 fn version_input(inputs: &[Input]) -> Result<&Input> {
     if let Some(i) = inputs
@@ -262,25 +184,14 @@ fn parse_fields(
     inputs: &[Input],
     version: &str,
 ) -> Result<Vec<(String, String)>> {
-    let mut parsed = Vec::new();
-    for f in fields {
-        let (key, value) = f
-            .split_once('=')
-            .with_context(|| format!("Expected KEY=VALUE, got {f:?}"))?;
-        if key == version {
-            bail!("Set the version with --version, not -f {key}=...");
-        }
-        // GitHub rejects the whole dispatch when it gets an input the workflow does not declare.
-        if !inputs.iter().any(|i| i.name == key) {
-            let names: Vec<&str> = inputs.iter().map(|i| i.name.as_str()).collect();
-            bail!(
-                "{key} is not an input of this workflow. Inputs: {}",
-                names.join(", ")
-            );
-        }
-        parsed.push((key.to_string(), value.to_string()));
+    if let Some((key, _)) = fields
+        .iter()
+        .filter_map(|f| f.split_once('='))
+        .find(|(k, _)| *k == version)
+    {
+        bail!("Set the version with --version, not -f {key}=...");
     }
-    Ok(parsed)
+    workflow::parse_fields(fields, inputs)
 }
 
 /// Resolve every declared input's value, prompting for required ones that have none. A dry run
@@ -410,13 +321,7 @@ pub fn run(ctx: &Ctx, args: ReleaseArgs) -> Result<()> {
     let workflows = workflow::list(client, &repo)?;
     let workflow = pick_workflow(&workflows, args.workflow.as_deref())?;
 
-    let yaml = client.get_raw(&format!(
-        "{}/contents/{}?ref={git_ref}",
-        repo.api(),
-        workflow.path
-    ))?;
-    let inputs = dispatch_inputs(&yaml)
-        .map_err(|e| anyhow::anyhow!("{} ({}): {e}", workflow.name, workflow.path))?;
+    let inputs = workflow::inputs_at(client, &repo, workflow, &git_ref)?;
     let version_name = version_input(&inputs)?.name.clone();
     let fields = parse_fields(&args.fields, &inputs, &version_name)?;
     let resolved = resolve_inputs(&inputs, &version_name, &version, &fields, args.dry_run)?;
@@ -453,49 +358,15 @@ pub fn run(ctx: &Ctx, args: ReleaseArgs) -> Result<()> {
         return Ok(());
     }
 
-    let runs_path = format!(
-        "{}/actions/workflows/{}/runs?event=workflow_dispatch&per_page=10",
-        repo.api(),
-        workflow.id
-    );
-    // Runs that existed before dispatching, so the new one can be told apart without clocks.
-    let before: HashSet<u64> = run_ids(&client.get(&runs_path)?);
-
     let sent: serde_json::Map<String, Value> = plan
         .inputs
         .iter()
         .filter(|i| i.sent())
         .filter_map(|i| Some((i.name.clone(), Value::String(i.value.clone()?))))
         .collect();
-    client.post(
-        &format!(
-            "{}/actions/workflows/{}/dispatches",
-            repo.api(),
-            workflow.id
-        ),
-        &json!({ "ref": plan.git_ref, "inputs": sent }),
-    )?;
-
-    let viewer = client.viewer()?.to_string();
-    for _ in 0..10 {
-        std::thread::sleep(Duration::from_millis(1500));
-        let runs = client.get(&runs_path)?;
-        let new_run = runs["workflow_runs"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .find(|r| {
-                let id = r["id"].as_u64().unwrap_or(0);
-                let actor = r["triggering_actor"]["login"]
-                    .as_str()
-                    .or(r["actor"]["login"].as_str());
-                !before.contains(&id) && actor == Some(viewer.as_str())
-            });
-        if let Some(r) = new_run {
-            plan.run_id = r["id"].as_u64();
-            plan.run_url = r["html_url"].as_str().map(str::to_string);
-            break;
-        }
+    if let Some(run) = workflow::dispatch(client, &repo, workflow, &plan.git_ref, sent)? {
+        plan.run_id = Some(run.id);
+        plan.run_url = Some(run.url);
     }
 
     if ctx.json {
@@ -535,18 +406,10 @@ pub fn run(ctx: &Ctx, args: ReleaseArgs) -> Result<()> {
     Ok(())
 }
 
-fn run_ids(runs: &Value) -> HashSet<u64> {
-    runs["workflow_runs"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|r| r["id"].as_u64())
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::workflow::dispatch_inputs;
 
     #[test]
     fn version_parse_and_bump() {
