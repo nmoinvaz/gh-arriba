@@ -4,8 +4,9 @@ use serde_json::json;
 
 use super::list::print_group;
 use super::{Category, DepPr, LockStep, Overview, REBASE_COMMENT, Scope};
+use crate::api::Repo;
 use crate::cli::{DependabotMergeArgs, MergeMethod};
-use crate::context::{Ctx, Repo};
+use crate::context::Ctx;
 use crate::output::print_json;
 use crate::output::table;
 use crate::prompt;
