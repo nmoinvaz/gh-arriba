@@ -212,6 +212,29 @@ fn location(path: &str, start: Option<u64>, line: Option<u64>) -> String {
 }
 
 /// Parse `PATH:LINE` or `PATH:START-END` into the path and an inclusive range.
+/// Split `[PR] PATH:LINE[-END] [BODY]` into its parts. The PR is present only when the first
+/// argument is not a location and the second is.
+fn split_add_args(args: &[String]) -> Result<(Option<&str>, &str, Option<&str>)> {
+    let is_location = |i: usize| args.get(i).is_some_and(|a| parse_location(a).is_ok());
+    let (pr, rest) = if is_location(0) {
+        (None, args)
+    } else if is_location(1) {
+        (Some(args[0].as_str()), &args[1..])
+    } else {
+        // Report why the first argument is not a location.
+        parse_location(&args[0])?;
+        unreachable!("parse_location failed above");
+    };
+    match rest {
+        [location] => Ok((pr, location, None)),
+        [location, body] => Ok((pr, location, Some(body))),
+        _ => bail!(
+            "Expected [PR] PATH:LINE[-END] [BODY], got {} arguments",
+            args.len()
+        ),
+    }
+}
+
 fn parse_location(s: &str) -> Result<(String, Range)> {
     let (path, spec) = s
         .rsplit_once(':')
@@ -295,9 +318,10 @@ struct Added {
 }
 
 fn add(ctx: &Ctx, args: ReviewAddArgs) -> Result<()> {
-    let (path, range) = parse_location(&args.location)?;
-    let body = prompt::read_body(args.body.as_deref(), "comment")?;
-    let pr = ctx.pr(args.pr.as_deref())?;
+    let (pr_arg, spot, body) = split_add_args(&args.args)?;
+    let (path, range) = parse_location(spot)?;
+    let body = prompt::read_body(body, "comment")?;
+    let pr = ctx.pr(pr_arg)?;
     let client = &ctx.client;
 
     // Validate locally first, so a line outside the diff fails with the valid ranges.
@@ -596,6 +620,7 @@ mod tests {
         assert!(parse_location("src/a.c:0").is_err());
         assert!(parse_location("src/a.c:9-3").is_err());
         assert!(parse_location(":3").is_err());
+        assert!(parse_location("https://github.com/o/r/pull/42").is_err());
     }
 
     fn files() -> Vec<FileLines> {
@@ -651,5 +676,43 @@ mod tests {
         assert_eq!(location("a.c", Some(5), Some(5)), "a.c:5");
         assert_eq!(location("a.c", None, Some(5)), "a.c:5");
         assert_eq!(location("a.c", None, None), "a.c");
+    }
+
+    #[test]
+    fn add_args_take_an_optional_pr_first() {
+        let split = |a: &[&str]| {
+            let owned: Vec<String> = a.iter().map(|s| s.to_string()).collect();
+            split_add_args(&owned)
+                .map(|(p, l, b)| (p.map(str::to_string), l.to_string(), b.map(str::to_string)))
+        };
+        let some = |s: &str| Some(s.to_string());
+        assert_eq!(
+            split(&["a.c:3"]).unwrap(),
+            (None, "a.c:3".to_string(), None)
+        );
+        assert_eq!(
+            split(&["a.c:3", "Fix"]).unwrap(),
+            (None, "a.c:3".to_string(), some("Fix"))
+        );
+        assert_eq!(
+            split(&["42", "a.c:3-5"]).unwrap(),
+            (some("42"), "a.c:3-5".to_string(), None)
+        );
+        assert_eq!(
+            split(&["https://github.com/o/r/pull/42", "a.c:3", "-"]).unwrap(),
+            (
+                some("https://github.com/o/r/pull/42"),
+                "a.c:3".to_string(),
+                some("-")
+            )
+        );
+        // A body that looks like a location after the location is still the body.
+        assert_eq!(
+            split(&["a.c:3", "b.c:4"]).unwrap(),
+            (None, "a.c:3".to_string(), some("b.c:4"))
+        );
+        assert!(split(&["42"]).is_err());
+        assert!(split(&["42", "Fix"]).is_err());
+        assert!(split(&["a.c:3", "Fix", "extra"]).is_err());
     }
 }

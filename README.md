@@ -39,7 +39,7 @@ gh arriba [options] <command>
 | `pr comment show <URL\|ID>` | Print one review comment, issue comment, or review by its link or ID |
 | `pr comment edit <URL\|ID> [BODY]` | Replace the body of a comment or review you posted, body from stdin with `-` |
 | `pr review lines [PR]` | Print the diff line ranges that accept inline comments |
-| `pr review add <PATH:LINE[-END]> [BODY]` | Add an inline comment to your pending review |
+| `pr review add [PR] <PATH:LINE[-END]> [BODY]` | Add an inline comment to your pending review |
 | `pr review show [PR]` | Print the comments in your pending review |
 | `pr review submit [PR]` | Submit your pending review as comment, approve, or request changes |
 | `pr review discard [PR]` | Delete your pending review |
@@ -126,7 +126,7 @@ Build up a review with inline comments, then submit it:
 
 ```
 gh arriba pr review lines 42
-gh arriba pr review add src/inflate.c:120-124 "This drops the window check." --pr 42
+gh arriba pr review add 42 src/inflate.c:120-124 "This drops the window check."
 gh arriba pr review submit 42 --event request-changes --body "See inline comments."
 ```
 

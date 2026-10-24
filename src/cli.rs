@@ -164,6 +164,7 @@ pub enum ReviewCommand {
     /// Print the diff line ranges that accept inline comments
     Lines(PrArg),
     /// Add an inline comment to your pending review, creating it if needed
+    #[command(override_usage = "gh arriba pr review add [OPTIONS] [PR] <PATH:LINE[-END]> [BODY]")]
     Add(ReviewAddArgs),
     /// Print the comments in your pending review
     Show(PrArg),
@@ -181,16 +182,11 @@ pub struct PrArg {
 
 #[derive(Args)]
 pub struct ReviewAddArgs {
-    /// File and line in the PR diff, as PATH:LINE or PATH:START-END
-    #[arg(value_name = "PATH:LINE[-END]")]
-    pub location: String,
-
-    /// Comment text, or - to read stdin (default: stdin)
-    pub body: Option<String>,
-
-    /// Number, URL, or branch (default: PR for the current branch)
-    #[arg(long)]
-    pub pr: Option<String>,
+    /// [PR]: number, URL, or branch (default: PR for the current branch).
+    /// PATH:LINE[-END]: file and line or range in the PR diff.
+    /// [BODY]: comment text, or - to read stdin (default: stdin).
+    #[arg(value_name = "ARGS", required = true, num_args = 1..=3, verbatim_doc_comment)]
+    pub args: Vec<String>,
 
     /// Diff side the line numbers refer to
     #[arg(long, value_enum, default_value_t = Side::Right)]
