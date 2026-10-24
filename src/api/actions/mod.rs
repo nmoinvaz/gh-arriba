@@ -1,5 +1,7 @@
-//! GitHub Actions: workflows and their dispatch, workflow runs, jobs and their logs.
+//! GitHub Actions: workflows and their dispatch, workflow runs, jobs and their logs, and
+//! artifacts.
 
+mod artifacts;
 mod runs;
 mod workflows;
 
@@ -11,9 +13,10 @@ use serde_json::Value;
 
 use super::{Client, Repo};
 
+pub use artifacts::{Artifact, artifacts, delete_artifact, download_artifact, run_artifacts};
 pub use runs::{
     Job, WorkflowRun, attempt_jobs, branch_runs, commit_runs, job, job_log, job_opt, run_jobs,
-    workflow_run, workflow_run_opt,
+    successful_branch_runs, workflow_run, workflow_run_opt,
 };
 pub use workflows::{
     Workflow, dispatch_workflow, file_name, file_stem, workflow_dispatch_runs, workflow_file,
