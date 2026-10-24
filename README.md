@@ -152,6 +152,8 @@ Or push and follow every run the push started, waiting for them to appear:
 git push && gh arriba run watch
 ```
 
+Add `--job "Export Check"` to return as soon as the matching jobs finish, ignoring the rest.
+
 Cut a minor release through the repo's Release workflow:
 
 ```

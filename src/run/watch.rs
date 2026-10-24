@@ -9,10 +9,12 @@ use super::is_failed;
 use crate::context::{Ctx, Repo};
 use crate::output;
 
-/// How often to poll and how long to keep at it.
+/// How often to poll, how long to keep at it, and which jobs to wait for.
 pub struct Wait {
     pub interval: Duration,
     pub timeout: Duration,
+    /// Case-insensitive substring of the job names to wait for. None waits for every job.
+    pub job: Option<String>,
 }
 
 impl From<&crate::cli::WaitArgs> for Wait {
@@ -20,7 +22,16 @@ impl From<&crate::cli::WaitArgs> for Wait {
         Self {
             interval: Duration::from_secs(args.interval),
             timeout: Duration::from_secs(args.timeout * 60),
+            job: args.job.as_ref().map(|j| j.to_lowercase()),
         }
+    }
+}
+
+impl Wait {
+    fn wants(&self, job: &str) -> bool {
+        self.job
+            .as_deref()
+            .is_none_or(|p| job.to_lowercase().contains(p))
     }
 }
 
@@ -50,21 +61,30 @@ pub struct RunState {
     pub url: String,
     pub status: String,
     pub conclusion: Option<String>,
+    /// Only the jobs being waited for, when --job narrows them.
     pub jobs: Vec<JobState>,
+    #[serde(skip)]
+    filtered: bool,
 }
 
 impl RunState {
+    /// Done when the run completes, or with --job, once every matching job has.
     fn finished(&self) -> bool {
         self.status == "completed"
+            || (self.filtered
+                && !self.jobs.is_empty()
+                && self.jobs.iter().all(|j| j.status == "completed"))
     }
 
-    /// Whether any job failed, or the run itself did, as when its workflow file is invalid.
+    /// Whether any job failed, or without --job the run itself did, as when its workflow file
+    /// is invalid.
     fn failed(&self) -> bool {
         self.jobs.iter().any(|j| is_failed(j.conclusion.as_deref()))
-            || matches!(
-                self.conclusion.as_deref(),
-                Some("failure" | "cancelled" | "timed_out" | "startup_failure")
-            )
+            || (!self.filtered
+                && matches!(
+                    self.conclusion.as_deref(),
+                    Some("failure" | "cancelled" | "timed_out" | "startup_failure")
+                ))
     }
 }
 
@@ -112,16 +132,20 @@ fn parse_run(repo: &Repo, run: &Value, jobs: &[Value]) -> RunState {
         status: text(run, "status"),
         conclusion: run["conclusion"].as_str().map(str::to_string),
         jobs: jobs.iter().map(parse_job).collect(),
+        filtered: false,
     }
 }
 
-fn fetch(ctx: &Ctx, repo: &Repo, id: u64) -> Result<RunState> {
+fn fetch(ctx: &Ctx, repo: &Repo, id: u64, wait: &Wait) -> Result<RunState> {
     let path = format!("{}/actions/runs/{id}", repo.api());
     let run = ctx.client.get(&path)?;
     let jobs = ctx
         .client
         .get_all_in(&format!("{path}/jobs?filter=latest"), "jobs")?;
-    Ok(parse_run(repo, &run, &jobs))
+    let mut state = parse_run(repo, &run, &jobs);
+    state.jobs.retain(|j| wait.wants(&j.name));
+    state.filtered = wait.job.is_some();
+    Ok(state)
 }
 
 /// Human duration such as `45s`, `3m12s`, or `1h05m`.
@@ -183,7 +207,7 @@ pub fn watch(ctx: &Ctx, runs: &[(Repo, u64)], wait: &Wait) -> Result<Vec<RunStat
             if slot.as_ref().is_some_and(RunState::finished) {
                 continue;
             }
-            let state = fetch(ctx, repo, *id)?;
+            let state = fetch(ctx, repo, *id, wait)?;
             // A run already done when first seen goes straight to the summary.
             let quiet = slot.is_none() && state.finished();
             for job in &state.jobs {
@@ -222,7 +246,13 @@ pub fn watch(ctx: &Ctx, runs: &[(Repo, u64)], wait: &Wait) -> Result<Vec<RunStat
         }
         std::thread::sleep(wait.interval);
     }
-    Ok(states.into_iter().flatten().collect())
+    let states: Vec<RunState> = states.into_iter().flatten().collect();
+    if let Some(pattern) = &wait.job
+        && states.iter().all(|s| s.jobs.is_empty())
+    {
+        bail!("No jobs match {pattern:?}");
+    }
+    Ok(states)
 }
 
 /// Per-run summary with a line for each job.
@@ -359,6 +389,36 @@ mod tests {
         // An invalid workflow fails with no jobs at all.
         let startup = run("completed", Some("startup_failure"), &[]);
         assert_eq!(check(&[startup]).unwrap_err().to_string(), "Failed: CI (9)");
+    }
+
+    #[test]
+    fn job_filter_finishes_early_and_ignores_the_rest() {
+        let wait = Wait {
+            interval: Duration::from_secs(1),
+            timeout: Duration::from_secs(1),
+            job: Some("export".to_string()),
+        };
+        assert!(wait.wants("Export Check (gcc)"));
+        assert!(!wait.wants("Ubuntu"));
+
+        let mut state = run(
+            "in_progress",
+            None,
+            &[
+                job(1, "Export Check", "completed", Some("success")),
+                job(2, "Ubuntu", "completed", Some("failure")),
+                job(3, "macOS", "in_progress", None),
+            ],
+        );
+        assert!(!state.finished());
+        state.jobs.retain(|j| wait.wants(&j.name));
+        state.filtered = true;
+        assert!(state.finished());
+        assert!(!state.failed());
+
+        // With nothing matching yet, it waits for the run itself.
+        state.jobs.clear();
+        assert!(!state.finished());
     }
 
     #[test]
