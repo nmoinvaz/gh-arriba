@@ -229,6 +229,12 @@ Delete caches nobody has used for a week, previewing first:
 gh arriba run caches --prune --unused-for 7d --dry-run
 ```
 
+Or those left behind by closed and merged PRs, which GitHub keeps until it needs the space:
+
+```
+gh arriba run caches --prune --closed
+```
+
 Cut a minor release through the repo's Release workflow:
 
 ```
