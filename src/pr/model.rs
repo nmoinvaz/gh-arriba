@@ -3,8 +3,7 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::api::Client;
-use crate::context::PrRef;
+use crate::api::{Client, PrRef};
 use crate::json::{login_of, str_of, time_of};
 
 /// Pull request metadata most commands need.

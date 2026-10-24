@@ -7,9 +7,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::{Commit, find_runs, resolve_run, watch};
-use crate::api;
+use crate::api::{self, Repo};
 use crate::cli::ArtifactsArgs;
-use crate::context::{Ctx, Repo, git};
+use crate::context::{Ctx, git};
 use crate::pr::model::fetch_pr;
 use crate::{output, prompt};
 

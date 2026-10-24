@@ -5,9 +5,9 @@ use serde_json::Value;
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 
-use crate::api::Client;
+use crate::api::{Client, Repo};
 use crate::cli::RunnersArgs;
-use crate::context::{Ctx, Repo};
+use crate::context::Ctx;
 use crate::dependabot::Scope;
 use crate::json::{opt_time_of, str_of};
 use crate::output::table;

@@ -4,9 +4,9 @@ use serde_json::Value;
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
-use crate::api::{Client, is_failed};
+use crate::api::{Client, PrRef, is_failed};
 use crate::cli::ChecksArgs;
-use crate::context::{Ctx, PrRef, git};
+use crate::context::{Ctx, git};
 use crate::json::str_of;
 use crate::output;
 use crate::pr::rollup::{self, CheckRun, latest};
@@ -445,7 +445,7 @@ fn is_settled(status: &PrStatus, waited: Duration) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::context::Repo;
+    use crate::api::Repo;
     use crate::pr::rollup::parse_check_run;
     use serde_json::json;
 
