@@ -1,41 +1,17 @@
 use anyhow::{Result, bail};
 use chrono::{DateTime, TimeDelta, Utc};
 use serde::Serialize;
-use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use super::watch;
-use crate::api::json::{opt_time_of, str_of};
-use crate::api::{self, Repo};
+use crate::api::Repo;
+use crate::api::actions::{self, Cache};
 use crate::cli::CachesArgs;
 use crate::context::Ctx;
 use crate::{output, parallel, prompt};
 
 /// GitHub's default cache limit per repository. Past it, the least recently used caches are evicted.
 const LIMIT: u64 = 10 * 1024 * 1024 * 1024;
-
-/// An Actions cache entry.
-#[derive(Clone, Debug, Serialize)]
-pub struct Cache {
-    pub id: u64,
-    pub key: String,
-    #[serde(rename = "ref")]
-    pub git_ref: String,
-    pub size: u64,
-    pub created_at: Option<DateTime<Utc>>,
-    pub last_accessed_at: Option<DateTime<Utc>>,
-}
-
-fn parse_cache(v: &Value) -> Cache {
-    Cache {
-        id: v["id"].as_u64().unwrap_or(0),
-        key: str_of(v, "key"),
-        git_ref: str_of(v, "ref"),
-        size: v["size_in_bytes"].as_u64().unwrap_or(0),
-        created_at: opt_time_of(v, "created_at"),
-        last_accessed_at: opt_time_of(v, "last_accessed_at"),
-    }
-}
 
 /// A `--ref` value as the full ref the cache API filters on: a full ref as given, a PR number as
 /// its merge ref, or a branch name.
@@ -84,21 +60,8 @@ fn key_family(key: &str) -> &str {
 
 /// The repo's caches, narrowed by `--ref` and `--key` on the server.
 fn fetch(ctx: &Ctx, repo: &Repo, args: &CachesArgs) -> Result<Vec<Cache>> {
-    let mut path = format!("{}/actions/caches", repo.api());
-    let mut sep = '?';
-    if let Some(r) = &args.git_ref {
-        path.push_str(&format!("{sep}ref={}", api::encode_segment(&full_ref(r))));
-        sep = '&';
-    }
-    if let Some(k) = &args.key {
-        path.push_str(&format!("{sep}key={}", api::encode_segment(k)));
-    }
-    Ok(ctx
-        .client
-        .get_all_in(&path, "actions_caches")?
-        .iter()
-        .map(parse_cache)
-        .collect())
+    let git_ref = args.git_ref.as_deref().map(full_ref);
+    actions::caches(&ctx.client, repo, git_ref.as_deref(), args.key.as_deref())
 }
 
 /// Caches that share a ref or a key family.
@@ -148,13 +111,11 @@ pub fn run(ctx: &Ctx, args: CachesArgs) -> Result<()> {
     if args.prune {
         return prune(ctx, &repo, &args, &caches);
     }
-    let usage = ctx
-        .client
-        .get(&format!("{}/actions/cache/usage", repo.api()))?;
+    let usage = actions::cache_usage(&ctx.client, &repo)?;
     let summary = Summary {
         repo: repo.to_string(),
-        total_bytes: usage["active_caches_size_in_bytes"].as_u64().unwrap_or(0),
-        total_count: usage["active_caches_count"].as_u64().unwrap_or(0),
+        total_bytes: usage.active_caches_size_in_bytes,
+        total_count: usage.active_caches_count,
         limit_bytes: LIMIT,
         by_ref: group_by(&caches, |c| short_ref(&c.git_ref)),
         by_key: group_by(&caches, |c| key_family(&c.key).to_string()),
@@ -238,11 +199,7 @@ fn closed_prs(ctx: &Ctx, repo: &Repo, caches: &[Cache]) -> HashSet<u64> {
         .collect::<BTreeSet<u64>>()
         .into_iter()
         .collect();
-    let states = parallel::map(&prs, |n| {
-        ctx.client
-            .get(&format!("{}/pulls/{n}", repo.api()))
-            .map(|pr| str_of(&pr, "state"))
-    });
+    let states = parallel::map(&prs, |n| actions::pull_state(&ctx.client, repo, *n));
     prs.into_iter()
         .zip(states)
         .filter_map(|(n, state)| match state {
@@ -341,8 +298,7 @@ fn prune(ctx: &Ctx, repo: &Repo, args: &CachesArgs, caches: &[Cache]) -> Result<
         return Ok(());
     }
     for c in &report.caches {
-        let path = format!("{}/actions/caches/{}", repo.api(), c.id);
-        if let Err(e) = ctx.client.delete(&path) {
+        if let Err(e) = actions::delete_cache(&ctx.client, repo, c.id) {
             eprintln!("failed to delete {} ({}): {e:#}", c.key, c.id);
             report.failed.push(c.id);
         }
@@ -382,7 +338,6 @@ fn plural(n: usize, noun: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     fn at(s: &str) -> DateTime<Utc> {
         s.parse().unwrap()
@@ -397,20 +352,6 @@ mod tests {
             created_at: Some(at("2026-10-01T00:00:00Z")),
             last_accessed_at: Some(at(used)),
         }
-    }
-
-    #[test]
-    fn parses_cache_fields() {
-        let c = parse_cache(&json!({
-            "id": 3, "key": "Linux-cargo-abc", "ref": "refs/heads/main", "size_in_bytes": 2048,
-            "created_at": "2026-10-01T00:00:00Z", "last_accessed_at": "2026-10-20T00:00:00Z",
-            "version": "v1"
-        }));
-        assert_eq!(
-            (c.id, c.key.as_str(), c.git_ref.as_str(), c.size),
-            (3, "Linux-cargo-abc", "refs/heads/main", 2048)
-        );
-        assert_eq!(c.last_accessed_at, Some(at("2026-10-20T00:00:00Z")));
     }
 
     #[test]
