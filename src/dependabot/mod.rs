@@ -662,38 +662,6 @@ pub fn build_groups(prs: &[DepPr]) -> Vec<LockStep> {
     groups
 }
 
-/// Align rows into columns separated by two spaces. The last column is left unpadded.
-pub fn table(rows: &[Vec<String>], indent: &str) -> String {
-    let cols = rows.iter().map(Vec::len).max().unwrap_or(0);
-    let widths: Vec<usize> = (0..cols)
-        .map(|c| {
-            rows.iter()
-                .filter_map(|r| r.get(c))
-                .map(|s| s.chars().count())
-                .max()
-                .unwrap_or(0)
-        })
-        .collect();
-    rows.iter()
-        .map(|row| {
-            let cells: Vec<String> = row
-                .iter()
-                .enumerate()
-                .map(|(i, cell)| {
-                    if i + 1 == row.len() {
-                        cell.clone()
-                    } else {
-                        let pad = widths[i] - cell.chars().count();
-                        format!("{cell}{}", " ".repeat(pad))
-                    }
-                })
-                .collect();
-            format!("{indent}{}", cells.join("  ").trim_end())
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -1005,14 +973,5 @@ pub(crate) mod tests {
             .collect();
         assert_eq!(singles, vec![3]);
         assert_eq!(o.count(Category::Ready), 3);
-    }
-
-    #[test]
-    fn table_aligns_columns() {
-        let rows = vec![
-            vec!["#3".to_string(), "a".to_string(), "x".to_string()],
-            vec!["#12".to_string(), "bbb".to_string(), "y".to_string()],
-        ];
-        assert_eq!(table(&rows, "  "), "  #3   a    x\n  #12  bbb  y");
     }
 }
