@@ -300,8 +300,248 @@ pub fn run_dismiss(ctx: &Ctx, args: DependabotDismissArgs) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::Repo;
     use crate::api::dependabot::alert_fixture;
+    use crate::cli::DismissReason;
+    use crate::dependabot::tests::{ctx, mock_prs, ready};
+    use mockito::{Matcher, Mock, Server, ServerGuard};
     use serde_json::Value;
+
+    /// Alert `number` on `package`, without the repository a repo listing leaves out.
+    fn repo_alert(number: u64, package: &str, severity: &str) -> Value {
+        let mut v = alert_fixture();
+        v["number"] = json!(number);
+        v["dependency"]["package"]["name"] = json!(package);
+        v["security_advisory"]["severity"] = json!(severity);
+        v.as_object_mut().unwrap().remove("repository");
+        v
+    }
+
+    fn mock_repo_alerts(server: &mut ServerGuard, alerts: Value) -> Mock {
+        server
+            .mock("GET", "/repos/o/r/dependabot/alerts")
+            .match_query(Matcher::UrlEncoded("state".into(), "open".into()))
+            .with_body(alerts.to_string())
+            .create()
+    }
+
+    #[test]
+    fn fetch_fills_in_the_repo_and_lowercases_packages() {
+        let mut server = Server::new();
+        mock_repo_alerts(&mut server, json!([repo_alert(1, "Lodash", "high")]));
+        let mut other = alert_fixture();
+        other["repository"]["full_name"] = json!("o/b");
+        server
+            .mock("GET", "/orgs/acme/dependabot/alerts")
+            .match_query(Matcher::Any)
+            .with_body(json!([alert_fixture(), other]).to_string())
+            .create();
+        let client = Client::for_tests(&server.url());
+        let repo = Scope::Repo(Repo::parse("o/r").unwrap());
+        let alerts = fetch_alerts(&client, &repo).unwrap();
+        assert_eq!(alerts[0].repo, "o/r");
+        assert_eq!(alerts[0].ecosystem, "npm");
+        assert_eq!(alerts[0].manifest, "package-lock.json");
+        let packages = alerted_packages(&client, &Scope::Org("acme".into())).unwrap();
+        assert_eq!(
+            packages,
+            HashSet::from([
+                ("o/r".to_string(), "lodash".to_string()),
+                ("o/b".to_string(), "lodash".to_string()),
+            ])
+        );
+    }
+
+    #[test]
+    fn alerts_listed_with_fix_prs() {
+        for json in [false, true] {
+            let mut server = Server::new();
+            let alerts = mock_repo_alerts(
+                &mut server,
+                json!([
+                    repo_alert(1, "minimist", "low"),
+                    repo_alert(2, "Lodash", "critical")
+                ]),
+            );
+            // Only the light listing is needed to match fix PRs.
+            let (light, details) = mock_prs(
+                &mut server,
+                false,
+                &[ready(5, "Bump lodash from 4.17.20 to 4.17.21")],
+            );
+            let args = DependabotAlertsArgs { org: None };
+            run_alerts(&ctx(&server, json), args).unwrap();
+            alerts.assert();
+            light.assert();
+            details.expect(0).assert();
+        }
+    }
+
+    #[test]
+    fn org_alerts_match_prs_through_search() {
+        let mut server = Server::new();
+        server
+            .mock("GET", "/orgs/acme/dependabot/alerts")
+            .match_query(Matcher::Any)
+            .with_body(json!([alert_fixture()]).to_string())
+            .create();
+        let (light, _) = mock_prs(&mut server, true, &[]);
+        let args = DependabotAlertsArgs {
+            org: Some("acme".into()),
+        };
+        run_alerts(&ctx(&server, false), args).unwrap();
+        light.assert();
+    }
+
+    #[test]
+    fn no_alerts_skips_pr_matching() {
+        for json in [false, true] {
+            let mut server = Server::new();
+            mock_repo_alerts(&mut server, json!([]));
+            let graphql = server.mock("POST", "/graphql").expect(0).create();
+            run_alerts(&ctx(&server, json), DependabotAlertsArgs { org: None }).unwrap();
+            graphql.assert();
+        }
+    }
+
+    #[test]
+    fn pr_matching_failure_still_lists_alerts() {
+        let mut server = Server::new();
+        mock_repo_alerts(&mut server, json!([repo_alert(1, "lodash", "high")]));
+        server
+            .mock("POST", "/graphql")
+            .with_status(502)
+            .with_body(r#"{"message": "Bad Gateway"}"#)
+            .create();
+        run_alerts(&ctx(&server, true), DependabotAlertsArgs { org: None }).unwrap();
+    }
+
+    #[test]
+    fn disabled_alerts_explained() {
+        let mut server = Server::new();
+        server
+            .mock("GET", "/repos/o/r/dependabot/alerts")
+            .match_query(Matcher::Any)
+            .with_status(403)
+            .with_body(r#"{"message": "Dependabot alerts are disabled for this repository."}"#)
+            .create();
+        let err = run_alerts(&ctx(&server, false), DependabotAlertsArgs { org: None })
+            .unwrap_err()
+            .to_string();
+        assert!(err.starts_with("Dependabot alerts are disabled for o/r, or the token"));
+    }
+
+    fn dismiss_args(alerts: &[u64], comment: Option<&str>) -> DependabotDismissArgs {
+        DependabotDismissArgs {
+            alerts: alerts.to_vec(),
+            reason: DismissReason::TolerableRisk,
+            comment: comment.map(str::to_string),
+        }
+    }
+
+    fn mock_alert(server: &mut ServerGuard, number: u64, state: &str) -> Mock {
+        let mut v = repo_alert(number, "lodash", "high");
+        v["state"] = json!(state);
+        server
+            .mock(
+                "GET",
+                format!("/repos/o/r/dependabot/alerts/{number}").as_str(),
+            )
+            .with_body(v.to_string())
+            .create()
+    }
+
+    fn mock_dismiss(server: &mut ServerGuard, number: u64, body: Value, status: usize) -> Mock {
+        server
+            .mock(
+                "PATCH",
+                format!("/repos/o/r/dependabot/alerts/{number}").as_str(),
+            )
+            .match_body(Matcher::Json(body))
+            .with_status(status)
+            .with_body(r#"{"message": "Validation Failed"}"#)
+            .create()
+    }
+
+    #[test]
+    fn dismiss_open_alerts_and_skip_closed_ones() {
+        for json in [false, true] {
+            let mut server = Server::new();
+            mock_alert(&mut server, 7, "open");
+            mock_alert(&mut server, 8, "fixed");
+            let seven = mock_dismiss(
+                &mut server,
+                7,
+                json!({ "state": "dismissed", "dismissed_reason": "tolerable_risk",
+                        "dismissed_comment": "dev only" }),
+                200,
+            );
+            let eight = server
+                .mock("PATCH", "/repos/o/r/dependabot/alerts/8")
+                .expect(0)
+                .create();
+            run_dismiss(&ctx(&server, json), dismiss_args(&[7, 8], Some("dev only"))).unwrap();
+            seven.assert();
+            eight.assert();
+        }
+    }
+
+    #[test]
+    fn dismiss_with_nothing_open_sends_nothing() {
+        let mut server = Server::new();
+        mock_alert(&mut server, 8, "dismissed");
+        let patch = server.mock("PATCH", Matcher::Any).expect(0).create();
+        run_dismiss(&ctx(&server, false), dismiss_args(&[8], None)).unwrap();
+        patch.assert();
+    }
+
+    #[test]
+    fn dismiss_failures_are_counted() {
+        let mut server = Server::new();
+        mock_alert(&mut server, 7, "open");
+        mock_alert(&mut server, 9, "open");
+        let body = json!({ "state": "dismissed", "dismissed_reason": "tolerable_risk" });
+        mock_dismiss(&mut server, 7, body.clone(), 422);
+        mock_dismiss(&mut server, 9, body, 200);
+        let err = run_dismiss(&ctx(&server, true), dismiss_args(&[7, 9], None)).unwrap_err();
+        assert_eq!(err.to_string(), "1 alert(s) could not be dismissed");
+    }
+
+    #[test]
+    fn dismiss_explains_missing_and_hidden_alerts() {
+        let mut server = Server::new();
+        server
+            .mock("GET", "/repos/o/r/dependabot/alerts/5")
+            .with_status(404)
+            .with_body(r#"{"message": "No alert found for alert number 5"}"#)
+            .create();
+        server
+            .mock("GET", "/repos/o/r/dependabot/alerts/6")
+            .with_status(403)
+            .with_body(r#"{"message": "Resource not accessible by integration"}"#)
+            .create();
+        let c = ctx(&server, false);
+        let err = run_dismiss(&c, dismiss_args(&[5], None)).unwrap_err();
+        assert_eq!(err.to_string(), "Alert #5 not found in o/r");
+        let err = run_dismiss(&c, dismiss_args(&[6], None)).unwrap_err();
+        assert!(
+            err.to_string()
+                .starts_with("Dependabot alerts are disabled for o/r")
+        );
+    }
+
+    #[test]
+    fn dismiss_rejects_long_comments_up_front() {
+        let mut server = Server::new();
+        let any = server.mock("GET", Matcher::Any).expect(0).create();
+        let long = "x".repeat(MAX_COMMENT + 1);
+        let err = run_dismiss(&ctx(&server, false), dismiss_args(&[7], Some(&long))).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Dismissal comments are limited to 280 characters."
+        );
+        any.assert();
+    }
 
     fn parse_alert(v: &Value, repo: Option<String>) -> Alert {
         Alert::new(serde_json::from_value(v.clone()).unwrap(), repo)
