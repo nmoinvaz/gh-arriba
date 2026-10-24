@@ -292,6 +292,15 @@ pub fn issue_comments(client: &Client, pr: &PrRef) -> Result<Vec<IssueComment>> 
     get_all(client, &format!("{}/comments", pr.issue_api()))
 }
 
+/// Comment on the PR's conversation tab.
+pub fn add_issue_comment(client: &Client, pr: &PrRef, body: &str) -> Result<()> {
+    client.post(
+        &format!("{}/comments", pr.issue_api()),
+        &json!({ "body": body }),
+    )?;
+    Ok(())
+}
+
 /// A comment just posted.
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct PostedComment {

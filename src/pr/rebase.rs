@@ -1,10 +1,9 @@
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
-use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::api::pulls::{PrInfo, fetch_pr};
+use crate::api::pulls::{self, PrInfo, fetch_pr};
 use crate::api::{PrRef, Repo};
 use crate::cli::RebaseArgs;
 use crate::context::{Ctx, git, git_in};
@@ -38,10 +37,7 @@ pub fn run(ctx: &Ctx, args: RebaseArgs) -> Result<()> {
     };
 
     if outcome.result == "rebased" && !args.no_comment {
-        ctx.client.post(
-            &format!("{}/comments", pr.issue_api()),
-            &json!({ "body": "Rebased." }),
-        )?;
+        pulls::add_issue_comment(&ctx.client, &pr, "Rebased.")?;
         outcome.commented = true;
     }
 
@@ -104,32 +100,14 @@ fn outcome(pr: &PrRef, info: &PrInfo, method: &'static str, result: &'static str
     }
 }
 
-const UPDATE_BRANCH: &str = r#"
-mutation($id: ID!, $oid: GitObjectID!) {
-  updatePullRequestBranch(input: {pullRequestId: $id, expectedHeadOid: $oid, updateMethod: REBASE}) {
-    pullRequest { headRefOid }
-  }
-}"#;
-
-/// Rebase server-side. The REST update-branch endpoint only merges, so this uses GraphQL.
+/// Rebase server-side, which leaves the commits unsigned.
 fn remote(ctx: &Ctx, pr: &PrRef, info: &PrInfo) -> Result<Outcome> {
-    let compare = ctx.client.get(&format!(
-        "{}/compare/{}...{}",
-        pr.repo.api(),
-        info.base_ref,
-        info.head_oid
-    ))?;
-    if compare["behind_by"].as_u64() == Some(0) {
+    let behind = pulls::behind_by(&ctx.client, &pr.repo, &info.base_ref, &info.head_oid)?;
+    if behind == Some(0) {
         return Ok(outcome(pr, info, "remote", "up-to-date"));
     }
-    let data = ctx.client.graphql(
-        UPDATE_BRANCH,
-        json!({ "id": info.node_id, "oid": info.head_oid }),
-    )?;
     let mut o = outcome(pr, info, "remote", "rebased");
-    o.new_head = data["updatePullRequestBranch"]["pullRequest"]["headRefOid"]
-        .as_str()
-        .map(str::to_string);
+    o.new_head = pulls::rebase_branch(&ctx.client, &info.node_id, &info.head_oid)?;
     Ok(o)
 }
 

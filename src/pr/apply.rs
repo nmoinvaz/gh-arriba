@@ -4,8 +4,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::process::Command;
 
-use crate::api::pulls::{Thread, fetch_threads};
-use crate::api::{Client, PrRef, encode_path};
+use crate::api::pulls::{self, Thread, fetch_threads};
+use crate::api::{Client, PrRef};
 use crate::cli::ApplyArgs;
 use crate::context::{Ctx, git};
 use crate::output;
@@ -471,13 +471,7 @@ fn short(oid: &str) -> &str {
 
 /// File contents at the PR head commit, for dry runs away from a checkout.
 fn read_at_head(client: &Client, pr: &PrRef, head_oid: &str, path: &str) -> Result<String> {
-    let url = format!(
-        "{}/contents/{}?ref={head_oid}",
-        pr.repo.api(),
-        encode_path(path)
-    );
-    client
-        .get_raw(&url)
+    pulls::file_at(client, &pr.repo, path, head_oid)
         .with_context(|| format!("Failed to read {path} at {}", short(head_oid)))
 }
 
