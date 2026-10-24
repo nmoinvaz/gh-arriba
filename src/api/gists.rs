@@ -147,6 +147,7 @@ impl<'a> GistClient<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mockito::{Matcher, Server};
 
     #[test]
     fn gist_files_and_visibility() {
@@ -180,5 +181,117 @@ mod tests {
         .unwrap();
         assert_eq!(gists[0].description, None);
         assert_eq!(gists[1].id.as_deref(), Some("2"));
+    }
+
+    #[test]
+    fn find_gist_matches_the_exact_description_across_pages() {
+        let mut server = Server::new();
+        let next = format!("<{}/gists?page=2>; rel=\"next\"", server.url());
+        server
+            .mock("GET", "/gists")
+            .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
+            .with_header("link", &next)
+            .with_body(r#"[{"id": "1", "description": "proj config-sync extra"}, {"id": "2"}]"#)
+            .create();
+        server
+            .mock("GET", "/gists")
+            .match_query(Matcher::UrlEncoded("page".into(), "2".into()))
+            .with_body(r#"[{"id": "3", "description": "proj config-sync"}]"#)
+            .create();
+        let client = Client::for_tests(&server.url());
+        let gists = GistClient::new(&client);
+        assert_eq!(
+            gists.find_gist("proj config-sync").unwrap().as_deref(),
+            Some("3")
+        );
+        assert_eq!(gists.find_gist("missing").unwrap(), None);
+    }
+
+    #[test]
+    fn get_gist_fetches_by_id_and_reports_failures() {
+        let mut server = Server::new();
+        server
+            .mock("GET", "/gists/abc")
+            .with_body(r#"{"id": "abc", "files": {"a": {"content": "x"}}}"#)
+            .create();
+        server.mock("GET", "/gists/gone").with_status(404).create();
+        let client = Client::for_tests(&server.url());
+        let gists = GistClient::new(&client);
+        assert_eq!(gists.get_gist("abc").unwrap().file_content("a"), Some("x"));
+        let err = gists.get_gist("gone").unwrap_err();
+        assert_eq!(err.to_string(), "Failed to fetch gist");
+    }
+
+    #[test]
+    fn create_gist_sends_files_and_returns_the_id() {
+        let mut server = Server::new();
+        let mock = server
+            .mock("POST", "/gists")
+            .match_body(Matcher::Json(json!({
+                "description": "d",
+                "public": false,
+                "files": { "a.txt": { "content": "hello" } }
+            })))
+            .with_status(201)
+            .with_body(r#"{"id": "new"}"#)
+            .create();
+        let client = Client::for_tests(&server.url());
+        let files = HashMap::from([("a.txt".to_string(), "hello".to_string())]);
+        let id = GistClient::new(&client)
+            .create_gist("d", false, &files)
+            .unwrap();
+        assert_eq!(id, "new");
+        mock.assert();
+    }
+
+    #[test]
+    fn create_gist_fails_without_an_id() {
+        let mut server = Server::new();
+        server.mock("POST", "/gists").with_body("{}").create();
+        let client = Client::for_tests(&server.url());
+        let err = GistClient::new(&client)
+            .create_gist("d", true, &HashMap::new())
+            .unwrap_err();
+        assert_eq!(err.to_string(), "Gist ID not found in response");
+    }
+
+    #[test]
+    fn update_files_writes_contents_and_nulls_deletions() {
+        let mut server = Server::new();
+        let mock = server
+            .mock("PATCH", "/gists/abc")
+            .match_body(Matcher::Json(json!({
+                "files": { "keep": { "content": "new" }, "drop": null }
+            })))
+            .with_body("{}")
+            .create();
+        let client = Client::for_tests(&server.url());
+        let files = HashMap::from([
+            ("keep".to_string(), Some("new".to_string())),
+            ("drop".to_string(), None),
+        ]);
+        GistClient::new(&client)
+            .update_files("abc", &files)
+            .unwrap();
+        mock.assert();
+    }
+
+    #[test]
+    fn delete_gist_sends_a_delete() {
+        let mut server = Server::new();
+        let ok = server
+            .mock("DELETE", "/gists/abc")
+            .with_status(204)
+            .create();
+        server
+            .mock("DELETE", "/gists/nope")
+            .with_status(404)
+            .create();
+        let client = Client::for_tests(&server.url());
+        let gists = GistClient::new(&client);
+        gists.delete_gist("abc").unwrap();
+        ok.assert();
+        let err = gists.delete_gist("nope").unwrap_err();
+        assert_eq!(err.to_string(), "Failed to delete gist");
     }
 }
