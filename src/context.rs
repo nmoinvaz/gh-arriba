@@ -23,6 +23,14 @@ impl Ctx {
         }
     }
 
+    /// `repo` when given, as when a URL named it, otherwise the one [`Ctx::repo`] resolves.
+    pub fn repo_or(&self, repo: Option<Repo>) -> Result<Repo> {
+        match repo {
+            Some(r) => Ok(r),
+            None => self.repo(),
+        }
+    }
+
     /// Pull request from a number, URL, owner/repo#N, or branch, defaulting to the current branch.
     pub fn pr(&self, arg: Option<&str>) -> Result<PrRef> {
         resolve_pr(self.repo_flag.as_deref(), arg)

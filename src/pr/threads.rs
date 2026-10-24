@@ -646,10 +646,7 @@ struct CommentRef {
 /// Look up a review comment in `repo`, or in -R or the current repo when the ID came bare.
 fn lookup_comment(ctx: &Ctx, repo: Option<Repo>, id: u64) -> Result<CommentRef> {
     let from_url = repo.is_some();
-    let repo = match repo {
-        Some(r) => r,
-        None => ctx.repo()?,
-    };
+    let repo = ctx.repo_or(repo)?;
     let path = format!("{}/pulls/comments/{id}", repo.api());
     let comment = ctx.client.get_opt(&path)?.with_context(|| {
         // Comment IDs carry no repo, so a lookup in the wrong one is the likely mistake.

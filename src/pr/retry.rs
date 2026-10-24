@@ -248,10 +248,7 @@ pub fn run(ctx: &Ctx, args: RetryArgs) -> Result<()> {
     let prs = match classify(args.target.as_deref(), args.mine, local_branch_exists)? {
         Target::Pr(arg) => vec![ctx.pr(arg.as_deref())?],
         Target::Repo(repo) => {
-            let repo = match repo {
-                Some(r) => r,
-                None => ctx.repo()?,
-            };
+            let repo = ctx.repo_or(repo)?;
             let prs = my_prs(client, &repo)?;
             if prs.is_empty() {
                 println!("No open PRs by {} in {repo}", client.viewer()?);
