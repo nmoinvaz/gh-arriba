@@ -10,4 +10,4 @@ pub mod releases;
 mod repo;
 
 pub use client::{Client, encode_path, encode_segment, is_failed};
-pub use repo::{PrRef, Repo, parse_pr_ref};
+pub use repo::{PrRef, Repo, default_branch, parse_pr_ref};

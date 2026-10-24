@@ -281,13 +281,6 @@ mutation($id: ID!, $method: PullRequestMergeMethod!) {
   }
 }"#;
 
-/// Comment on a PR, as `@dependabot rebase`.
-pub fn comment(client: &Client, repo: &Repo, number: u64, body: &str) -> Result<()> {
-    let path = format!("{}/issues/{number}/comments", repo.api());
-    client.post(&path, &json!({ "body": body }))?;
-    Ok(())
-}
-
 /// Submit an approving review.
 pub fn approve(client: &Client, repo: &Repo, number: u64) -> Result<()> {
     let path = format!("{}/pulls/{number}/reviews", repo.api());

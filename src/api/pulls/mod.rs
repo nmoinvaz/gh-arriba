@@ -38,6 +38,17 @@ pub use threads::{
     set_thread_resolved,
 };
 
+/// State of a pull request, "open" or "closed", from REST without the rest of `fetch_pr`.
+pub fn pull_state(client: &Client, repo: &Repo, number: u64) -> Result<String> {
+    #[derive(Deserialize)]
+    struct Pull {
+        state: Option<String>,
+    }
+    let pull: Pull = serde_json::from_value(client.get(&format!("{}/pulls/{number}", repo.api()))?)
+        .context("Failed to parse pull request")?;
+    Ok(pull.state.unwrap_or_default())
+}
+
 /// Pull request metadata most commands need.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(from = "PrNode")]

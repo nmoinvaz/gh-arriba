@@ -4,7 +4,7 @@ use serde_json::json;
 
 use super::list::print_group;
 use super::{Category, DepPr, LockStep, Overview, REBASE_COMMENT, Scope};
-use crate::api::{Repo, dependabot};
+use crate::api::{PrRef, Repo, dependabot, pulls};
 use crate::cli::{DependabotMergeArgs, MergeMethod};
 use crate::context::Ctx;
 use crate::output::print_json;
@@ -420,7 +420,11 @@ impl Merger<'_> {
     }
 
     fn comment(&self, pr: &DepPr, body: &str) -> Result<()> {
-        dependabot::comment(&self.ctx.client, self.repo, pr.number, body)
+        let pr_ref = PrRef {
+            repo: self.repo.clone(),
+            number: pr.number,
+        };
+        pulls::add_issue_comment(&self.ctx.client, &pr_ref, body)
     }
 
     fn approve(&self, pr: &DepPr) -> Result<()> {

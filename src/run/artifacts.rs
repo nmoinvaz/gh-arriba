@@ -6,8 +6,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::{Commit, find_runs, resolve_run, watch};
-use crate::api::Repo;
 use crate::api::actions::{self, WorkflowRun};
+use crate::api::{self, Repo};
 use crate::cli::ArtifactsArgs;
 use crate::context::{Ctx, git};
 use crate::pr::model::fetch_pr;
@@ -96,7 +96,7 @@ fn latest_success(ctx: &Ctx, args: &ArtifactsArgs) -> Result<((Repo, u64), Vec<A
     let repo = ctx.repo()?;
     let branch = match &args.branch {
         Some(b) => b.clone(),
-        None => actions::default_branch(&ctx.client, &repo)?,
+        None => api::default_branch(&ctx.client, &repo)?,
     };
     let runs = actions::successful_branch_runs(&ctx.client, &repo, &branch)?;
     let for_workflow = args

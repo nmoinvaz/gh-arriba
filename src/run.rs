@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::api::actions::{self, Job, WorkflowRun};
-use crate::api::{Repo, is_failed};
+use crate::api::{self, Repo, is_failed};
 use crate::cli::{DispatchArgs, LogsArgs, RunCommand, WatchArgs};
 use crate::context::{Ctx, git};
 use crate::log::{self, Excerpt};
@@ -400,7 +400,7 @@ fn dispatch(ctx: &Ctx, args: DispatchArgs) -> Result<()> {
     let wf = workflow::find(&workflows, &args.workflow)?;
     let git_ref = match args.git_ref {
         Some(r) => r,
-        None => actions::default_branch(client, &repo)?,
+        None => api::default_branch(client, &repo)?,
     };
 
     let inputs = workflow::inputs_at(client, &repo, wf, &git_ref)?;

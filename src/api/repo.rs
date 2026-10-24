@@ -1,6 +1,8 @@
-use anyhow::{Result, bail};
-use serde::Serialize;
+use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
 use std::fmt;
+
+use super::Client;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
 pub struct Repo {
@@ -71,6 +73,17 @@ impl fmt::Display for PrRef {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}#{}", self.repo, self.number)
     }
+}
+
+/// Default branch of the repository, which dispatches and branch lookups fall back to.
+pub fn default_branch(client: &Client, repo: &Repo) -> Result<String> {
+    #[derive(Deserialize)]
+    struct Repository {
+        default_branch: Option<String>,
+    }
+    let r: Repository =
+        serde_json::from_value(client.get(&repo.api())?).context("Failed to parse repository")?;
+    r.default_branch.context("Repository has no default branch")
 }
 
 /// Parse a PR URL or OWNER/REPO#N. Returns None for anything else.
