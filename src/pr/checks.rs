@@ -1,11 +1,11 @@
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use crate::cli::ChecksArgs;
-use crate::context::{Ctx, PrRef};
+use crate::context::{Ctx, PrRef, git};
 use crate::github::Client;
 use crate::output;
 use crate::pr::model::{str_of, vars};
@@ -290,11 +290,20 @@ fn counts_text(c: &Counts) -> String {
 
 pub fn run(ctx: &Ctx, args: ChecksArgs) -> Result<()> {
     let prs = resolve_prs(ctx, &args.prs)?;
-    if !args.wait {
+    let deadline = Instant::now() + Duration::from_secs(args.timeout * 60);
+    if let Some(sha) = &args.sha {
+        let [pr] = prs.as_slice() else {
+            bail!("--sha takes a single PR");
+        };
+        let status = await_head(ctx, pr, &resolve_sha(sha)?, &args, deadline)?;
+        if !args.wait {
+            return report(ctx, &[status]);
+        }
+    } else if !args.wait {
         let statuses = fetch_all(&ctx.client, &prs)?;
         return report(ctx, &statuses);
     }
-    wait(ctx, &prs, &args)
+    wait(ctx, &prs, &args, deadline)
 }
 
 fn fetch_all(client: &Client, prs: &[PrRef]) -> Result<Vec<PrStatus>> {
@@ -359,8 +368,7 @@ struct Seen {
 }
 
 /// Poll until every PR has settled, printing checks as they complete.
-fn wait(ctx: &Ctx, prs: &[PrRef], args: &ChecksArgs) -> Result<()> {
-    let deadline = Instant::now() + Duration::from_secs(args.timeout * 60);
+fn wait(ctx: &Ctx, prs: &[PrRef], args: &ChecksArgs, deadline: Instant) -> Result<()> {
     let mut seen: Vec<Option<Seen>> = prs.iter().map(|_| None).collect();
     loop {
         let statuses = fetch_all(&ctx.client, prs)?;
@@ -394,6 +402,58 @@ fn wait(ctx: &Ctx, prs: &[PrRef], args: &ChecksArgs) -> Result<()> {
         }
         std::thread::sleep(Duration::from_secs(args.interval));
     }
+}
+
+/// Poll until the PR head is `sha`, since GitHub takes a moment to see a push.
+fn await_head(
+    ctx: &Ctx,
+    pr: &PrRef,
+    sha: &str,
+    args: &ChecksArgs,
+    deadline: Instant,
+) -> Result<PrStatus> {
+    let short: String = sha.chars().take(8).collect();
+    let mut announced = false;
+    loop {
+        let status = fetch_status(&ctx.client, pr)?;
+        if status.head_oid.starts_with(sha) {
+            return Ok(status);
+        }
+        let head: String = status.head_oid.chars().take(8).collect();
+        if Instant::now() >= deadline {
+            bail!(
+                "{pr} head is still {head} after {} minutes, not {short}",
+                args.timeout
+            );
+        }
+        if !announced {
+            let line = format!("#{} head is {head}, waiting for {short}", pr.number);
+            if ctx.json {
+                eprintln!("{line}");
+            } else {
+                println!("{line}");
+            }
+            announced = true;
+        }
+        std::thread::sleep(Duration::from_secs(args.interval));
+    }
+}
+
+/// A full or abbreviated commit hash as given, or a revision such as HEAD resolved locally.
+fn resolve_sha(rev: &str) -> Result<String> {
+    if let Some(sha) = as_sha(rev) {
+        return Ok(sha);
+    }
+    let full = git(&["rev-parse", "--verify", &format!("{rev}^{{commit}}")])
+        .with_context(|| format!("{rev:?} is neither a commit hash nor a local revision"))?;
+    Ok(full.to_lowercase())
+}
+
+/// Lowercased hash when `s` looks like one, at least 4 hex digits as git abbreviates.
+fn as_sha(s: &str) -> Option<String> {
+    let s = s.trim();
+    ((4..=40).contains(&s.len()) && s.chars().all(|c| c.is_ascii_hexdigit()))
+        .then(|| s.to_lowercase())
 }
 
 /// Lines for checks that completed since the last poll. The first poll of a head only notes
@@ -638,6 +698,14 @@ mod tests {
         assert!(!is_settled(&unknown, Duration::ZERO));
         unknown.state = "merged".to_string();
         assert!(is_settled(&unknown, Duration::ZERO));
+    }
+
+    #[test]
+    fn sha_detection() {
+        assert_eq!(as_sha("1A2B3C4D").as_deref(), Some("1a2b3c4d"));
+        assert_eq!(as_sha("abc"), None);
+        assert_eq!(as_sha("HEAD"), None);
+        assert_eq!(as_sha(&"a".repeat(41)), None);
     }
 
     #[test]
