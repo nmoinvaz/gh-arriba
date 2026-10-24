@@ -74,7 +74,7 @@ pub enum PrCommand {
     Rebase(RebaseArgs),
     /// Suggest reviewers from top contributors and request one
     Reviewers(ReviewersArgs),
-    /// List the repo's labels and mark those on a PR
+    /// List the repo's labels, and add or remove them on a PR
     Labels(LabelsArgs),
 }
 
@@ -322,6 +322,14 @@ pub struct ReviewersArgs {
 pub struct LabelsArgs {
     /// Number, URL, or branch (default: PR for the current branch, if any)
     pub pr: Option<String>,
+
+    /// Add a label, matched loosely against the repo's labels, repeatable
+    #[arg(long, value_name = "NAME")]
+    pub add: Vec<String>,
+
+    /// Remove a label, matched loosely against the repo's labels, repeatable
+    #[arg(long, value_name = "NAME")]
+    pub remove: Vec<String>,
 }
 
 // -------------------------------------------------------------------------
