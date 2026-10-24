@@ -49,7 +49,7 @@ gh arriba [options] <command>
 | `pr failures [PR]` | Show failed checks with their failed steps and error lines, saving full logs |
 | `pr rebase [PR]` | Rebase onto the base branch, signed locally or server-side with `--remote` |
 | `pr reviewers [PR]` | Suggest reviewers from top contributors and request one with `--add` |
-| `pr labels [PR]` | List the repo's labels, and `--add` or `--remove` them by close match |
+| `pr labels [PR]` | List the repo's labels, `--suggest` some for the PR, and `--add` or `--remove` them by close match |
 
 `PR` is a number, URL, `owner/repo#N`, or branch. It defaults to the PR for the current branch.
 `ID` in `pr reply` and `pr resolve` is a comment ID, a `#discussion_r` comment link, or a
@@ -127,10 +127,11 @@ gh arriba pr review add src/inflate.c:120-124 "This drops the window check." --p
 gh arriba pr review submit 42 --event request-changes --body "See inline comments."
 ```
 
-Check which labels exist, then add one by a loose name:
+Check which labels exist or fit the PR, then add one by a loose name:
 
 ```
 gh arriba pr labels
+gh arriba pr labels 42 --suggest
 gh arriba pr labels 42 --add ui
 ```
 

@@ -7,6 +7,7 @@ use crate::cli::LabelsArgs;
 use crate::context::{Ctx, PrRef, Repo};
 use crate::github::Client;
 use crate::output;
+use crate::pr::model::fetch_pr;
 
 // -------------------------------------------------------------------------
 //  list
@@ -34,6 +35,10 @@ pub fn run(ctx: &Ctx, args: LabelsArgs) -> Result<()> {
     if !args.add.is_empty() || !args.remove.is_empty() {
         let pr = pr.context("No pull request found. Pass a PR number or URL.")?;
         return edit(ctx, &pr, &labels, &args.add, &args.remove);
+    }
+    if args.suggest {
+        let pr = pr.context("No pull request found. Pass a PR number or URL.")?;
+        return suggest(ctx, &pr, &labels);
     }
 
     if ctx.json {
@@ -278,6 +283,112 @@ fn encode_segment(s: &str) -> String {
 }
 
 // -------------------------------------------------------------------------
+//  suggest
+// -------------------------------------------------------------------------
+
+#[derive(Debug, PartialEq, Serialize)]
+struct Suggestion {
+    name: String,
+    score: usize,
+    /// Label words also found in the PR.
+    matched: Vec<String>,
+}
+
+/// Labels suggested at most.
+const SUGGESTIONS: usize = 5;
+
+fn suggest(ctx: &Ctx, pr: &PrRef, labels: &[Label]) -> Result<()> {
+    let client = &ctx.client;
+    let info = fetch_pr(client, pr)?;
+    let files = client.get_all(&format!("{}/files", pr.api()))?;
+    let mut text = vec![info.title, info.body, info.head_ref];
+    text.extend(
+        files
+            .iter()
+            .filter_map(|f| f["filename"].as_str().map(str::to_string)),
+    );
+    let words: HashSet<String> = text.iter().flat_map(|t| words(t)).collect();
+    let ranked = rank(labels, &words);
+
+    if ctx.json {
+        return output::print_json(&ranked);
+    }
+    if ranked.is_empty() {
+        println!("No labels share words with {pr}");
+        return Ok(());
+    }
+    let width = ranked.iter().map(|s| s.name.len()).max().unwrap_or(0);
+    for s in &ranked {
+        println!(
+            "{:<width$}  {:>2}  {}",
+            s.name,
+            s.score,
+            s.matched.join(", ")
+        );
+    }
+    Ok(())
+}
+
+/// Labels not yet applied, scored by the PR words they share: two points for a word of the name,
+/// one for a word only in the description. Ties go by name.
+fn rank(labels: &[Label], pr_words: &HashSet<String>) -> Vec<Suggestion> {
+    let mut ranked: Vec<Suggestion> = labels
+        .iter()
+        .filter(|l| !l.applied)
+        .filter_map(|l| {
+            let name: HashSet<String> = words(&l.name).into_iter().collect();
+            let mut all: Vec<String> = name.iter().cloned().chain(words(&l.description)).collect();
+            all.sort();
+            all.dedup();
+            let matched: Vec<String> = all
+                .into_iter()
+                .filter(|w| pr_words.iter().any(|p| same_word(w, p)))
+                .collect();
+            if matched.is_empty() {
+                return None;
+            }
+            let score = matched
+                .iter()
+                .map(|w| if name.contains(w) { 2 } else { 1 })
+                .sum();
+            Some(Suggestion {
+                name: l.name.clone(),
+                score,
+                matched,
+            })
+        })
+        .collect();
+    ranked.sort_by(|a, b| {
+        b.score
+            .cmp(&a.score)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    ranked.truncate(SUGGESTIONS);
+    ranked
+}
+
+/// Equal, or one a prefix of the other once both have four letters, as `test` and `tests`.
+fn same_word(a: &str, b: &str) -> bool {
+    a == b || (a.len().min(b.len()) >= 4 && (a.starts_with(b) || b.starts_with(a)))
+}
+
+/// Lowercase words of two or more letters, minus words too common to say anything.
+fn words(text: &str) -> Vec<String> {
+    text.split(|c: char| !c.is_alphanumeric())
+        .map(str::to_lowercase)
+        .filter(|w| w.len() >= 2 && !w.chars().all(|c| c.is_ascii_digit()))
+        .filter(|w| !STOP_WORDS.contains(&w.as_str()))
+        .collect()
+}
+
+const STOP_WORDS: &[&str] = &[
+    "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "has", "in", "into", "is",
+    "it", "its", "of", "on", "or", "that", "the", "this", "to", "was", "with", "add", "adds",
+    "change", "changes", "code", "file", "files", "fix", "fixes", "main", "new", "pr", "pull",
+    "request", "src", "update", "updates", "use", "uses",
+];
+
+// -------------------------------------------------------------------------
 //  render
 // -------------------------------------------------------------------------
 
@@ -344,6 +455,70 @@ mod tests {
             resolve("documentation", &labels).unwrap_err(),
             "No label \"documentation\""
         );
+    }
+
+    #[test]
+    fn rank_prefers_name_words_and_skips_applied() {
+        let mut labels = vec![
+            Label {
+                name: "documentation".to_string(),
+                description: "Improvements or additions to docs".to_string(),
+                applied: false,
+            },
+            Label {
+                name: "continuous integration".to_string(),
+                description: "GitHub workflows".to_string(),
+                applied: false,
+            },
+            Label {
+                name: "testing".to_string(),
+                description: "Tests and the test suite".to_string(),
+                applied: false,
+            },
+            label("cleanup"),
+        ];
+        labels[3].applied = true;
+        let text = [
+            "ci: run tests on arm64 runners",
+            "Adds a cleanup job.",
+            "ci/arm64-tests",
+            ".github/workflows/build.yml",
+            "test/test_inflate.c",
+        ];
+        let pr_words: HashSet<String> = text.iter().flat_map(|t| words(t)).collect();
+        let ranked: Vec<(String, usize, Vec<String>)> = rank(&labels, &pr_words)
+            .into_iter()
+            .map(|s| (s.name, s.score, s.matched))
+            .collect();
+        assert_eq!(
+            ranked,
+            vec![
+                (
+                    "testing".to_string(),
+                    4,
+                    vec![
+                        "test".to_string(),
+                        "testing".to_string(),
+                        "tests".to_string()
+                    ]
+                ),
+                (
+                    "continuous integration".to_string(),
+                    2,
+                    vec!["github".to_string(), "workflows".to_string()]
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn words_drop_noise() {
+        assert_eq!(
+            words("Fix the src/pr/labels.rs file for PR 42"),
+            vec!["labels", "rs"]
+        );
+        assert!(same_word("test", "tests"));
+        assert!(!same_word("ci", "cint"));
     }
 
     #[test]
