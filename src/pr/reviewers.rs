@@ -1,9 +1,9 @@
 use anyhow::Result;
 use serde::Serialize;
-use serde_json::{Value, json};
+use serde_json::json;
 use std::collections::HashSet;
 
-use crate::api::pulls::{fetch_pr, is_bot};
+use crate::api::pulls::{self, Contributor, fetch_pr, is_bot};
 use crate::cli::ReviewersArgs;
 use crate::context::Ctx;
 use crate::output;
@@ -22,16 +22,7 @@ pub fn run(ctx: &Ctx, args: ReviewersArgs) -> Result<()> {
 
     if !args.add.is_empty() {
         // gh's --add-reviewer fails with empty-string errors in some repos, the endpoint does not.
-        let resp = client.post(
-            &format!("{}/requested_reviewers", pr.api()),
-            &json!({ "reviewers": args.add }),
-        )?;
-        let requested: Vec<String> = resp["requested_reviewers"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|u| u["login"].as_str().map(str::to_string))
-            .collect();
+        let requested = pulls::request_reviewers(client, &pr, &args.add)?;
         if ctx.json {
             return output::print_json(&json!({ "pr": pr, "requested": requested }));
         }
@@ -44,30 +35,16 @@ pub fn run(ctx: &Ctx, args: ReviewersArgs) -> Result<()> {
     let info = fetch_pr(client, &pr)?;
     let viewer = client.viewer()?.to_string();
     // A few extra so filtering out bots and the author still leaves `limit`.
-    let contributors = client.get(&format!(
-        "{}/contributors?per_page={}",
-        pr.repo.api(),
-        (args.limit + 10).min(100)
-    ))?;
-    let requested = client.get(&format!("{}/requested_reviewers", pr.api()))?;
-    let reviews = client.get_all(&format!("{}/reviews", pr.api()))?;
-
-    let requested: HashSet<String> = logins(&requested["users"]);
-    let reviewed: HashSet<String> = reviews
-        .iter()
-        .filter_map(|r| r["user"]["login"].as_str().map(str::to_string))
+    let contributors = pulls::contributors(client, &pr.repo, (args.limit + 10).min(100))?;
+    let requested: HashSet<String> = pulls::requested_reviewers(client, &pr)?
+        .into_iter()
+        .collect();
+    let reviewed: HashSet<String> = pulls::reviews(client, &pr)?
+        .into_iter()
+        .filter_map(|r| r.user.and_then(|u| u.login))
         .collect();
     let excluded = [viewer.as_str(), info.author.as_str()];
-    let candidates = rank(
-        contributors
-            .as_array()
-            .map(Vec::as_slice)
-            .unwrap_or_default(),
-        &excluded,
-        &requested,
-        &reviewed,
-        args.limit,
-    );
+    let candidates = rank(&contributors, &excluded, &requested, &reviewed, args.limit);
 
     if ctx.json {
         return output::print_json(&candidates);
@@ -84,18 +61,9 @@ pub fn run(ctx: &Ctx, args: ReviewersArgs) -> Result<()> {
     Ok(())
 }
 
-fn logins(users: &Value) -> HashSet<String> {
-    users
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|u| u["login"].as_str().map(str::to_string))
-        .collect()
-}
-
 /// Top human contributors in API order, minus `excluded`, tagged with their review status.
 fn rank(
-    contributors: &[Value],
+    contributors: &[Contributor],
     excluded: &[&str],
     requested: &HashSet<String>,
     reviewed: &HashSet<String>,
@@ -104,8 +72,8 @@ fn rank(
     contributors
         .iter()
         .filter_map(|c| {
-            let login = c["login"].as_str()?;
-            let typename = (c["type"].as_str() == Some("Bot")).then_some("Bot");
+            let login = c.login.as_deref()?;
+            let typename = (c.kind.as_deref() == Some("Bot")).then_some("Bot");
             if is_bot(typename, login) || excluded.contains(&login) {
                 return None;
             }
@@ -118,7 +86,7 @@ fn rank(
             };
             Some(Candidate {
                 login: login.to_string(),
-                contributions: c["contributions"].as_u64().unwrap_or(0),
+                contributions: c.contributions,
                 status: status.to_string(),
             })
         })
@@ -132,14 +100,17 @@ mod tests {
 
     #[test]
     fn rank_skips_bots_author_and_viewer() {
-        let contributors = vec![
+        let contributors: Vec<Contributor> = [
             json!({"login": "me", "type": "User", "contributions": 90}),
             json!({"login": "dependabot[bot]", "type": "Bot", "contributions": 80}),
             json!({"login": "alice", "type": "User", "contributions": 70}),
             json!({"login": "author", "type": "User", "contributions": 60}),
             json!({"login": "bob", "type": "User", "contributions": 50}),
             json!({"login": "carol", "type": "User", "contributions": 40}),
-        ];
+        ]
+        .into_iter()
+        .map(|v| serde_json::from_value(v).unwrap())
+        .collect();
         let requested = HashSet::from(["bob".to_string()]);
         let reviewed = HashSet::from(["alice".to_string(), "bob".to_string()]);
         let ranked = rank(&contributors, &["me", "author"], &requested, &reviewed, 2);
