@@ -4,11 +4,11 @@ use serde_json::{Value, json};
 use std::collections::HashSet;
 
 use crate::api::json::str_of;
+use crate::api::pulls::fetch_pr;
 use crate::api::{Client, PrRef, Repo, encode_segment};
 use crate::cli::LabelsArgs;
 use crate::context::Ctx;
 use crate::output;
-use crate::pr::model::fetch_pr;
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 struct Label {

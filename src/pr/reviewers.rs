@@ -3,10 +3,10 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use std::collections::HashSet;
 
+use crate::api::pulls::{fetch_pr, is_bot};
 use crate::cli::ReviewersArgs;
 use crate::context::Ctx;
 use crate::output;
-use crate::pr::model::{fetch_pr, is_bot};
 
 #[derive(Debug, PartialEq, Serialize)]
 struct Candidate {

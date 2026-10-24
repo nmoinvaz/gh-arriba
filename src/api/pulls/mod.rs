@@ -9,9 +9,21 @@ use serde_json::{Value, json};
 
 use crate::api::{Client, PrRef, Repo};
 
+mod comments;
 mod rollup;
+mod threads;
 
+pub use comments::{
+    RestComment, edit_issue_comment, edit_review, edit_review_comment, find_issue_comment,
+    find_review_comment, issue_comment, review, review_comment,
+};
 pub use rollup::{CheckRun, StatusContext, StatusFields, checks_with_status, checks_with_title};
+#[cfg(test)]
+pub use threads::Comment;
+pub use threads::{
+    IssueComment, PrThreads, ResolvedThread, Review, Thread, fetch_threads, is_bot, issue_comments,
+    last_review_time, reply_to_comment, reply_to_thread, reviews, set_thread_resolved,
+};
 
 /// Pull request metadata most commands need.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -114,6 +126,8 @@ pub fn fetch_pr(client: &Client, pr: &PrRef) -> Result<PrInfo> {
 /// A GraphQL user, bot, or other actor. Null for deleted accounts.
 #[derive(Clone, Debug, Deserialize)]
 pub struct Actor {
+    #[serde(rename = "__typename")]
+    pub typename: Option<String>,
     pub login: Option<String>,
 }
 
@@ -121,6 +135,18 @@ pub struct Actor {
 pub fn login_or_ghost(actor: Option<&Actor>) -> String {
     actor
         .and_then(|a| a.login.clone())
+        .unwrap_or_else(|| "ghost".to_string())
+}
+
+/// A REST user object. Null for deleted accounts.
+#[derive(Clone, Debug, Deserialize)]
+pub struct User {
+    pub login: Option<String>,
+}
+
+/// Login of a REST user, or "ghost" for deleted accounts.
+pub fn user_login(user: Option<&User>) -> String {
+    user.and_then(|u| u.login.clone())
         .unwrap_or_else(|| "ghost".to_string())
 }
 
@@ -209,6 +235,15 @@ pub fn my_open_prs(client: &Client, repo: &Repo) -> Result<Vec<PrRef>> {
     }
     prs.sort_by_key(|p| p.number);
     Ok(prs)
+}
+
+/// GET every page of a REST list and deserialize its items.
+fn get_all<T: DeserializeOwned>(client: &Client, path: &str) -> Result<Vec<T>> {
+    client
+        .get_all(path)?
+        .into_iter()
+        .map(|v| serde_json::from_value(v).with_context(|| format!("Failed to parse {path}")))
+        .collect()
 }
 
 /// Run a GraphQL query and deserialize its `data`.

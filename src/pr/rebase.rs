@@ -4,11 +4,11 @@ use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::api::pulls::{PrInfo, fetch_pr};
 use crate::api::{PrRef, Repo};
 use crate::cli::RebaseArgs;
 use crate::context::{Ctx, git, git_in};
 use crate::output;
-use crate::pr::model::{PrInfo, fetch_pr};
 
 #[derive(Debug, Serialize)]
 struct Outcome {

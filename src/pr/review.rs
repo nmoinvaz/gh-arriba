@@ -3,11 +3,11 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::api::json::{login_of, str_of};
+use crate::api::pulls::vars;
 use crate::api::{Client, PrRef};
 use crate::cli::{PrArg, ReviewAddArgs, ReviewCommand, ReviewEvent, ReviewSubmitArgs, Side};
 use crate::context::Ctx;
 use crate::output;
-use crate::pr::model::vars;
 use crate::prompt;
 
 pub fn run(ctx: &Ctx, cmd: ReviewCommand) -> Result<()> {
