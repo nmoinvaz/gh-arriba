@@ -97,6 +97,98 @@ fn rank(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::Client;
+    use mockito::{Matcher, Server};
+
+    fn ctx(server: &Server, json: bool) -> Ctx {
+        Ctx {
+            client: Client::for_tests(&server.url()),
+            repo_flag: Some("o/r".into()),
+            json,
+            yes: true,
+        }
+    }
+
+    fn args(add: &[&str], limit: usize) -> ReviewersArgs {
+        ReviewersArgs {
+            pr: Some("7".into()),
+            add: add.iter().map(|s| s.to_string()).collect(),
+            limit,
+        }
+    }
+
+    #[test]
+    fn add_requests_reviews_without_ranking() {
+        let mut server = Server::new();
+        let post = server
+            .mock("POST", "/repos/o/r/pulls/7/requested_reviewers")
+            .match_body(Matcher::Json(json!({"reviewers": ["bob", "carol"]})))
+            .with_body(r#"{"requested_reviewers": [{"login": "bob"}, {"login": "carol"}]}"#)
+            .expect(2)
+            .create();
+        let contributors = server
+            .mock("GET", "/repos/o/r/contributors")
+            .match_query(Matcher::Any)
+            .expect(0)
+            .create();
+        run(&ctx(&server, true), args(&["bob", "carol"], 10)).unwrap();
+        run(&ctx(&server, false), args(&["bob", "carol"], 10)).unwrap();
+        post.assert();
+        contributors.assert();
+    }
+
+    fn mock_suggest_inputs(server: &mut Server, contributors: &str) {
+        server
+            .mock("POST", "/graphql")
+            .match_body(Matcher::Regex("isCrossRepository".into()))
+            .with_body(
+                r#"{"data": {"repository": {"pullRequest": {"number": 7,
+                    "createdAt": "2026-01-01T00:00:00Z", "author": {"login": "author"}}}}}"#,
+            )
+            .create();
+        server
+            .mock("POST", "/graphql")
+            .match_body(Matcher::Regex(r"query \{ viewer".into()))
+            .with_body(r#"{"data": {"viewer": {"login": "me"}}}"#)
+            .create();
+        server
+            .mock("GET", "/repos/o/r/contributors")
+            // Ten extra, so dropping bots and the author still leaves the limit.
+            .match_query(Matcher::UrlEncoded("per_page".into(), "12".into()))
+            .with_body(contributors)
+            .create();
+        server
+            .mock("GET", "/repos/o/r/pulls/7/requested_reviewers")
+            .with_body(r#"{"users": [{"login": "bob"}]}"#)
+            .create();
+        server
+            .mock("GET", "/repos/o/r/pulls/7/reviews")
+            .match_query(Matcher::Any)
+            .with_body(r#"[{"id": 1, "user": {"login": "alice"}}, {"id": 2, "user": null}]"#)
+            .create();
+    }
+
+    #[test]
+    fn suggest_ranks_contributors() {
+        let mut server = Server::new();
+        mock_suggest_inputs(
+            &mut server,
+            r#"[{"login": "me", "type": "User", "contributions": 9},
+                {"login": "renovate[bot]", "type": "Bot", "contributions": 8},
+                {"login": "alice", "type": "User", "contributions": 7},
+                {"login": "bob", "type": "User", "contributions": 6},
+                {"login": "carol", "type": "User", "contributions": 5}]"#,
+        );
+        run(&ctx(&server, true), args(&[], 2)).unwrap();
+        run(&ctx(&server, false), args(&[], 2)).unwrap();
+    }
+
+    #[test]
+    fn suggest_on_an_empty_repository() {
+        let mut server = Server::new();
+        mock_suggest_inputs(&mut server, "");
+        run(&ctx(&server, false), args(&[], 2)).unwrap();
+    }
 
     #[test]
     fn rank_skips_bots_author_and_viewer() {
