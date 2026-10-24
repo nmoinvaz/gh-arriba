@@ -289,6 +289,8 @@ pub fn check(runs: &[RunState]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::Client;
+    use mockito::{Matcher, Server, ServerGuard};
     use serde_json::json;
 
     fn repo() -> Repo {
@@ -407,5 +409,144 @@ mod tests {
              failure    Ubuntu GCC  3m12s\n  \
              queued     macOS\n"
         );
+    }
+
+    fn ctx(server: &ServerGuard) -> Ctx {
+        Ctx {
+            client: Client::for_tests(&server.url()),
+            repo_flag: Some("o/r".into()),
+            json: true,
+            yes: true,
+        }
+    }
+
+    /// Serve run 9 of o/r with `status` and `jobs`, `times` times.
+    fn serve_run(server: &mut ServerGuard, status: &str, jobs: serde_json::Value, times: usize) {
+        server
+            .mock("GET", "/repos/o/r/actions/runs/9")
+            .with_body(json!({"id": 9, "name": "CI", "status": status}).to_string())
+            .expect(times)
+            .create();
+        server
+            .mock("GET", "/repos/o/r/actions/runs/9/jobs")
+            .match_query(Matcher::Any)
+            .with_body(json!({ "jobs": jobs }).to_string())
+            .expect(times)
+            .create();
+    }
+
+    fn no_wait(job: Option<&str>) -> Wait {
+        Wait {
+            interval: Duration::ZERO,
+            timeout: Duration::from_secs(60),
+            job: job.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn wait_from_args() {
+        let wait: Wait = (&crate::cli::WaitArgs {
+            interval: 5,
+            timeout: 2,
+            job: Some("Export".to_string()),
+        })
+            .into();
+        assert_eq!(wait.interval, Duration::from_secs(5));
+        assert_eq!(wait.timeout, Duration::from_secs(120));
+        assert_eq!(wait.job.as_deref(), Some("export"));
+        assert_eq!(Wait::default().interval, Duration::from_secs(20));
+    }
+
+    #[test]
+    fn watch_polls_until_the_run_completes() {
+        let mut server = Server::new();
+        // Queued long ago at first, then finished on the next poll.
+        serve_run(
+            &mut server,
+            "in_progress",
+            json!([
+                {"id": 1, "name": "Build", "status": "queued", "labels": ["big"],
+                 "created_at": "2020-01-01T00:00:00Z"},
+                {"id": 2, "name": "Lint", "status": "completed", "conclusion": "success"}
+            ]),
+            1,
+        );
+        serve_run(
+            &mut server,
+            "completed",
+            json!([
+                {"id": 1, "name": "Build", "status": "completed", "conclusion": "success",
+                 "started_at": "2026-01-01T00:00:00Z", "completed_at": "2026-01-01T00:01:00Z"},
+                {"id": 2, "name": "Lint", "status": "completed", "conclusion": "success"}
+            ]),
+            1,
+        );
+        let ctx = ctx(&server);
+        let states = watch(&ctx, &[(Repo::parse("o/r").unwrap(), 9)], &no_wait(None)).unwrap();
+        assert_eq!(states.len(), 1);
+        assert_eq!(states[0].status, "completed");
+        assert_eq!(states[0].jobs[0].seconds, Some(60));
+        report(&ctx, &states).unwrap();
+    }
+
+    #[test]
+    fn watch_times_out_with_runs_still_going() {
+        let mut server = Server::new();
+        serve_run(
+            &mut server,
+            "in_progress",
+            json!([{"id": 1, "name": "Build", "status": "in_progress"}]),
+            1,
+        );
+        let ctx = ctx(&server);
+        let wait = Wait {
+            interval: Duration::from_secs(60),
+            timeout: Duration::ZERO,
+            job: None,
+        };
+        let err = watch(&ctx, &[(Repo::parse("o/r").unwrap(), 9)], &wait)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(err, "Timed out after 0s with runs still going: CI (9)");
+    }
+
+    #[test]
+    fn watch_for_matching_jobs_only() {
+        let mut server = Server::new();
+        // The run is still going, but the job being waited for is done.
+        serve_run(
+            &mut server,
+            "in_progress",
+            json!([
+                {"id": 1, "name": "Export Check", "status": "completed", "conclusion": "failure"},
+                {"id": 2, "name": "Ubuntu", "status": "in_progress"}
+            ]),
+            1,
+        );
+        let repo = Repo::parse("o/r").unwrap();
+        let states = watch(
+            &ctx(&server),
+            &[(repo.clone(), 9)],
+            &no_wait(Some("export")),
+        )
+        .unwrap();
+        let names: Vec<&str> = states[0].jobs.iter().map(|j| j.name.as_str()).collect();
+        assert_eq!(names, vec!["Export Check"]);
+        assert_eq!(
+            check(&states).unwrap_err().to_string(),
+            "Failed: CI: Export Check"
+        );
+
+        let mut server = Server::new();
+        serve_run(
+            &mut server,
+            "completed",
+            json!([{"id": 2, "name": "Ubuntu", "status": "completed"}]),
+            1,
+        );
+        let err = watch(&ctx(&server), &[(repo, 9)], &no_wait(Some("export")))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(err, "No jobs match \"export\"");
     }
 }
