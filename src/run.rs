@@ -10,8 +10,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use crate::api::actions;
-use crate::api::{Repo, encode_path, is_failed};
+use crate::api::actions::{self, Job, WorkflowRun};
+use crate::api::{Repo, is_failed};
 use crate::cli::{DispatchArgs, LogsArgs, RunCommand, WatchArgs};
 use crate::context::{Ctx, git};
 use crate::log::{self, Excerpt};
@@ -119,15 +119,9 @@ fn logs(ctx: &Ctx, args: LogsArgs) -> Result<()> {
     // A bare number is tried as a run, then as a job.
     let target = match target {
         Target::Unknown(id) => {
-            if client
-                .get_opt(&format!("{}/actions/runs/{id}", repo.api()))?
-                .is_some()
-            {
+            if actions::workflow_run_opt(client, &repo, id)?.is_some() {
                 Target::Run { id, attempt: None }
-            } else if client
-                .get_opt(&format!("{}/actions/jobs/{id}", repo.api()))?
-                .is_some()
-            {
+            } else if actions::job_opt(client, &repo, id)?.is_some() {
                 Target::Job(id)
             } else {
                 anyhow::bail!("No run or job {id} in {repo}");
@@ -138,26 +132,25 @@ fn logs(ctx: &Ctx, args: LogsArgs) -> Result<()> {
 
     let (run_id, jobs) = match target {
         Target::Job(id) => {
-            let job = client.get(&format!("{}/actions/jobs/{id}", repo.api()))?;
-            (job["run_id"].as_u64().unwrap_or(0), vec![job])
+            let job = actions::job(client, &repo, id)?;
+            (job.run_id, vec![job])
         }
         Target::Run { id, attempt } => {
-            let path = match attempt {
-                Some(a) => format!("{}/actions/runs/{id}/attempts/{a}/jobs", repo.api()),
-                None => format!("{}/actions/runs/{id}/jobs?filter=latest", repo.api()),
+            let jobs = match attempt {
+                Some(a) => actions::attempt_jobs(client, &repo, id, a)?,
+                None => actions::run_jobs(client, &repo, id)?,
             };
-            let jobs: Vec<Value> = client
-                .get_all_in(&path, "jobs")?
+            let jobs: Vec<Job> = jobs
                 .into_iter()
-                .filter(|j| !args.failed || is_failed(j["conclusion"].as_str()))
+                .filter(|j| !args.failed || is_failed(j.conclusion.as_deref()))
                 .collect();
             (id, jobs)
         }
         Target::Unknown(_) => unreachable!("resolved above"),
     };
-    let jobs: Vec<Value> = jobs
+    let jobs: Vec<Job> = jobs
         .into_iter()
-        .filter(|j| name_matches(j["name"].as_str().unwrap_or_default(), &args.jobs))
+        .filter(|j| name_matches(&j.name, &args.jobs))
         .collect();
 
     if jobs.is_empty() {
@@ -178,16 +171,14 @@ fn logs(ctx: &Ctx, args: LogsArgs) -> Result<()> {
     let mut downloaded = Vec::new();
     // Each log is a redirect to blob storage, so fetch a few at a time.
     let results = parallel::map(&jobs, |job| {
-        let id = job["id"].as_u64().unwrap_or(0);
-        let name = job["name"].as_str().unwrap_or("job");
         // A running job's log is still growing, so only finished ones are reused.
-        let reuse = !refresh && job["status"].as_str() == Some("completed");
-        download(ctx, &repo, id, &dir, name, reuse)
+        let reuse = !refresh && job.status == "completed";
+        download(ctx, &repo, job.id, &dir, &job.name, reuse)
     });
     for (job, result) in jobs.iter().zip(results) {
-        let id = job["id"].as_u64().unwrap_or(0);
-        let name = job["name"].as_str().unwrap_or("job").to_string();
-        let conclusion = job["conclusion"].as_str().map(str::to_string);
+        let id = job.id;
+        let name = job.name.clone();
+        let conclusion = job.conclusion.clone();
         match result {
             Ok((path, cached)) => {
                 let excerpt = if args.errors || args.grep.is_some() {
@@ -258,10 +249,7 @@ pub(crate) fn download(
     if reuse && has_saved_copy(&path) {
         return Ok((path, true));
     }
-    // The endpoint redirects to blob storage, and reqwest drops the token on that hop.
-    let text = ctx
-        .client
-        .get_text(&format!("{}/actions/jobs/{job_id}/logs", repo.api()))?;
+    let text = actions::job_log(&ctx.client, repo, job_id)?;
     // Write beside the final name and rename, so an interrupted download is never reused.
     let part = path.with_extension("log.part");
     fs::write(&part, text).with_context(|| format!("Failed to write {}", part.display()))?;
@@ -316,19 +304,9 @@ pub(crate) fn find_runs(
     workflow: Option<&str>,
     wait: Option<&watch::Wait>,
 ) -> Result<Vec<u64>> {
-    let (path, what) = match commit {
-        Commit::Sha(sha) => (
-            format!("{}/actions/runs?head_sha={sha}", repo.api()),
-            format!("commit {}", &sha[..sha.len().min(10)]),
-        ),
-        Commit::Branch(b) => (
-            format!(
-                "{}/actions/runs?branch={}&per_page=100",
-                repo.api(),
-                encode_path(b)
-            ),
-            format!("branch {b}"),
-        ),
+    let what = match commit {
+        Commit::Sha(sha) => format!("commit {}", &sha[..sha.len().min(10)]),
+        Commit::Branch(b) => format!("branch {b}"),
     };
     let for_workflow = workflow
         .map(|w| format!(" for workflow {w}"))
@@ -337,19 +315,20 @@ pub(crate) fn find_runs(
     let mut announced = false;
     loop {
         let runs = match commit {
-            Commit::Sha(_) => ctx.client.get_all_in(&path, "workflow_runs")?,
+            Commit::Sha(sha) => actions::commit_runs(&ctx.client, repo, sha)?,
             // Only the newest page matters, older commits are not watched.
-            Commit::Branch(_) => ctx.client.get(&path)?["workflow_runs"]
-                .as_array()
-                .cloned()
-                .unwrap_or_default(),
+            Commit::Branch(b) => actions::branch_runs(&ctx.client, repo, b)?,
         };
         let ids = select_runs(&runs, workflow);
         if !ids.is_empty() {
             return Ok(ids);
         }
         if Instant::now() >= deadline {
-            let seen: BTreeSet<&str> = runs.iter().filter_map(|r| r["name"].as_str()).collect();
+            let seen: BTreeSet<&str> = runs
+                .iter()
+                .map(|r| r.name.as_str())
+                .filter(|n| !n.is_empty())
+                .collect();
             let hint = if seen.is_empty() {
                 " Push the commit first, or pass --sha or --branch.".to_string()
             } else {
@@ -367,26 +346,18 @@ pub(crate) fn find_runs(
 }
 
 /// Runs of the newest commit in `runs`, which the API lists newest first, narrowed to a workflow.
-fn select_runs(runs: &[Value], workflow: Option<&str>) -> Vec<u64> {
-    let runs: Vec<&Value> = runs
+fn select_runs(runs: &[WorkflowRun], workflow: Option<&str>) -> Vec<u64> {
+    let runs: Vec<&WorkflowRun> = runs
         .iter()
-        .filter(|r| {
-            workflow.is_none_or(|w| {
-                crate::workflow::matches(
-                    r["name"].as_str().unwrap_or_default(),
-                    r["path"].as_str().unwrap_or_default(),
-                    w,
-                )
-            })
-        })
+        .filter(|r| workflow.is_none_or(|w| crate::workflow::matches(&r.name, &r.path, w)))
         .collect();
-    let Some(sha) = runs.first().and_then(|r| r["head_sha"].as_str()) else {
+    let Some(sha) = runs.first().map(|r| r.head_sha.as_str()) else {
         return Vec::new();
     };
     let mut ids: Vec<u64> = runs
         .iter()
-        .filter(|r| r["head_sha"].as_str() == Some(sha))
-        .filter_map(|r| r["id"].as_u64())
+        .filter(|r| r.head_sha == sha)
+        .map(|r| r.id)
         .collect();
     ids.sort_unstable();
     ids
@@ -397,20 +368,13 @@ pub(crate) fn resolve_run(ctx: &Ctx, s: &str) -> Result<(Repo, u64)> {
     let (url_repo, target) = parse_target(s)?;
     let repo = ctx.repo_or(url_repo)?;
     let job_run = |id: u64| -> Result<Option<u64>> {
-        Ok(ctx
-            .client
-            .get_opt(&format!("{}/actions/jobs/{id}", repo.api()))?
-            .and_then(|job| job["run_id"].as_u64()))
+        Ok(actions::job_opt(&ctx.client, &repo, id)?.map(|job| job.run_id))
     };
     let id = match target {
         Target::Run { id, .. } => id,
         Target::Job(id) => job_run(id)?.with_context(|| format!("No job {id} in {repo}"))?,
         Target::Unknown(id) => {
-            if ctx
-                .client
-                .get_opt(&format!("{}/actions/runs/{id}", repo.api()))?
-                .is_some()
-            {
+            if actions::workflow_run_opt(&ctx.client, &repo, id)?.is_some() {
                 id
             } else {
                 job_run(id)?.with_context(|| format!("No run or job {id} in {repo}"))?
@@ -572,11 +536,12 @@ mod tests {
     #[test]
     fn runs_of_newest_commit_and_workflow() {
         use serde_json::json;
-        let runs = vec![
-            json!({"id": 30, "name": "Lint", "path": ".github/workflows/lint.yml", "head_sha": "bbb"}),
-            json!({"id": 20, "name": "Build", "path": ".github/workflows/build.yml", "head_sha": "bbb"}),
-            json!({"id": 10, "name": "Build", "path": ".github/workflows/build.yml", "head_sha": "aaa"}),
-        ];
+        let runs: Vec<WorkflowRun> = serde_json::from_value(json!([
+            {"id": 30, "name": "Lint", "path": ".github/workflows/lint.yml", "head_sha": "bbb"},
+            {"id": 20, "name": "Build", "path": ".github/workflows/build.yml", "head_sha": "bbb"},
+            {"id": 10, "name": "Build", "path": ".github/workflows/build.yml", "head_sha": "aaa"},
+        ]))
+        .unwrap();
         assert_eq!(select_runs(&runs, None), vec![20, 30]);
         assert_eq!(select_runs(&runs, Some("build.yml")), vec![20]);
         assert!(select_runs(&runs, Some("deploy")).is_empty());
