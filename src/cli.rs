@@ -488,6 +488,28 @@ pub struct ArtifactsArgs {
     /// The newest successful run with artifacts on --branch (default: the default branch)
     #[arg(long, conflicts_with_all = ["runs", "sha", "pr"])]
     pub success: bool,
+
+    /// Only artifacts with this exact name, repeatable
+    #[arg(short = 'n', long = "name", value_name = "NAME")]
+    pub names: Vec<String>,
+
+    /// Only artifacts whose name matches this glob of * and ?, repeatable
+    #[arg(short = 'p', long = "pattern", value_name = "GLOB")]
+    pub patterns: Vec<String>,
+
+    /// Download and extract the artifacts, each into its own directory when there are several
+    #[arg(long)]
+    pub download: bool,
+
+    /// Directory to extract into
+    #[arg(
+        short = 'D',
+        long,
+        value_name = "DIR",
+        default_value = ".",
+        requires = "download"
+    )]
+    pub dir: PathBuf,
 }
 
 #[derive(Args)]
