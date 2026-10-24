@@ -74,6 +74,9 @@ pub enum PrCommand {
     Reviewers(ReviewersArgs),
     /// List the repo's labels, and add or remove them on a PR
     Labels(LabelsArgs),
+    /// Remove scratch paths a PR adds or changes, in a commit on its branch, before it merges
+    #[command(override_usage = "gh arriba pr strip [OPTIONS] [PR] <PATH>...")]
+    Strip(StripArgs),
 }
 
 #[derive(Args)]
@@ -363,6 +366,22 @@ pub struct LabelsArgs {
     /// Rank labels by words shared with the PR's title, body, branch, and files
     #[arg(long, conflicts_with_all = ["add", "remove"])]
     pub suggest: bool,
+}
+
+#[derive(Args)]
+pub struct StripArgs {
+    /// [PR]: number, URL, or owner/repo#N (default: PR for the current branch), then the files or
+    /// directories to take out of it
+    #[arg(value_name = "[PR] PATH", required = true)]
+    pub args: Vec<String>,
+
+    /// Print what would change without committing
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Commit message (default: "Strip PATHS before merging")
+    #[arg(short, long, value_name = "TEXT")]
+    pub message: Option<String>,
 }
 
 #[derive(Subcommand)]

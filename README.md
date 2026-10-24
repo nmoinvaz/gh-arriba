@@ -55,6 +55,7 @@ gh arriba [options] <command>
 | `pr rebase [PR]` | Rebase onto the base branch, signed locally or server-side with `--remote` |
 | `pr reviewers [PR]` | Suggest reviewers from top contributors and request one with `--add` |
 | `pr labels [PR]` | List the repo's labels, `--suggest` some for the PR, and `--add` or `--remove` them by close match |
+| `pr strip [PR] <PATH>...` | Take scratch files and directories out of a PR in one commit on its branch, previewing with `--dry-run` |
 
 `PR` is a number, URL, `owner/repo#N`, or branch. It defaults to the PR for the current branch.
 `ID` in `pr reply` and `pr resolve` is a comment ID, a `#discussion_r` comment link, or a
@@ -143,6 +144,16 @@ gh arriba pr labels
 gh arriba pr labels 42 --suggest
 gh arriba pr labels 42 --add ui
 ```
+
+Take scratch notes out of a PR before it merges. Files the PR added are deleted and files it
+changed go back to the base version, in one commit GitHub makes on the PR branch:
+
+```
+gh arriba pr strip 42 .plans/ docs/agent-notes/ --dry-run
+gh arriba pr strip 42 .plans/ docs/agent-notes/
+```
+
+Squash merging then keeps them out of the base branch's history too.
 
 Rerun every failed check across all your open PRs:
 

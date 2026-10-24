@@ -10,6 +10,7 @@ mod retry;
 mod review;
 mod reviewers;
 mod rollup;
+mod strip;
 mod threads;
 
 use anyhow::Result;
@@ -32,5 +33,6 @@ pub fn run(ctx: &Ctx, cmd: PrCommand) -> Result<()> {
         PrCommand::Rebase(args) => rebase::run(ctx, args),
         PrCommand::Reviewers(args) => reviewers::run(ctx, args),
         PrCommand::Labels(args) => labels::run(ctx, args),
+        PrCommand::Strip(args) => strip::run(ctx, args),
     }
 }

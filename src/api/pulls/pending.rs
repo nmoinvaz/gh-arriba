@@ -13,6 +13,11 @@ use crate::api::{Client, PrRef};
 pub struct PrFile {
     #[serde(default, deserialize_with = "nullable")]
     pub filename: String,
+    /// added, removed, modified, renamed, copied, changed, or unchanged.
+    #[serde(default, deserialize_with = "nullable")]
+    pub status: String,
+    /// The path before a rename.
+    pub previous_filename: Option<String>,
     /// Unified diff hunks. Absent for binary files and very large diffs.
     pub patch: Option<String>,
 }

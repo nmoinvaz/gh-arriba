@@ -14,6 +14,7 @@ mod comments;
 mod labels;
 mod pending;
 mod rollup;
+mod strip;
 mod threads;
 
 pub use branch::{behind_by, file_at, rebase_branch};
@@ -26,10 +27,11 @@ pub use labels::{
     request_reviewers, requested_reviewers,
 };
 pub use pending::{
-    NewThread, add_pending_review, add_review_thread, create_review, delete_review, fetch_pending,
-    pr_files, submit_review,
+    NewThread, PrFile, add_pending_review, add_review_thread, create_review, delete_review,
+    fetch_pending, pr_files, submit_review,
 };
 pub use rollup::{CheckRun, StatusContext, StatusFields, checks_with_status, checks_with_title};
+pub use strip::{NewCommit, commit_on_branch, file_base64};
 #[cfg(test)]
 pub use threads::Comment;
 pub use threads::{
