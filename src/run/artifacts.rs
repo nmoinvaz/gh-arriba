@@ -7,9 +7,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::{Commit, find_runs, resolve_run, watch};
+use crate::api;
 use crate::cli::ArtifactsArgs;
 use crate::context::{Ctx, Repo, git};
-use crate::github;
 use crate::pr::model::fetch_pr;
 use crate::{output, prompt};
 
@@ -119,7 +119,7 @@ fn latest_success(ctx: &Ctx, args: &ArtifactsArgs) -> Result<((Repo, u64), Vec<A
     let path = format!(
         "{}/actions/runs?branch={}&status=success&per_page=100",
         repo.api(),
-        github::encode_path(&branch)
+        api::encode_path(&branch)
     );
     let runs = ctx.client.get(&path)?["workflow_runs"]
         .as_array()

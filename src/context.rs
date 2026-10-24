@@ -4,7 +4,7 @@ use std::fmt;
 use std::path::Path;
 use std::process::Command;
 
-use crate::github::Client;
+use crate::api::Client;
 
 /// State shared by every command: the API client and the global flags.
 pub struct Ctx {

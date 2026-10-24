@@ -5,8 +5,8 @@ use serde_json::Value;
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
+use crate::api::is_failed;
 use crate::context::{Ctx, Repo};
-use crate::github::is_failed;
 use crate::json::{opt_time_of, str_of};
 use crate::output;
 

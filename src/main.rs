@@ -1,8 +1,8 @@
+mod api;
 mod cli;
 mod config;
 mod context;
 mod dependabot;
-mod github;
 mod json;
 mod log;
 mod output;
@@ -17,9 +17,9 @@ mod workflow;
 use anyhow::Result;
 use clap::Parser;
 
+use api::Client;
 use cli::{Cli, Command};
 use context::Ctx;
-use github::Client;
 
 fn main() -> Result<()> {
     // Exit quietly when stdout closes early, as when piped into head, instead of panicking.

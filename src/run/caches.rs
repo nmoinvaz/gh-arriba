@@ -5,9 +5,9 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use super::watch;
+use crate::api;
 use crate::cli::CachesArgs;
 use crate::context::{Ctx, Repo};
-use crate::github;
 use crate::json::{opt_time_of, str_of};
 use crate::{output, parallel, prompt};
 
@@ -87,14 +87,11 @@ fn fetch(ctx: &Ctx, repo: &Repo, args: &CachesArgs) -> Result<Vec<Cache>> {
     let mut path = format!("{}/actions/caches", repo.api());
     let mut sep = '?';
     if let Some(r) = &args.git_ref {
-        path.push_str(&format!(
-            "{sep}ref={}",
-            github::encode_segment(&full_ref(r))
-        ));
+        path.push_str(&format!("{sep}ref={}", api::encode_segment(&full_ref(r))));
         sep = '&';
     }
     if let Some(k) = &args.key {
-        path.push_str(&format!("{sep}key={}", github::encode_segment(k)));
+        path.push_str(&format!("{sep}key={}", api::encode_segment(k)));
     }
     Ok(ctx
         .client

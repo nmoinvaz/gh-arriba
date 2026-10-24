@@ -2,9 +2,9 @@ use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::api::Client;
 use crate::cli::{Bump, ReleaseArgs};
 use crate::context::{Ctx, Repo};
-use crate::github::Client;
 use crate::run::watch;
 use crate::workflow::{self, Input, Workflow};
 use crate::{output, prompt};
