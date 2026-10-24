@@ -1,4 +1,5 @@
 pub mod artifacts;
+pub mod caches;
 pub mod watch;
 
 use anyhow::{Context, Result};
@@ -21,6 +22,7 @@ pub fn run(ctx: &Ctx, cmd: RunCommand) -> Result<()> {
         RunCommand::Watch(args) => watch_runs(ctx, args),
         RunCommand::Dispatch(args) => dispatch(ctx, args),
         RunCommand::Artifacts(args) => artifacts::run(ctx, args),
+        RunCommand::Caches(args) => caches::run(ctx, args),
     }
 }
 
