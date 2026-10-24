@@ -115,6 +115,87 @@ pub fn edit_review(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mockito::{Matcher, Server};
+
+    #[test]
+    fn get_comments_by_kind() {
+        let mut server = Server::new();
+        server
+            .mock("GET", "/repos/o/r/pulls/comments/1")
+            .with_body(r#"{"id": 1, "body": "inline", "path": "a.c"}"#)
+            .create();
+        server
+            .mock("GET", "/repos/o/r/issues/comments/2")
+            .with_body(r#"{"id": 2, "body": "conversation"}"#)
+            .create();
+        server
+            .mock("GET", "/repos/o/r/pulls/42/reviews/3")
+            .with_body(r#"{"id": 3, "body": "review", "state": "APPROVED"}"#)
+            .create();
+        let client = Client::for_tests(&server.url());
+        let repo = Repo::parse("o/r").unwrap();
+        assert_eq!(review_comment(&client, &repo, 1).unwrap().body, "inline");
+        assert_eq!(
+            issue_comment(&client, &repo, 2).unwrap().body,
+            "conversation"
+        );
+        let r = review(&client, &repo, 42, 3).unwrap();
+        assert_eq!(r.state.as_deref(), Some("APPROVED"));
+    }
+
+    #[test]
+    fn find_maps_missing_to_none() {
+        let mut server = Server::new();
+        server
+            .mock("GET", "/repos/o/r/pulls/comments/1")
+            .with_status(404)
+            .with_body(r#"{"message": "Not Found"}"#)
+            .create();
+        server
+            .mock("GET", "/repos/o/r/issues/comments/1")
+            .with_body(r#"{"id": 1, "body": "found"}"#)
+            .create();
+        server
+            .mock("GET", "/repos/o/r/issues/comments/2")
+            .with_status(404)
+            .create();
+        let client = Client::for_tests(&server.url());
+        let repo = Repo::parse("o/r").unwrap();
+        assert!(find_review_comment(&client, &repo, 1).unwrap().is_none());
+        assert_eq!(
+            find_issue_comment(&client, &repo, 1).unwrap().unwrap().body,
+            "found"
+        );
+        assert!(find_issue_comment(&client, &repo, 2).unwrap().is_none());
+    }
+
+    #[test]
+    fn edits_patch_comments_and_put_reviews() {
+        let mut server = Server::new();
+        let inline = server
+            .mock("PATCH", "/repos/o/r/pulls/comments/1")
+            .match_body(Matcher::Json(json!({"body": "new"})))
+            .with_body(r#"{"id": 1, "body": "new"}"#)
+            .create();
+        let issue = server
+            .mock("PATCH", "/repos/o/r/issues/comments/2")
+            .match_body(Matcher::Json(json!({"body": "new"})))
+            .with_body(r#"{"id": 2, "body": "new"}"#)
+            .create();
+        let rev = server
+            .mock("PUT", "/repos/o/r/pulls/42/reviews/3")
+            .match_body(Matcher::Json(json!({"body": "new"})))
+            .with_body(r#"{"id": 3, "body": "new"}"#)
+            .create();
+        let client = Client::for_tests(&server.url());
+        let repo = Repo::parse("o/r").unwrap();
+        assert_eq!(edit_review_comment(&client, &repo, 1, "new").unwrap().id, 1);
+        assert_eq!(edit_issue_comment(&client, &repo, 2, "new").unwrap().id, 2);
+        assert_eq!(edit_review(&client, &repo, 42, 3, "new").unwrap().id, 3);
+        inline.assert();
+        issue.assert();
+        rev.assert();
+    }
 
     #[test]
     fn paths_by_kind() {

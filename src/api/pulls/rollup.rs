@@ -277,7 +277,93 @@ fn fetch<T: DeserializeOwned>(client: &Client, pr: &PrRef, fields: &str) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::Repo;
+    use mockito::{Matcher, Server};
     use serde_json::json;
+
+    fn pr() -> PrRef {
+        PrRef {
+            repo: Repo::parse("o/r").unwrap(),
+            number: 7,
+        }
+    }
+
+    fn rollup_page(fields: Value, next: Option<&str>, nodes: Value) -> String {
+        let mut pr = fields;
+        pr["last"] = json!({ "nodes": [{ "commit": { "statusCheckRollup": { "contexts": {
+            "pageInfo": { "hasNextPage": next.is_some(), "endCursor": next },
+            "nodes": nodes
+        }}}}]});
+        json!({ "data": { "repository": { "pullRequest": pr } } }).to_string()
+    }
+
+    #[test]
+    fn checks_with_title_pages_through_contexts() {
+        let mut server = Server::new();
+        let first = server
+            .mock("POST", "/graphql")
+            .match_body(Matcher::AllOf(vec![
+                // Only the title is selected beside the checks.
+                Matcher::Regex(r"\{\\n +title\\n +last:".into()),
+                Matcher::PartialJson(json!({"variables": {"number": 7, "cursor": null}})),
+            ]))
+            .with_body(rollup_page(
+                json!({"title": "Fix"}),
+                Some("c1"),
+                json!([{ "__typename": "CheckRun", "name": "build", "status": "COMPLETED",
+                         "conclusion": "SUCCESS" }]),
+            ))
+            .create();
+        server
+            .mock("POST", "/graphql")
+            .match_body(Matcher::PartialJson(json!({"variables": {"cursor": "c1"}})))
+            .with_body(rollup_page(
+                json!({"title": "Ignored"}),
+                None,
+                json!([{ "__typename": "StatusContext", "context": "ci", "state": "PENDING" }]),
+            ))
+            .create();
+        let client = Client::for_tests(&server.url());
+        let rollup = checks_with_title(&client, &pr()).unwrap();
+        first.assert();
+        assert_eq!(rollup.pr.title, "Fix");
+        assert_eq!(rollup.runs.len(), 1);
+        assert_eq!(rollup.statuses[0].context, "ci");
+    }
+
+    #[test]
+    fn checks_with_status_on_a_commit_without_checks() {
+        let mut server = Server::new();
+        server
+            .mock("POST", "/graphql")
+            .match_body(Matcher::Regex("mergeStateStatus reviewDecision".into()))
+            .with_body(
+                json!({"data": {"repository": {"pullRequest": {
+                    "title": "Fix", "url": "u", "state": "OPEN", "isDraft": true,
+                    "headRefOid": "abc", "commits": {"totalCount": 1},
+                    "last": {"nodes": [{"commit": {"statusCheckRollup": null}}]}
+                }}}})
+                .to_string(),
+            )
+            .expect(1)
+            .create();
+        let client = Client::for_tests(&server.url());
+        let rollup = checks_with_status(&client, &pr()).unwrap();
+        assert_eq!(rollup.pr.is_draft, Some(true));
+        assert!(rollup.runs.is_empty() && rollup.statuses.is_empty());
+    }
+
+    #[test]
+    fn checks_of_missing_pr() {
+        let mut server = Server::new();
+        server
+            .mock("POST", "/graphql")
+            .with_body(r#"{"data": {"repository": {"pullRequest": null}}}"#)
+            .create();
+        let client = Client::for_tests(&server.url());
+        let err = checks_with_title(&client, &pr()).err().unwrap().to_string();
+        assert_eq!(err, "Pull request o/r#7 not found");
+    }
 
     #[test]
     fn page_splits_runs_statuses_and_fields() {
