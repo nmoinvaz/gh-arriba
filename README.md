@@ -50,6 +50,8 @@ gh arriba [options] <command>
 | `pr reviewers [PR]` | Suggest reviewers from top contributors and request one with `--add` |
 
 `PR` is a number, URL, `owner/repo#N`, or branch. It defaults to the PR for the current branch.
+`ID` in `pr reply` and `pr resolve` is a comment ID, a `#discussion_r` comment link, or a
+`PRRT_` thread ID.
 
 ### Workflows and releases
 
