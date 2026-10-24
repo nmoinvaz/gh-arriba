@@ -66,20 +66,6 @@ pub fn delete_cache(client: &Client, repo: &Repo, id: u64) -> Result<()> {
     Ok(())
 }
 
-/// State of a pull request, "open" or "closed", to tell which PR caches are stale.
-pub fn pull_state(client: &Client, repo: &Repo, number: u64) -> Result<String> {
-    #[derive(Deserialize)]
-    struct Pull {
-        #[serde(default, deserialize_with = "null_default")]
-        state: String,
-    }
-    let pull: Pull = parse(
-        client.get(&format!("{}/pulls/{number}", repo.api()))?,
-        "pull request",
-    )?;
-    Ok(pull.state)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

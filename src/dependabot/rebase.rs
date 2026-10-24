@@ -2,7 +2,7 @@ use anyhow::{Result, bail};
 use serde_json::json;
 
 use super::{DepPr, REBASE_COMMENT, Scope, fetch_prs};
-use crate::api::dependabot;
+use crate::api::{PrRef, pulls};
 use crate::cli::DependabotRebaseArgs;
 use crate::context::Ctx;
 use crate::output::print_json;
@@ -50,7 +50,11 @@ pub fn run(ctx: &Ctx, args: DependabotRebaseArgs) -> Result<()> {
 
     let mut requested = Vec::new();
     for pr in &targets {
-        dependabot::comment(&ctx.client, &repo, pr.number, REBASE_COMMENT)?;
+        let pr_ref = PrRef {
+            repo: repo.clone(),
+            number: pr.number,
+        };
+        pulls::add_issue_comment(&ctx.client, &pr_ref, REBASE_COMMENT)?;
         if !ctx.json {
             println!("  requested rebase on #{} {}", pr.number, pr.title);
         }

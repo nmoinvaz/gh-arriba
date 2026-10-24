@@ -2,7 +2,7 @@ use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::api::releases;
+use crate::api::{self, releases};
 use crate::cli::{Bump, ReleaseArgs};
 use crate::context::Ctx;
 use crate::run::watch;
@@ -276,13 +276,9 @@ pub fn run(ctx: &Ctx, args: ReleaseArgs) -> Result<()> {
     let repo = ctx.repo()?;
     let client = &ctx.client;
 
-    let info = client.get(&repo.api())?;
     let git_ref = match args.git_ref {
         Some(r) => r,
-        None => info["default_branch"]
-            .as_str()
-            .context("Repository has no default branch")?
-            .to_string(),
+        None => api::default_branch(client, &repo)?,
     };
 
     let previous = releases::latest_tag(client, &repo)?;

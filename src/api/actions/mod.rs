@@ -14,10 +14,8 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 
-use super::{Client, Repo};
-
 pub use artifacts::{Artifact, artifacts, delete_artifact, download_artifact, run_artifacts};
-pub use caches::{Cache, cache_usage, caches, delete_cache, pull_state};
+pub use caches::{Cache, cache_usage, caches, delete_cache};
 pub use checks::{CheckRun, check_runs, commit_statuses};
 pub use runners::{
     OrgRepo, Runner, org_repos, org_runners, recently_pushed_org_repos, repo_runners,
@@ -30,16 +28,6 @@ pub use workflows::{
     Workflow, dispatch_workflow, file_name, file_stem, workflow_dispatch_runs, workflow_file,
     workflows,
 };
-
-/// Default branch of the repository, which dispatches and branch lookups fall back to.
-pub fn default_branch(client: &Client, repo: &Repo) -> Result<String> {
-    #[derive(Deserialize)]
-    struct Repository {
-        default_branch: Option<String>,
-    }
-    let r: Repository = parse(client.get(&repo.api())?, "repository")?;
-    r.default_branch.context("Repository has no default branch")
-}
 
 /// Deserialize one response body into its model.
 fn parse<T: DeserializeOwned>(value: Value, what: &str) -> Result<T> {

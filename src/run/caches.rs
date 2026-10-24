@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use super::watch;
 use crate::api::Repo;
 use crate::api::actions::{self, Cache};
+use crate::api::pulls;
 use crate::cli::CachesArgs;
 use crate::context::Ctx;
 use crate::{output, parallel, prompt};
@@ -199,7 +200,7 @@ fn closed_prs(ctx: &Ctx, repo: &Repo, caches: &[Cache]) -> HashSet<u64> {
         .collect::<BTreeSet<u64>>()
         .into_iter()
         .collect();
-    let states = parallel::map(&prs, |n| actions::pull_state(&ctx.client, repo, *n));
+    let states = parallel::map(&prs, |n| pulls::pull_state(&ctx.client, repo, *n));
     prs.into_iter()
         .zip(states)
         .filter_map(|(n, state)| match state {
