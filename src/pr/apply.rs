@@ -480,6 +480,133 @@ mod tests {
     use super::*;
     use crate::api::pulls::Comment;
     use chrono::Utc;
+    use mockito::{Matcher, Mock, Server};
+    use serde_json::{Value, json};
+
+    fn ctx(server: &Server, json: bool) -> Ctx {
+        Ctx {
+            client: Client::for_tests(&server.url()),
+            repo_flag: Some("o/r".into()),
+            json,
+            yes: true,
+        }
+    }
+
+    fn node(id: &str, path: &str, start: u64, line: u64, body: &str) -> Value {
+        json!({
+            "id": id, "isResolved": false, "isOutdated": false, "path": path,
+            "diffSide": "RIGHT", "line": line, "startLine": start,
+            "comments": {"nodes": [{
+                "id": "C", "databaseId": 5, "body": body,
+                "createdAt": "2026-01-01T00:00:00Z", "url": "u",
+                "author": {"__typename": "Bot", "login": "coderabbitai"}
+            }]}
+        })
+    }
+
+    fn mock_threads(server: &mut Server, nodes: Vec<Value>) -> Mock {
+        server
+            .mock("POST", "/graphql")
+            .match_body(Matcher::Regex("reviewThreads".into()))
+            .with_body(
+                json!({"data": {"repository": {"pullRequest": {
+                    "id": "PR_7", "author": {"login": "alice"}, "headRefOid": "abc123",
+                    "reviewThreads": {"pageInfo": {"hasNextPage": false}, "nodes": nodes}
+                }}}})
+                .to_string(),
+            )
+            .create()
+    }
+
+    fn args(threads: &[&str]) -> ApplyArgs {
+        ApplyArgs {
+            pr: Some("7".into()),
+            threads: threads.iter().map(|s| s.to_string()).collect(),
+            dry_run: true,
+        }
+    }
+
+    #[test]
+    fn dry_run_reads_files_at_the_pr_head() {
+        let mut server = Server::new();
+        let s = "```suggestion\nfixed\n```";
+        mock_threads(
+            &mut server,
+            vec![
+                node("T1", "a.c", 2, 3, s),
+                node("T2", "a.c", 3, 3, s),
+                node("T3", "a.c", 9, 9, s),
+            ],
+        );
+        // Each file is read once, at the head commit, however many threads touch it.
+        let file = server
+            .mock("GET", "/repos/o/r/contents/a.c")
+            .match_query(Matcher::UrlEncoded("ref".into(), "abc123".into()))
+            .with_body("one\ntwo\nthree\nfour\n")
+            .expect(2)
+            .create();
+        run(&ctx(&server, true), args(&[])).unwrap();
+        run(&ctx(&server, false), args(&[])).unwrap();
+        file.assert();
+    }
+
+    #[test]
+    fn dry_run_without_suggestions_reads_nothing() {
+        let mut server = Server::new();
+        mock_threads(&mut server, vec![node("T1", "a.c", 1, 1, "Just a remark.")]);
+        let file = server
+            .mock("GET", Matcher::Regex("^/repos/o/r/contents/".into()))
+            .expect(0)
+            .create();
+        run(&ctx(&server, false), args(&[])).unwrap();
+        run(&ctx(&server, true), args(&["T1", "PRRT_missing"])).unwrap();
+        file.assert();
+    }
+
+    #[test]
+    fn dry_run_reports_unreadable_files() {
+        let mut server = Server::new();
+        mock_threads(
+            &mut server,
+            vec![node("T1", "gone.c", 1, 1, "```suggestion\nx\n```")],
+        );
+        server
+            .mock("GET", "/repos/o/r/contents/gone.c")
+            .match_query(Matcher::Any)
+            .with_status(404)
+            .with_body(r#"{"message": "Not Found"}"#)
+            .create();
+        let err = run(&ctx(&server, true), args(&[])).unwrap_err();
+        assert_eq!(err.to_string(), "Failed to read gone.c at abc123");
+    }
+
+    #[test]
+    fn select_reports_left_side_and_lineless_threads() {
+        let body = "```suggestion\nx\n```";
+        let mut left = thread("L", body, false, false);
+        left.side = "LEFT".into();
+        let mut lineless = thread("N", body, false, false);
+        lineless.line = None;
+        let (picked, skipped) = select(&[left, lineless], &[]);
+        assert!(picked.is_empty());
+        let reasons: Vec<&str> = skipped.iter().map(|s| s.reason.as_str()).collect();
+        assert_eq!(
+            reasons,
+            [
+                "suggestion is on the LEFT side of the diff",
+                "thread has no line on the PR head"
+            ]
+        );
+    }
+
+    #[test]
+    fn render_previews_removed_and_added_lines() {
+        let lines = split_lines("1\n2\n3\n");
+        let s = sugg("T", 2, 3, &["two"]);
+        assert_eq!(render(&s, &lines), "T  f:2-3  bot  comment 1\n-2\n-3\n+two");
+        assert_eq!(span("f", 4, 4), "f:4");
+        assert_eq!(short("0123456789abcdef"), "0123456789");
+    }
 
     // Trimmed from CodeRabbit's comment on zlib-ng/zlib-ng#2477, deflate.c:1276-1277.
     const CODERABBIT: &str = r#"<!-- coderabbit-ai-generated:v1 -->
