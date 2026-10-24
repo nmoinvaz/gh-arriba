@@ -215,6 +215,16 @@ pub fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mockito::{Matcher, Server};
+    use serde_json::json;
+
+    fn wf(id: u64, name: &str, path: &str) -> Workflow {
+        Workflow {
+            id,
+            name: name.to_string(),
+            path: path.to_string(),
+        }
+    }
 
     #[test]
     fn fields_must_be_declared_inputs() {
@@ -241,5 +251,153 @@ mod tests {
         assert!(matches("CI", path, "build.yaml"));
         assert!(matches("CI", path, "BUILD"));
         assert!(!matches("CI", path, "lint"));
+    }
+
+    #[test]
+    fn find_names_the_candidates() {
+        let all = vec![
+            wf(1, "Build", ".github/workflows/build.yml"),
+            wf(2, "Release", ".github/workflows/release.yml"),
+            wf(3, "release", ".github/workflows/publish.yml"),
+        ];
+        assert_eq!(find(&all, "build.yml").unwrap().id, 1);
+        assert_eq!(
+            find(&all, "lint").unwrap_err().to_string(),
+            "No workflow matches \"lint\". Workflows: Build (.github/workflows/build.yml), \
+             Release (.github/workflows/release.yml), release (.github/workflows/publish.yml)"
+        );
+        assert_eq!(
+            find(&all, "release").unwrap_err().to_string(),
+            "Several workflows matches \"release\": Release, release. Pick one with -w."
+        );
+    }
+
+    #[test]
+    fn dispatch_inputs_in_every_trigger_shape() {
+        let inputs = dispatch_inputs(
+            "name: Release\n\
+             on:\n  push:\n  workflow_dispatch:\n    inputs:\n      \
+             bump:\n        description: Part to bump\n        type: choice\n        \
+             options: [patch, minor, 3]\n        default: patch\n      \
+             dry:\n        type: boolean\n        default: false\n      \
+             count:\n        default: 2\n",
+        )
+        .unwrap();
+        assert_eq!(
+            inputs[0],
+            Input {
+                name: "bump".to_string(),
+                description: "Part to bump".to_string(),
+                required: false,
+                default: Some("patch".to_string()),
+                kind: "choice".to_string(),
+                options: vec!["patch".into(), "minor".into(), "3".into()],
+            }
+        );
+        assert_eq!(inputs[1].default.as_deref(), Some("false"));
+        assert_eq!(inputs[1].kind, "boolean");
+        assert_eq!(
+            (inputs[2].kind.as_str(), inputs[2].default.as_deref()),
+            ("string", Some("2"))
+        );
+
+        assert!(
+            dispatch_inputs("on: workflow_dispatch\n")
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            dispatch_inputs("on: [push, workflow_dispatch]\n")
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            dispatch_inputs("on:\n  workflow_dispatch:\n")
+                .unwrap()
+                .is_empty()
+        );
+        // `true:` is how YAML 1.1 reads a bare `on`.
+        assert!(
+            dispatch_inputs("true:\n  workflow_dispatch: {}\n")
+                .unwrap()
+                .is_empty()
+        );
+        for bad in [
+            "on: push\n",
+            "on:\n  push: {}\n",
+            "jobs: {}\n",
+            "on: [push]\n",
+        ] {
+            assert!(dispatch_inputs(bad).is_err(), "{bad}");
+        }
+        assert!(dispatch_inputs("on: [").is_err());
+    }
+
+    #[test]
+    fn inputs_at_reads_the_file_at_the_ref() {
+        let mut server = Server::new();
+        server
+            .mock("GET", "/repos/o/r/contents/.github/workflows/ci.yml")
+            .match_query(Matcher::UrlEncoded("ref".into(), "v1".into()))
+            .with_body("on: push\n")
+            .create();
+        let client = Client::for_tests(&server.url());
+        let repo = Repo::parse("o/r").unwrap();
+        let err = inputs_at(
+            &client,
+            &repo,
+            &wf(1, "CI", ".github/workflows/ci.yml"),
+            "v1",
+        )
+        .unwrap_err()
+        .to_string();
+        assert_eq!(
+            err,
+            "CI (.github/workflows/ci.yml): Workflow has no workflow_dispatch trigger"
+        );
+    }
+
+    #[test]
+    fn dispatch_returns_the_viewers_new_run() {
+        let mut server = Server::new();
+        server
+            .mock("GET", "/repos/o/r/actions/workflows/7/runs")
+            .match_query(Matcher::Any)
+            .with_body(r#"{"workflow_runs": [{"id": 1, "actor": {"login": "me"}}]}"#)
+            .expect(1)
+            .create();
+        server
+            .mock("GET", "/repos/o/r/actions/workflows/7/runs")
+            .match_query(Matcher::Any)
+            .with_body(
+                r#"{"workflow_runs": [
+                    {"id": 3, "actor": {"login": "someone"}},
+                    {"id": 2, "triggering_actor": {"login": "me"}, "html_url": "https://h/2"},
+                    {"id": 1, "actor": {"login": "me"}}
+                ]}"#,
+            )
+            .create();
+        let sent = server
+            .mock("POST", "/repos/o/r/actions/workflows/7/dispatches")
+            .match_body(Matcher::Json(json!({"ref": "dev", "inputs": {}})))
+            .with_status(204)
+            .create();
+        server
+            .mock("POST", "/graphql")
+            .with_body(r#"{"data": {"viewer": {"login": "me"}}}"#)
+            .create();
+        let client = Client::for_tests(&server.url());
+        let repo = Repo::parse("o/r").unwrap();
+        let run = dispatch(
+            &client,
+            &repo,
+            &wf(7, "Release", ".github/workflows/release.yml"),
+            "dev",
+            Map::new(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!((run.id, run.url.as_str()), (2, "https://h/2"));
+        sent.assert();
     }
 }
