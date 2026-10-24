@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 use crate::api::{Client, PrRef, Repo};
 
 mod comments;
+mod labels;
 mod pending;
 mod rollup;
 mod threads;
@@ -17,6 +18,10 @@ mod threads;
 pub use comments::{
     RestComment, edit_issue_comment, edit_review, edit_review_comment, find_issue_comment,
     find_review_comment, issue_comment, review, review_comment,
+};
+pub use labels::{
+    Contributor, RepoLabel, add_labels, contributors, pr_labels, remove_label, repo_labels,
+    request_reviewers, requested_reviewers,
 };
 pub use pending::{
     NewThread, add_pending_review, add_review_thread, create_review, delete_review, fetch_pending,

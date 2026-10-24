@@ -1,11 +1,10 @@
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
-use serde_json::{Value, json};
+use serde_json::json;
 use std::collections::HashSet;
 
-use crate::api::json::str_of;
-use crate::api::pulls::fetch_pr;
-use crate::api::{Client, PrRef, Repo, encode_segment};
+use crate::api::pulls::{self, RepoLabel, fetch_pr};
+use crate::api::{Client, PrRef, Repo};
 use crate::cli::LabelsArgs;
 use crate::context::Ctx;
 use crate::output;
@@ -22,7 +21,7 @@ pub fn run(ctx: &Ctx, args: LabelsArgs) -> Result<()> {
     let (repo, pr) = target(ctx, args.pr.as_deref())?;
     let client = &ctx.client;
 
-    let all = client.get_all(&format!("{}/labels", repo.api()))?;
+    let all = pulls::repo_labels(client, &repo)?;
     let applied = match &pr {
         Some(pr) => pr_labels(client, pr)?,
         None => HashSet::new(),
@@ -64,22 +63,21 @@ fn target(ctx: &Ctx, arg: Option<&str>) -> Result<(Repo, Option<PrRef>)> {
 
 /// Names of the labels on a PR.
 fn pr_labels(client: &Client, pr: &PrRef) -> Result<HashSet<String>> {
-    Ok(client
-        .get_all(&format!("{}/labels", pr.issue_api()))?
-        .iter()
-        .filter_map(|l| l["name"].as_str().map(str::to_string))
+    Ok(pulls::pr_labels(client, pr)?
+        .into_iter()
+        .filter_map(|l| l.name)
         .collect())
 }
 
 /// Repo labels in name order, marked where `applied` holds them.
-fn parse_labels(all: &[Value], applied: &HashSet<String>) -> Vec<Label> {
+fn parse_labels(all: &[RepoLabel], applied: &HashSet<String>) -> Vec<Label> {
     let mut labels: Vec<Label> = all
         .iter()
         .filter_map(|l| {
-            let name = l["name"].as_str()?;
+            let name = l.name.as_deref()?;
             Some(Label {
                 name: name.to_string(),
-                description: str_of(l, "description"),
+                description: l.description.clone(),
                 applied: applied.contains(name),
             })
         })
@@ -122,20 +120,13 @@ fn edit(ctx: &Ctx, pr: &PrRef, labels: &[Label], add: &[String], remove: &[Strin
         .map(|l| l.name.as_str())
         .collect();
     if !new.is_empty() {
-        client.post(
-            &format!("{}/labels", pr.issue_api()),
-            &json!({ "labels": new }),
-        )?;
+        pulls::add_labels(client, pr, &new)?;
         added.extend(new.iter().map(|n| n.to_string()));
     }
 
     let mut removed = Vec::new();
     for l in to_remove.iter().filter(|l| l.applied) {
-        client.delete(&format!(
-            "{}/labels/{}",
-            pr.issue_api(),
-            encode_segment(&l.name)
-        ))?;
+        pulls::remove_label(client, pr, &l.name)?;
         removed.push(l.name.clone());
     }
 
@@ -276,13 +267,9 @@ const SUGGESTIONS: usize = 5;
 fn suggest(ctx: &Ctx, pr: &PrRef, labels: &[Label]) -> Result<()> {
     let client = &ctx.client;
     let info = fetch_pr(client, pr)?;
-    let files = client.get_all(&format!("{}/files", pr.api()))?;
+    let files = pulls::pr_files(client, pr)?;
     let mut text = vec![info.title, info.body, info.head_ref];
-    text.extend(
-        files
-            .iter()
-            .filter_map(|f| f["filename"].as_str().map(str::to_string)),
-    );
+    text.extend(files.into_iter().map(|f| f.filename));
     let words: HashSet<String> = text.iter().flat_map(|t| words(t)).collect();
     let ranked = rank(labels, &words);
 
@@ -383,6 +370,14 @@ fn render(labels: &[Label]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
+
+    fn parse_repo_labels(values: Vec<Value>) -> Vec<RepoLabel> {
+        values
+            .into_iter()
+            .map(|v| serde_json::from_value(v).unwrap())
+            .collect()
+    }
 
     fn label(name: &str) -> Label {
         Label {
@@ -511,7 +506,7 @@ mod tests {
             json!({"name": "cleanup", "description": "Code cleanup"}),
         ];
         let applied = HashSet::from(["cleanup".to_string()]);
-        let labels = parse_labels(&all, &applied);
+        let labels = parse_labels(&parse_repo_labels(all), &applied);
         let names: Vec<(&str, bool)> = labels
             .iter()
             .map(|l| (l.name.as_str(), l.applied))
