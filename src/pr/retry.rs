@@ -16,15 +16,17 @@ use crate::pr::model::vars;
 
 /// One check run on the PR's head commit.
 #[derive(Clone, Debug)]
-struct CheckRun {
-    name: String,
-    workflow: String,
-    event: String,
+pub(super) struct CheckRun {
+    pub(super) name: String,
+    pub(super) workflow: String,
+    pub(super) event: String,
     /// Actions workflow run, absent for checks from other apps.
-    run_id: Option<u64>,
-    status: String,
-    conclusion: Option<String>,
-    started_at: Option<DateTime<Utc>>,
+    pub(super) run_id: Option<u64>,
+    pub(super) status: String,
+    pub(super) conclusion: Option<String>,
+    pub(super) started_at: Option<DateTime<Utc>>,
+    /// Page with the check's details, such as the Actions job.
+    pub(super) url: Option<String>,
 }
 
 /// A commit status from an external service, which cannot be rerun.
@@ -107,7 +109,7 @@ fn fetch_checks(client: &Client, pr: &PrRef) -> Result<Checks> {
     Ok(checks)
 }
 
-fn parse_check_run(node: &Value) -> CheckRun {
+pub(super) fn parse_check_run(node: &Value) -> CheckRun {
     let run = &node["checkSuite"]["workflowRun"];
     CheckRun {
         name: node["name"].as_str().unwrap_or_default().to_string(),
@@ -123,11 +125,12 @@ fn parse_check_run(node: &Value) -> CheckRun {
             .as_str()
             .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
             .map(|t| t.with_timezone(&Utc)),
+        url: node["detailsUrl"].as_str().map(str::to_string),
     }
 }
 
 /// Keep the latest attempt of each check, as `gh pr checks` does, so reruns supersede failures.
-fn latest(runs: Vec<CheckRun>) -> Vec<CheckRun> {
+pub(super) fn latest(runs: Vec<CheckRun>) -> Vec<CheckRun> {
     let mut by_key: HashMap<(String, String, String), CheckRun> = HashMap::new();
     for run in runs {
         let key = (run.workflow.clone(), run.name.clone(), run.event.clone());
@@ -148,7 +151,7 @@ fn recency(run: &CheckRun) -> (bool, Option<DateTime<Utc>>) {
     (run.started_at.is_none(), run.started_at)
 }
 
-fn is_failed(conclusion: Option<&str>) -> bool {
+pub(super) fn is_failed(conclusion: Option<&str>) -> bool {
     matches!(
         conclusion,
         Some("FAILURE" | "CANCELLED" | "TIMED_OUT" | "STARTUP_FAILURE")
@@ -481,6 +484,7 @@ mod tests {
             .to_string(),
             conclusion: conclusion.map(str::to_string),
             started_at: Some(at.parse().unwrap()),
+            url: None,
         }
     }
 

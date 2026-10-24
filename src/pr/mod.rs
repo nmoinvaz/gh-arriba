@@ -1,4 +1,5 @@
 mod apply;
+mod checks;
 mod comment;
 mod dump;
 mod failures;
@@ -23,6 +24,7 @@ pub fn run(ctx: &Ctx, cmd: PrCommand) -> Result<()> {
         PrCommand::Review(cmd) => review::run(ctx, cmd),
         PrCommand::Apply(args) => apply::run(ctx, args),
         PrCommand::Dump(args) => dump::run(ctx, args),
+        PrCommand::Checks(args) => checks::run(ctx, args),
         PrCommand::Retry(args) => retry::run(ctx, args),
         PrCommand::Failures(args) => failures::run(ctx, args),
         PrCommand::Rebase(args) => rebase::run(ctx, args),
