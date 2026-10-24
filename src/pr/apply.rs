@@ -6,7 +6,7 @@ use std::process::Command;
 
 use crate::cli::ApplyArgs;
 use crate::context::{Ctx, PrRef, git};
-use crate::github::Client;
+use crate::github::{Client, encode_path};
 use crate::output;
 use crate::pr::model::{Thread, fetch_threads};
 use crate::prompt;
@@ -481,20 +481,6 @@ fn read_at_head(client: &Client, pr: &PrRef, head_oid: &str, path: &str) -> Resu
         .with_context(|| format!("Failed to read {path} at {}", short(head_oid)))
 }
 
-/// Percent-encode a repository path, keeping its slashes.
-fn encode_path(path: &str) -> String {
-    let mut out = String::with_capacity(path.len());
-    for b in path.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
-                out.push(b as char)
-            }
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -692,10 +678,5 @@ rg -nP -C3 '\bstrstart\s*(\+|-)?=' --type=c -g '!test/**'
         // A comment database ID selects its thread.
         let (picked, _) = select(&threads, &["42".into()]);
         assert_eq!(picked.len(), 1);
-    }
-
-    #[test]
-    fn encodes_paths() {
-        assert_eq!(encode_path("a b/c#d.rs"), "a%20b/c%23d.rs");
     }
 }

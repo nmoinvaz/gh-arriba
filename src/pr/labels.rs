@@ -5,7 +5,7 @@ use std::collections::HashSet;
 
 use crate::cli::LabelsArgs;
 use crate::context::{Ctx, PrRef, Repo};
-use crate::github::Client;
+use crate::github::{Client, encode_segment};
 use crate::output;
 use crate::pr::model::fetch_pr;
 
@@ -261,19 +261,6 @@ fn distance(a: &str, b: &str) -> usize {
     row[b.len()]
 }
 
-/// Percent-encode a label name for use as one URL path segment.
-fn encode_segment(s: &str) -> String {
-    let mut out = String::new();
-    for b in s.bytes() {
-        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
-            out.push(b as char);
-        } else {
-            out.push_str(&format!("%{b:02X}"));
-        }
-    }
-    out
-}
-
 #[derive(Debug, PartialEq, Serialize)]
 struct Suggestion {
     name: String,
@@ -510,14 +497,6 @@ mod tests {
         assert_eq!(distance("kitten", "sitting"), 3);
         assert_eq!(distance("", "abc"), 3);
         assert_eq!(distance("same", "same"), 0);
-    }
-
-    #[test]
-    fn segment_encoding() {
-        assert_eq!(encode_segment("ui/ux"), "ui%2Fux");
-        assert_eq!(encode_segment("build system"), "build%20system");
-        assert_eq!(encode_segment("type: bug"), "type%3A%20bug");
-        assert_eq!(encode_segment("naïve"), "na%C3%AFve");
     }
 
     #[test]
