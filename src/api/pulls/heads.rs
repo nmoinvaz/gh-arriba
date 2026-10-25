@@ -20,6 +20,8 @@ pub struct BranchPr {
     pub author: String,
     /// The commit the PR's head points at, to tell whether a local branch has more.
     pub head_oid: String,
+    /// OWNER/REPO the head branch lives in, to tell a fork's PR from one on the same branch name.
+    pub head_repo: Option<String>,
     /// SUCCESS, FAILURE, ERROR, PENDING, or EXPECTED for the head's checks, if it has any.
     pub checks: Option<String>,
 }
@@ -37,8 +39,15 @@ struct HeadNode {
     author: Option<Login>,
     #[serde(default, deserialize_with = "nullable")]
     head_ref_oid: String,
+    head_repository: Option<NameWithOwner>,
     #[serde(default, deserialize_with = "nullable")]
     commits: Nodes<CommitNode>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NameWithOwner {
+    name_with_owner: String,
 }
 
 #[derive(Deserialize)]
@@ -91,10 +100,16 @@ impl From<HeadNode> for BranchPr {
             state: n.state,
             author: n.author.map(|a| a.login).unwrap_or_else(|| "ghost".into()),
             head_oid: n.head_ref_oid,
+            head_repo: n.head_repository.map(|r| r.name_with_owner),
             checks,
         }
     }
 }
+
+/// The fields of a PR that worktree commands show and decide on.
+const FIELDS: &str = "number title url state headRefOid author { login } \
+     headRepository { nameWithOwner } \
+     commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }";
 
 /// Branches looked up per query, each as one aliased field.
 const BATCH: usize = 25;
@@ -112,10 +127,9 @@ fn batch_query(count: usize) -> String {
              orderBy: {{field: UPDATED_AT, direction: DESC}}) {{ ...Head }}\n"
         ));
     }
-    query.push_str(
-        "  }\n}\nfragment Head on PullRequestConnection {\n  nodes {\n    number title url state \
-         headRefOid author { login }\n    commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }\n  }\n}",
-    );
+    query.push_str(&format!(
+        "  }}\n}}\nfragment Head on PullRequestConnection {{\n  nodes {{ {FIELDS} }}\n}}"
+    ));
     query
 }
 
@@ -146,6 +160,20 @@ pub fn prs_by_branch(
     Ok(found)
 }
 
+/// One PR by number, or None when the repo has no such PR.
+pub fn pr_by_number(client: &Client, repo: &Repo, number: u64) -> Result<Option<BranchPr>> {
+    let query = format!(
+        "query($owner: String!, $repo: String!, $number: Int!) {{\n  \
+         repository(owner: $owner, name: $repo) {{ pullRequest(number: $number) {{ {FIELDS} }} }}\n}}"
+    );
+    let data = client.graphql(
+        &query,
+        json!({ "owner": repo.owner, "repo": repo.name, "number": number }),
+    )?;
+    serde_json::from_value(data["repository"]["pullRequest"].clone())
+        .with_context(|| format!("Failed to parse PR #{number}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -157,6 +185,33 @@ mod tests {
         assert!(q.contains("$b0: String!, $b1: String!"));
         assert!(q.contains("b1: pullRequests(headRefName: $b1"));
         assert!(!q.contains("$b2"));
+        assert!(q.contains("headRepository { nameWithOwner }"));
+    }
+
+    #[test]
+    fn looks_up_one_pr_by_number() {
+        let mut server = Server::new();
+        server
+            .mock("POST", "/graphql")
+            .match_body(Matcher::PartialJson(json!({"variables": {"number": 7}})))
+            .with_body(
+                json!({"data": {"repository": {"pullRequest": {
+                    "number": 7, "state": "CLOSED", "headRefOid": "abc",
+                    "headRepository": {"nameWithOwner": "fork/r"}, "commits": {"nodes": []}
+                }}}})
+                .to_string(),
+            )
+            .create();
+        server
+            .mock("POST", "/graphql")
+            .match_body(Matcher::PartialJson(json!({"variables": {"number": 8}})))
+            .with_body(r#"{"data": {"repository": {"pullRequest": null}}}"#)
+            .create();
+        let client = Client::for_tests(&server.url());
+        let repo = Repo::parse("o/r").unwrap();
+        let pr = pr_by_number(&client, &repo, 7).unwrap().unwrap();
+        assert_eq!(pr.head_repo.as_deref(), Some("fork/r"));
+        assert_eq!(pr_by_number(&client, &repo, 8).unwrap(), None);
     }
 
     #[test]
