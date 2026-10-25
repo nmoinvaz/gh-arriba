@@ -755,6 +755,23 @@ pub struct RunnersArgs {
 pub enum WorktreeCommand {
     /// List worktrees with their PR, its state and checks, and uncommitted or unpushed work
     List,
+    /// Remove worktrees whose PR merged or closed, and their local branches
+    Prune(WorktreePruneArgs),
+}
+
+#[derive(Args)]
+pub struct WorktreePruneArgs {
+    /// Print what would be removed without removing it
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Also remove worktrees with no PR whose upstream branch was deleted
+    #[arg(long)]
+    pub gone: bool,
+
+    /// Remove worktrees with uncommitted changes or unpushed commits too
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(Args)]

@@ -4,13 +4,14 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use crate::api::pulls::{self, BranchPr};
-use crate::cli::WorktreeCommand;
+use crate::cli::{WorktreeCommand, WorktreePruneArgs};
 use crate::context::{Ctx, git, git_in};
-use crate::output;
+use crate::{output, prompt};
 
 pub fn run(ctx: &Ctx, cmd: WorktreeCommand) -> Result<()> {
     match cmd {
         WorktreeCommand::List => list(ctx),
+        WorktreeCommand::Prune(args) => prune(ctx, args),
     }
 }
 
@@ -188,6 +189,182 @@ fn list(ctx: &Ctx) -> Result<()> {
     }
     print!("{}", render(&rows));
     Ok(())
+}
+
+/// A worktree prune would remove, or the reason it keeps one it would otherwise remove.
+#[derive(Debug, PartialEq, Serialize)]
+struct Candidate {
+    path: PathBuf,
+    branch: String,
+    /// Why the worktree is done with, as in `PR #42 merged`.
+    reason: String,
+    /// Why it stays anyway, such as uncommitted changes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    kept: Option<String>,
+}
+
+/// The worktrees whose PR merged or closed, or with `gone`, whose upstream branch was deleted. Each
+/// is kept when it is locked or holds work that isn't on the remote, unless `force` is set.
+/// `on_remote` tells whether a commit is reachable from a remote branch.
+fn plan_prune(
+    rows: &[Row],
+    gone: bool,
+    force: bool,
+    on_remote: impl Fn(&str) -> bool,
+) -> Vec<Candidate> {
+    let mut out = Vec::new();
+    for r in rows {
+        let w = &r.worktree;
+        let Some(branch) = &w.branch else {
+            continue;
+        };
+        if w.main || w.bare || w.prunable {
+            continue;
+        }
+        let reason = match &r.pr {
+            Some(p) if p.state == "MERGED" => format!("PR #{} merged", p.number),
+            Some(p) if p.state == "CLOSED" => format!("PR #{} closed", p.number),
+            Some(_) => continue,
+            None if gone && r.local.upstream_gone => "upstream gone".to_string(),
+            None => continue,
+        };
+        let l = &r.local;
+        let kept = if w.locked {
+            Some("locked".to_string())
+        } else if force {
+            None
+        } else if l.changes > 0 {
+            Some(format!("{} uncommitted changes", l.changes))
+        } else if l.ahead > 0 {
+            Some(format!("{} unpushed commits", l.ahead))
+        } else {
+            // A merged PR's head, or any commit a remote branch has, is safe to drop locally.
+            let pushed = r.pr.as_ref().is_some_and(|p| p.head_oid == w.head) || on_remote(&w.head);
+            (!pushed).then(|| "commits on no remote branch".to_string())
+        };
+        out.push(Candidate {
+            path: w.path.clone(),
+            branch: branch.clone(),
+            reason,
+            kept,
+        });
+    }
+    out
+}
+
+#[derive(Serialize)]
+struct PruneReport {
+    removed: Vec<Candidate>,
+    kept: Vec<Candidate>,
+    dry_run: bool,
+    /// Worktrees whose removal failed, with the error.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    failed: Vec<String>,
+}
+
+fn prune(ctx: &Ctx, args: WorktreePruneArgs) -> Result<()> {
+    prune_at(ctx, &repo_root()?, &args)
+}
+
+fn prune_at(ctx: &Ctx, root: &Path, args: &WorktreePruneArgs) -> Result<()> {
+    if !args.dry_run {
+        // Drop the records of worktrees whose directories were already deleted.
+        git_in(root, &["worktree", "prune"])?;
+    }
+    let rows = rows(ctx, root)?;
+    let on_remote = |oid: &str| {
+        git_in(root, &["branch", "-r", "--contains", oid]).is_ok_and(|s| !s.trim().is_empty())
+    };
+    let (kept, removed): (Vec<Candidate>, Vec<Candidate>) =
+        plan_prune(&rows, args.gone, args.force, on_remote)
+            .into_iter()
+            .partition(|c| c.kept.is_some());
+    let mut report = PruneReport {
+        removed,
+        kept,
+        dry_run: args.dry_run,
+        failed: Vec::new(),
+    };
+
+    let say = |line: &str| {
+        if ctx.json {
+            eprintln!("{line}");
+        } else {
+            println!("{line}");
+        }
+    };
+    for c in &report.kept {
+        say(&format!(
+            "keep    {} ({}, {})",
+            display_path(&c.path, &rows),
+            c.reason,
+            c.kept.as_deref().unwrap_or_default()
+        ));
+    }
+    for c in &report.removed {
+        say(&format!(
+            "remove  {} ({})",
+            display_path(&c.path, &rows),
+            c.reason
+        ));
+    }
+    if report.removed.is_empty() {
+        say("Nothing to prune");
+        return finish(ctx, &report);
+    }
+    if args.dry_run {
+        return finish(ctx, &report);
+    }
+    let question = format!(
+        "Remove {} and their local branches?",
+        plural(report.removed.len(), "worktree")
+    );
+    if !prompt::confirm(&question, ctx.yes)? {
+        say("Cancelled");
+        return Ok(());
+    }
+    for c in &report.removed {
+        let path = c.path.to_string_lossy();
+        let mut remove = vec!["worktree", "remove"];
+        if args.force {
+            remove.push("--force");
+        }
+        remove.push(&path);
+        // The branch of a squash-merged PR isn't merged as far as git knows, so it needs -D.
+        let result = git_in(root, &remove).and_then(|_| git_in(root, &["branch", "-D", &c.branch]));
+        if let Err(e) = result {
+            eprintln!("failed to remove {path}: {e:#}");
+            report.failed.push(path.to_string());
+        }
+    }
+    say(&format!(
+        "Removed {}",
+        plural(report.removed.len() - report.failed.len(), "worktree")
+    ));
+    finish(ctx, &report)?;
+    if !report.failed.is_empty() {
+        anyhow::bail!(
+            "{} could not be removed",
+            plural(report.failed.len(), "worktree")
+        );
+    }
+    Ok(())
+}
+
+fn finish(ctx: &Ctx, report: &PruneReport) -> Result<()> {
+    if ctx.json {
+        output::print_json(report)?;
+    }
+    Ok(())
+}
+
+/// `1 worktree` or `3 worktrees`.
+fn plural(n: usize, noun: &str) -> String {
+    if n == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{n} {noun}s")
+    }
 }
 
 /// A path relative to the main worktree's parent, where sibling worktrees usually live.
@@ -492,5 +669,155 @@ prunable gitdir file points to non-existent location
         assert_eq!(wt.local.changes, 1);
         assert_eq!(wt.pr.as_ref().unwrap().number, 42);
         assert!(render(&rows).contains("#42"));
+    }
+
+    fn row(branch: &str, pr_state: Option<&str>, local: Local) -> Row {
+        Row {
+            worktree: Worktree {
+                path: PathBuf::from(format!("/src/{branch}")),
+                head: "2222222222222222222222222222222222222222".into(),
+                branch: Some(branch.into()),
+                main: false,
+                bare: false,
+                locked: false,
+                prunable: false,
+            },
+            local,
+            pr: pr_state.map(|s| pr(42, "me", s)),
+        }
+    }
+
+    #[test]
+    fn plan_prune_picks_finished_and_keeps_unsaved_work() {
+        let dirty = Local {
+            changes: 3,
+            ..Local::default()
+        };
+        let ahead = Local {
+            ahead: 2,
+            ..Local::default()
+        };
+        let gone = Local {
+            upstream_gone: true,
+            ..Local::default()
+        };
+        let mut moved = row("moved", Some("MERGED"), Local::default());
+        moved.worktree.head = "9999999999999999999999999999999999999999".into();
+        let mut locked = row("locked", Some("CLOSED"), Local::default());
+        locked.worktree.locked = true;
+        let mut main = row("main", Some("MERGED"), Local::default());
+        main.worktree.main = true;
+        let rows = vec![
+            main,
+            row("merged", Some("MERGED"), Local::default()),
+            row("closed", Some("CLOSED"), Local::default()),
+            row("open", Some("OPEN"), Local::default()),
+            row("dirty", Some("MERGED"), dirty),
+            row("ahead", Some("MERGED"), ahead),
+            moved,
+            locked,
+            row("gone", None, gone),
+            row("nopr", None, Local::default()),
+        ];
+        let summary = |plan: Vec<Candidate>| -> Vec<(String, String, Option<String>)> {
+            plan.into_iter()
+                .map(|c| (c.branch, c.reason, c.kept))
+                .collect()
+        };
+        let s = |v: &str| v.to_string();
+        assert_eq!(
+            summary(plan_prune(&rows, false, false, |_| false)),
+            vec![
+                (s("merged"), s("PR #42 merged"), None),
+                (s("closed"), s("PR #42 closed"), None),
+                (
+                    s("dirty"),
+                    s("PR #42 merged"),
+                    Some(s("3 uncommitted changes"))
+                ),
+                (
+                    s("ahead"),
+                    s("PR #42 merged"),
+                    Some(s("2 unpushed commits"))
+                ),
+                (
+                    s("moved"),
+                    s("PR #42 merged"),
+                    Some(s("commits on no remote branch"))
+                ),
+                (s("locked"), s("PR #42 closed"), Some(s("locked"))),
+            ]
+        );
+        // A remote branch holding the commit, --gone, and --force each let more go.
+        let plan = summary(plan_prune(&rows, true, true, |_| true));
+        assert!(plan.contains(&(s("moved"), s("PR #42 merged"), None)));
+        assert!(plan.contains(&(s("dirty"), s("PR #42 merged"), None)));
+        assert!(plan.contains(&(s("gone"), s("upstream gone"), None)));
+        assert!(plan.contains(&(s("locked"), s("PR #42 closed"), Some(s("locked")))));
+        assert!(
+            !plan
+                .iter()
+                .any(|(b, _, _)| b == "open" || b == "nopr" || b == "main")
+        );
+    }
+
+    fn prune_args(dry_run: bool) -> WorktreePruneArgs {
+        WorktreePruneArgs {
+            dry_run,
+            gone: false,
+            force: false,
+        }
+    }
+
+    #[test]
+    fn prune_removes_merged_worktrees_and_their_branches() {
+        let s = Scratch::new("prune");
+        let path = s.branch_worktree("fix/done");
+        let head = git_in(&path, &["rev-parse", "HEAD"]).unwrap();
+        let mut server = Server::new();
+        mock_lookup(
+            &mut server,
+            json!([{
+                "number": 42, "state": "MERGED", "headRefOid": head,
+                "author": {"login": "me"}, "commits": {"nodes": []}
+            }]),
+        );
+        // A dry run changes nothing.
+        prune_at(&ctx(&server, true), &s.root(), &prune_args(true)).unwrap();
+        assert!(path.exists());
+        prune_at(&ctx(&server, false), &s.root(), &prune_args(false)).unwrap();
+        assert!(!path.exists());
+        assert!(s.git(&["branch", "--list", "fix/done"]).is_empty());
+        assert!(!s.git(&["worktree", "list"]).contains("fix/done"));
+    }
+
+    #[test]
+    fn prune_keeps_worktrees_with_changes() {
+        let s = Scratch::new("keep");
+        let path = s.branch_worktree("fix/wip");
+        std::fs::write(path.join("notes.md"), "todo").unwrap();
+        let head = git_in(&path, &["rev-parse", "HEAD"]).unwrap();
+        let mut server = Server::new();
+        mock_lookup(
+            &mut server,
+            json!([{
+                "number": 7, "state": "CLOSED", "headRefOid": head,
+                "author": {"login": "me"}, "commits": {"nodes": []}
+            }]),
+        );
+        prune_at(&ctx(&server, true), &s.root(), &prune_args(false)).unwrap();
+        assert!(path.join("notes.md").exists());
+        let forced = WorktreePruneArgs {
+            force: true,
+            ..prune_args(false)
+        };
+        prune_at(&ctx(&server, true), &s.root(), &forced).unwrap();
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn plural_counts() {
+        assert_eq!(plural(1, "worktree"), "1 worktree");
+        assert_eq!(plural(0, "worktree"), "0 worktrees");
     }
 }
