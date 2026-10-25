@@ -437,7 +437,11 @@ impl Merger<'_> {
 
     fn merge(&self, pr: &DepPr) -> Result<()> {
         let client = &self.ctx.client;
-        dependabot::merge(client, self.repo, pr.number, method_name(self.method))?;
+        let pr_ref = PrRef {
+            repo: self.repo.clone(),
+            number: pr.number,
+        };
+        pulls::merge(client, &pr_ref, method_name(self.method), None)?;
 
         // Repos that delete merged branches themselves answer 422 or 404 here.
         if let Err(e) = dependabot::delete_branch(client, self.repo, &pr.head_ref) {
@@ -450,7 +454,7 @@ impl Merger<'_> {
     }
 
     fn enable_auto_merge(&self, pr: &DepPr) -> Result<()> {
-        dependabot::enable_auto_merge(&self.ctx.client, &pr.node_id, method_name(self.method))
+        pulls::enable_auto_merge(&self.ctx.client, &pr.node_id, method_name(self.method))
     }
 }
 

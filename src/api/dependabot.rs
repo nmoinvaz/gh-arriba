@@ -274,13 +274,6 @@ fn details_query(batch: &[(String, u64)]) -> Result<String> {
     Ok(query)
 }
 
-const ENABLE_AUTO_MERGE: &str = r#"
-mutation($id: ID!, $method: PullRequestMergeMethod!) {
-  enablePullRequestAutoMerge(input: {pullRequestId: $id, mergeMethod: $method}) {
-    clientMutationId
-  }
-}"#;
-
 /// Submit an approving review.
 pub fn approve(client: &Client, repo: &Repo, number: u64) -> Result<()> {
     let path = format!("{}/pulls/{number}/reviews", repo.api());
@@ -288,26 +281,9 @@ pub fn approve(client: &Client, repo: &Repo, number: u64) -> Result<()> {
     Ok(())
 }
 
-/// Merge a PR now with a REST merge method: `merge`, `squash`, or `rebase`.
-pub fn merge(client: &Client, repo: &Repo, number: u64, method: &str) -> Result<()> {
-    let path = format!("{}/pulls/{number}/merge", repo.api());
-    client.put(&path, &json!({ "merge_method": method }))?;
-    Ok(())
-}
-
 /// Delete a branch by name.
 pub fn delete_branch(client: &Client, repo: &Repo, branch: &str) -> Result<()> {
     client.delete(&format!("{}/git/refs/heads/{branch}", repo.api()))?;
-    Ok(())
-}
-
-/// Turn on auto-merge for a PR by node ID. `method` is the REST merge method name, whose
-/// uppercase form is the GraphQL enum value.
-pub fn enable_auto_merge(client: &Client, node_id: &str, method: &str) -> Result<()> {
-    client.graphql(
-        ENABLE_AUTO_MERGE,
-        json!({ "id": node_id, "method": method.to_uppercase() }),
-    )?;
     Ok(())
 }
 
@@ -724,18 +700,13 @@ mod tests {
     }
 
     #[test]
-    fn rest_merge_calls() {
+    fn approve_and_delete_branch_calls() {
         let mut server = Server::new();
         let repo = Repo::parse("o/r").unwrap();
         let approve_mock = server
             .mock("POST", "/repos/o/r/pulls/3/reviews")
             .match_body(Matcher::Json(json!({ "event": "APPROVE" })))
             .with_body("{}")
-            .create();
-        let merge_mock = server
-            .mock("PUT", "/repos/o/r/pulls/3/merge")
-            .match_body(Matcher::Json(json!({ "merge_method": "squash" })))
-            .with_body(r#"{"merged": true}"#)
             .create();
         let delete_mock = server
             .mock(
@@ -744,40 +715,11 @@ mod tests {
             )
             .with_status(204)
             .create();
-        let auto_mock = server
-            .mock("POST", "/graphql")
-            .match_body(Matcher::AllOf(vec![
-                Matcher::Regex("enablePullRequestAutoMerge".into()),
-                Matcher::PartialJson(json!({ "variables": { "id": "PR_3", "method": "REBASE" } })),
-            ]))
-            .with_body(r#"{"data": {"enablePullRequestAutoMerge": {"clientMutationId": null}}}"#)
-            .create();
         let client = Client::for_tests(&server.url());
         approve(&client, &repo, 3).unwrap();
-        merge(&client, &repo, 3, "squash").unwrap();
         delete_branch(&client, &repo, "dependabot/cargo/serde-1.0.2").unwrap();
-        enable_auto_merge(&client, "PR_3", "rebase").unwrap();
         approve_mock.assert();
-        merge_mock.assert();
         delete_mock.assert();
-        auto_mock.assert();
-    }
-
-    #[test]
-    fn merge_refusal_surfaces_status() {
-        let mut server = Server::new();
-        server
-            .mock("PUT", "/repos/o/r/pulls/3/merge")
-            .with_status(405)
-            .with_body(r#"{"message": "Pull Request is not mergeable"}"#)
-            .create();
-        let client = Client::for_tests(&server.url());
-        let repo = Repo::parse("o/r").unwrap();
-        let err = merge(&client, &repo, 3, "rebase").unwrap_err();
-        assert_eq!(
-            err.to_string(),
-            "GitHub API 405 on PUT repos/o/r/pulls/3/merge: Pull Request is not mergeable"
-        );
     }
 
     #[test]

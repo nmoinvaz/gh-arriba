@@ -12,6 +12,7 @@ use crate::api::{Client, PrRef, Repo};
 mod branch;
 mod comments;
 mod labels;
+mod merge;
 mod pending;
 mod rollup;
 mod strip;
@@ -26,6 +27,7 @@ pub use labels::{
     Contributor, RepoLabel, add_labels, contributors, pr_labels, remove_label, repo_labels,
     request_reviewers, requested_reviewers,
 };
+pub use merge::{enable_auto_merge, merge};
 pub use pending::{
     NewThread, PrFile, add_pending_review, add_review_thread, create_review, delete_review,
     fetch_pending, pr_files, submit_review,
