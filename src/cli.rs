@@ -382,6 +382,14 @@ pub struct StripArgs {
     /// Commit message (default: "Strip PATHS before merging")
     #[arg(short, long, value_name = "TEXT")]
     pub message: Option<String>,
+
+    /// Merge the PR after stripping, or enable auto-merge when its checks have to run again
+    #[arg(long)]
+    pub merge: bool,
+
+    /// Merge method for --merge. Only squash keeps stripped files out of the base's history.
+    #[arg(long, value_enum, default_value_t = MergeMethod::Squash, requires = "merge")]
+    pub method: MergeMethod,
 }
 
 #[derive(Subcommand)]
@@ -696,6 +704,17 @@ pub enum MergeMethod {
     Merge,
     Squash,
     Rebase,
+}
+
+impl MergeMethod {
+    /// REST merge method name, which uppercased is also the GraphQL enum value.
+    pub fn name(self) -> &'static str {
+        match self {
+            MergeMethod::Merge => "merge",
+            MergeMethod::Squash => "squash",
+            MergeMethod::Rebase => "rebase",
+        }
+    }
 }
 
 #[derive(Args)]

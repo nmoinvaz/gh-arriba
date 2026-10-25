@@ -55,7 +55,7 @@ gh arriba [options] <command>
 | `pr rebase [PR]` | Rebase onto the base branch, signed locally or server-side with `--remote` |
 | `pr reviewers [PR]` | Suggest reviewers from top contributors and request one with `--add` |
 | `pr labels [PR]` | List the repo's labels, `--suggest` some for the PR, and `--add` or `--remove` them by close match |
-| `pr strip [PR] [PATH]...` | Take scratch files and directories out of a PR in one commit on its branch, previewing with `--dry-run` |
+| `pr strip [PR] [PATH]...` | Take scratch files and directories out of a PR in one commit on its branch, then `--merge` it |
 
 `PR` is a number, URL, `owner/repo#N`, or branch. It defaults to the PR for the current branch.
 `ID` in `pr reply` and `pr resolve` is a comment ID, a `#discussion_r` comment link, or a
@@ -153,7 +153,15 @@ gh arriba pr strip 42 .plans/ docs/agent-notes/ --dry-run
 gh arriba pr strip 42 .plans/ docs/agent-notes/
 ```
 
-Squash merging then keeps them out of the base branch's history too. To name a repo's scratch
+Add `--merge` to merge right after, or turn on auto-merge when the PR's checks have to run again on
+the strip commit. It squashes by default, since only a squash keeps the stripped files out of the
+base branch's history:
+
+```
+gh arriba pr strip 42 .plans/ --merge
+```
+
+To name a repo's scratch
 paths once, list them in `.github/arriba.yml` on the base branch, and `pr strip 42` uses them:
 
 ```yaml

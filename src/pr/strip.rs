@@ -37,6 +37,11 @@ struct Report {
     commit: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     commit_url: Option<String>,
+    /// With --merge: "merged", or "auto-merge" when GitHub waits on checks first.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    merged: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    method: Option<&'static str>,
 }
 
 pub fn run(ctx: &Ctx, args: StripArgs) -> Result<()> {
@@ -67,6 +72,8 @@ pub fn run(ctx: &Ctx, args: StripArgs) -> Result<()> {
         dry_run: args.dry_run,
         commit: None,
         commit_url: None,
+        merged: None,
+        method: args.merge.then(|| args.method.name()),
     };
 
     if !report.changes.is_empty() && !args.dry_run {
@@ -79,11 +86,37 @@ pub fn run(ctx: &Ctx, args: StripArgs) -> Result<()> {
         report.commit_url = Some(commit.url);
     }
 
+    if args.merge && !args.dry_run {
+        let method = args.method.name();
+        if method != "squash" && !report.changes.is_empty() {
+            eprintln!(
+                "warning: a {method} merge keeps the stripped files in the commits that added them, \
+                 squash leaves them out"
+            );
+        }
+        let head = report.commit.as_deref().unwrap_or(&info.head_oid);
+        report.merged = Some(merge(ctx, &pr, &info.node_id, method, head)?);
+    }
+
     if ctx.json {
         return output::print_json(&report);
     }
     print!("{}", render(&report));
     Ok(())
+}
+
+/// Merge the PR at `head`. A head that just got the strip commit has checks to run again, so when
+/// GitHub refuses with 405 the PR gets auto-merge instead and merges once they pass.
+fn merge(ctx: &Ctx, pr: &PrRef, node_id: &str, method: &str, head: &str) -> Result<&'static str> {
+    match pulls::merge(&ctx.client, pr, method, Some(head)) {
+        Ok(()) => Ok("merged"),
+        Err(e) if e.to_string().contains("GitHub API 405") => {
+            pulls::enable_auto_merge(&ctx.client, node_id, method)
+                .with_context(|| format!("{e:#}, and auto-merge could not be enabled"))?;
+            Ok("auto-merge")
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Repo settings for gh arriba, read from the base branch.
@@ -215,6 +248,20 @@ fn strip(
 }
 
 fn render(r: &Report) -> String {
+    let mut out = render_strip(r);
+    match (r.merged, r.method) {
+        (Some("merged"), Some(m)) => out.push_str(&format!("Merged {} with {m}\n", r.pr)),
+        (Some(_), Some(m)) => out.push_str(&format!(
+            "Enabled {m} auto-merge on {}, which merges once its checks pass\n",
+            r.pr
+        )),
+        (None, Some(m)) if r.dry_run => out.push_str(&format!("Would merge {} with {m}\n", r.pr)),
+        _ => {}
+    }
+    out
+}
+
+fn render_strip(r: &Report) -> String {
     let mut out = String::new();
     if r.changes.is_empty() {
         out.push_str(&format!(
@@ -265,6 +312,7 @@ fn files(n: usize) -> String {
 mod tests {
     use super::*;
     use crate::api::Client;
+    use crate::cli::MergeMethod;
     use mockito::{Matcher, Mock, Server};
     use serde_json::json;
 
@@ -342,6 +390,8 @@ mod tests {
             args: all,
             dry_run,
             message: None,
+            merge: false,
+            method: MergeMethod::Squash,
         }
     }
 
@@ -504,6 +554,8 @@ mod tests {
             dry_run: true,
             commit: None,
             commit_url: None,
+            merged: None,
+            method: None,
         };
         assert_eq!(
             render(&report),
@@ -513,5 +565,106 @@ mod tests {
         assert!(render(&report).ends_with("Stripped 2 files from feature in def4567890\n"));
         report.changes.clear();
         assert_eq!(render(&report), "o/r#7 changes nothing under .plans\n");
+    }
+
+    fn mock_merge(server: &mut Server, method: &str, sha: &str, status: usize) -> Mock {
+        server
+            .mock("PUT", "/repos/o/r/pulls/7/merge")
+            .match_body(Matcher::Json(json!({"merge_method": method, "sha": sha})))
+            .with_status(status)
+            .with_body(r#"{"message": "Required status check \"build\" is expected."}"#)
+            .create()
+    }
+
+    fn merge_args(paths: &[&str], method: MergeMethod) -> StripArgs {
+        StripArgs {
+            merge: true,
+            method,
+            ..args(paths, false)
+        }
+    }
+
+    #[test]
+    fn merge_waits_on_checks_after_stripping() {
+        let mut server = Server::new();
+        mock_pr(&mut server, "OPEN");
+        mock_files(&mut server);
+        mock_contents(&mut server);
+        server
+            .mock("POST", "/graphql")
+            .match_body(Matcher::Regex("createCommitOnBranch".into()))
+            .with_body(
+                r#"{"data": {"createCommitOnBranch": {"commit": {"oid": "def456", "url": "u"}}}}"#,
+            )
+            .create();
+        // The strip commit's checks haven't run, so the merge is refused and auto-merge takes over.
+        let refused = mock_merge(&mut server, "squash", "def456", 405);
+        let auto = server
+            .mock("POST", "/graphql")
+            .match_body(Matcher::PartialJson(
+                json!({"variables": {"id": "PR_7", "method": "SQUASH"}}),
+            ))
+            .with_body(r#"{"data": {"enablePullRequestAutoMerge": {"clientMutationId": null}}}"#)
+            .create();
+        run(
+            &ctx(&server, true),
+            merge_args(&[".plans"], MergeMethod::Squash),
+        )
+        .unwrap();
+        refused.assert();
+        auto.assert();
+    }
+
+    #[test]
+    fn merge_with_nothing_to_strip_merges_the_current_head() {
+        let mut server = Server::new();
+        mock_pr(&mut server, "OPEN");
+        mock_files(&mut server);
+        let merged = mock_merge(&mut server, "rebase", "abc123", 200);
+        run(
+            &ctx(&server, false),
+            merge_args(&["other"], MergeMethod::Rebase),
+        )
+        .unwrap();
+        merged.assert();
+    }
+
+    #[test]
+    fn merge_failures_other_than_405_stop() {
+        let mut server = Server::new();
+        mock_pr(&mut server, "OPEN");
+        mock_files(&mut server);
+        mock_merge(&mut server, "squash", "abc123", 409);
+        let err = run(
+            &ctx(&server, true),
+            merge_args(&["other"], MergeMethod::Squash),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("GitHub API 409"));
+    }
+
+    #[test]
+    fn renders_merge_outcomes() {
+        let mut report = Report {
+            pr: "o/r#7".into(),
+            branch: "feature".into(),
+            paths: strings(&[".plans"]),
+            changes: Vec::new(),
+            dry_run: false,
+            commit: None,
+            commit_url: None,
+            merged: Some("merged"),
+            method: Some("squash"),
+        };
+        assert!(render(&report).ends_with("Merged o/r#7 with squash\n"));
+        report.merged = Some("auto-merge");
+        assert!(
+            render(&report).ends_with(
+                "Enabled squash auto-merge on o/r#7, which merges once its checks pass\n"
+            )
+        );
+        report.merged = None;
+        report.dry_run = true;
+        assert!(render(&report).ends_with("Would merge o/r#7 with squash\n"));
     }
 }

@@ -220,7 +220,7 @@ fn describe(p: &DepPr, action: Action, comment: bool, method: MergeMethod) -> St
     if p.review_decision.as_deref() != Some("APPROVED") {
         parts.push("approve".to_string());
     }
-    let method = method_name(method);
+    let method = method.name();
     parts.push(match action {
         Action::Merge { fallback: false } => format!("merge ({method})"),
         Action::Merge { fallback: true } => {
@@ -387,7 +387,7 @@ impl Merger<'_> {
         self.approve(pr)?;
         match action {
             Action::Merge { fallback } => match self.merge(pr) {
-                Ok(()) => Ok(format!("merged ({})", method_name(self.method))),
+                Ok(()) => Ok(format!("merged ({})", self.method.name())),
                 Err(e) if fallback && is_conflict(&e) => self.auto(pr, true),
                 Err(e) => Err(e),
             },
@@ -401,13 +401,13 @@ impl Merger<'_> {
         // may predate the conflict that sent it here.
         if !rebase && immediately_mergeable(&pr.merge_state) {
             self.merge(pr)?;
-            return Ok(format!("merged ({})", method_name(self.method)));
+            return Ok(format!("merged ({})", self.method.name()));
         }
         if let Err(e) = self.enable_auto_merge(pr) {
             // The PR became mergeable after the approval above.
             if e.to_string().contains("clean status") {
                 self.merge(pr)?;
-                return Ok(format!("merged ({})", method_name(self.method)));
+                return Ok(format!("merged ({})", self.method.name()));
             }
             return Err(e);
         }
@@ -441,7 +441,7 @@ impl Merger<'_> {
             repo: self.repo.clone(),
             number: pr.number,
         };
-        pulls::merge(client, &pr_ref, method_name(self.method), None)?;
+        pulls::merge(client, &pr_ref, self.method.name(), None)?;
 
         // Repos that delete merged branches themselves answer 422 or 404 here.
         if let Err(e) = dependabot::delete_branch(client, self.repo, &pr.head_ref) {
@@ -454,16 +454,7 @@ impl Merger<'_> {
     }
 
     fn enable_auto_merge(&self, pr: &DepPr) -> Result<()> {
-        pulls::enable_auto_merge(&self.ctx.client, &pr.node_id, method_name(self.method))
-    }
-}
-
-/// REST merge method name, which uppercased is also the GraphQL enum value.
-fn method_name(method: MergeMethod) -> &'static str {
-    match method {
-        MergeMethod::Merge => "merge",
-        MergeMethod::Squash => "squash",
-        MergeMethod::Rebase => "rebase",
+        pulls::enable_auto_merge(&self.ctx.client, &pr.node_id, self.method.name())
     }
 }
 
