@@ -42,6 +42,21 @@ pub fn file_base64(
     Ok(Some(c.content.split_whitespace().collect()))
 }
 
+/// Text of `path` at `git_ref`, or None when the file doesn't exist there.
+pub fn file_text(
+    client: &Client,
+    repo: &Repo,
+    path: &str,
+    git_ref: &str,
+) -> Result<Option<String>> {
+    client.get_raw_opt(&format!(
+        "{}/contents/{}?ref={}",
+        repo.api(),
+        encode_path(path),
+        encode_segment(git_ref)
+    ))
+}
+
 const CREATE_COMMIT: &str = r#"
 mutation($input: CreateCommitOnBranchInput!) {
   createCommitOnBranch(input: $input) { commit { oid url } }
@@ -142,6 +157,31 @@ mod tests {
         assert!(err.to_string().contains("too large"));
         let err = file_base64(&client, &repo(), "dir", "main").unwrap_err();
         assert!(err.to_string().contains("directory"));
+    }
+
+    #[test]
+    fn file_text_reads_raw_or_none() {
+        let mut server = Server::new();
+        server
+            .mock("GET", "/repos/o/r/contents/.github/arriba.yml")
+            .match_query(Matcher::UrlEncoded("ref".into(), "main".into()))
+            .match_header("accept", "application/vnd.github.raw+json")
+            .with_body("strip: [.plans]\n")
+            .create();
+        server
+            .mock("GET", "/repos/o/r/contents/.github/arriba.yml")
+            .match_query(Matcher::UrlEncoded("ref".into(), "dev".into()))
+            .with_status(404)
+            .create();
+        let client = Client::for_tests(&server.url());
+        assert_eq!(
+            file_text(&client, &repo(), ".github/arriba.yml", "main").unwrap(),
+            Some("strip: [.plans]\n".to_string())
+        );
+        assert_eq!(
+            file_text(&client, &repo(), ".github/arriba.yml", "dev").unwrap(),
+            None
+        );
     }
 
     #[test]

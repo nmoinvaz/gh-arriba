@@ -174,13 +174,23 @@ impl Client {
 
     /// GET file contents from the contents API as raw text.
     pub fn get_raw(&self, path: &str) -> Result<String> {
+        self.get_raw_opt(path)?
+            .with_context(|| format!("GitHub API 404 on GET {path}: Not Found"))
+    }
+
+    /// `get_raw` that maps 404, a missing file, to None.
+    pub fn get_raw_opt(&self, path: &str) -> Result<Option<String>> {
         let url = self.url(path);
         let resp = self
             .request_as(Method::GET, &url, "application/vnd.github.raw+json")
             .send()
             .with_context(|| format!("GET {path} failed"))?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
         check(resp, &Method::GET, path)?
             .text()
+            .map(Some)
             .with_context(|| format!("Failed to read body of {path}"))
     }
 

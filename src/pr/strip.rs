@@ -1,5 +1,5 @@
-use anyhow::{Result, bail};
-use serde::Serialize;
+use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
 
 use crate::api::pulls::{self, NewCommit, PrFile, PrInfo, fetch_pr};
 use crate::api::{PrRef, parse_pr_ref};
@@ -42,13 +42,20 @@ struct Report {
 pub fn run(ctx: &Ctx, args: StripArgs) -> Result<()> {
     let (pr_arg, paths) = split_args(&args.args);
     let pr = ctx.pr(pr_arg)?;
-    let paths = normalize(paths);
-    if paths.is_empty() {
-        bail!("Pass the paths to strip, as in `gh arriba pr strip 42 .plans/`");
-    }
     let info = fetch_pr(&ctx.client, &pr)?;
     if info.state != "OPEN" {
         bail!("{pr} is {}", info.state.to_lowercase());
+    }
+    let paths = if paths.is_empty() {
+        configured_paths(ctx, &pr, &info.base_ref)?
+    } else {
+        normalize(paths)
+    };
+    if paths.is_empty() {
+        bail!(
+            "Pass the paths to strip, as in `gh arriba pr strip 42 .plans/`, or list them under \
+             strip: in {CONFIG}"
+        );
     }
 
     let changes = plan(&pulls::pr_files(&ctx.client, &pr)?, &paths);
@@ -77,6 +84,27 @@ pub fn run(ctx: &Ctx, args: StripArgs) -> Result<()> {
     }
     print!("{}", render(&report));
     Ok(())
+}
+
+/// Repo settings for gh arriba, read from the base branch.
+const CONFIG: &str = ".github/arriba.yml";
+
+#[derive(Default, Deserialize)]
+struct Config {
+    /// Paths `pr strip` takes out when none are given.
+    #[serde(default)]
+    strip: Vec<String>,
+}
+
+/// The `strip:` paths from the base branch's config, so a repo can name its scratch directories
+/// once. The base is used rather than the PR so a PR can't change what is stripped from it.
+fn configured_paths(ctx: &Ctx, pr: &PrRef, base: &str) -> Result<Vec<String>> {
+    let Some(text) = pulls::file_text(&ctx.client, &pr.repo, CONFIG, base)? else {
+        return Ok(Vec::new());
+    };
+    let config: Config = serde_yaml::from_str(&text)
+        .with_context(|| format!("Failed to parse {CONFIG} on {base}"))?;
+    Ok(normalize(&config.strip))
 }
 
 /// Split `[PR] PATH...`. The first argument is the PR when it is a number, URL, or OWNER/REPO#N;
@@ -413,13 +441,54 @@ mod tests {
     }
 
     #[test]
-    fn refuses_closed_prs_and_missing_paths() {
+    fn refuses_closed_prs() {
         let mut server = Server::new();
         mock_pr(&mut server, "MERGED");
         let err = run(&ctx(&server, true), args(&[".plans"], false)).unwrap_err();
         assert_eq!(err.to_string(), "o/r#7 is merged");
-        let err = run(&ctx(&server, true), args(&["./"], false)).unwrap_err();
-        assert!(err.to_string().starts_with("Pass the paths to strip"));
+    }
+
+    fn mock_config(server: &mut Server, status: usize, body: &str) -> Mock {
+        server
+            .mock("GET", "/repos/o/r/contents/.github/arriba.yml")
+            .match_query(Matcher::UrlEncoded("ref".into(), "main".into()))
+            .with_status(status)
+            .with_body(body)
+            .create()
+    }
+
+    #[test]
+    fn paths_default_to_the_base_config() {
+        let mut server = Server::new();
+        mock_pr(&mut server, "OPEN");
+        mock_files(&mut server);
+        let config = mock_config(&mut server, 200, "strip:\n  - ./.plans/\n");
+        let ctx = ctx(&server, true);
+        assert_eq!(
+            configured_paths(&ctx, &ctx.pr(Some("7")).unwrap(), "main").unwrap(),
+            strings(&[".plans"])
+        );
+        run(&ctx, args(&[], true)).unwrap();
+        config.expect(2).assert();
+    }
+
+    #[test]
+    fn missing_or_empty_config_asks_for_paths() {
+        for (status, body) in [(404, ""), (200, "other: 1\n")] {
+            let mut server = Server::new();
+            mock_pr(&mut server, "OPEN");
+            mock_config(&mut server, status, body);
+            let err = run(&ctx(&server, true), args(&[], false)).unwrap_err();
+            assert!(err.to_string().starts_with("Pass the paths to strip"));
+        }
+        let mut server = Server::new();
+        mock_pr(&mut server, "OPEN");
+        mock_config(&mut server, 200, "strip: [unclosed\n");
+        let err = run(&ctx(&server, true), args(&[], false)).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Failed to parse .github/arriba.yml")
+        );
     }
 
     #[test]

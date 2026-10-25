@@ -31,7 +31,7 @@ pub use pending::{
     fetch_pending, pr_files, submit_review,
 };
 pub use rollup::{CheckRun, StatusContext, StatusFields, checks_with_status, checks_with_title};
-pub use strip::{NewCommit, commit_on_branch, file_base64};
+pub use strip::{NewCommit, commit_on_branch, file_base64, file_text};
 #[cfg(test)]
 pub use threads::Comment;
 pub use threads::{

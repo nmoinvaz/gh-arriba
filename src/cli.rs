@@ -75,7 +75,7 @@ pub enum PrCommand {
     /// List the repo's labels, and add or remove them on a PR
     Labels(LabelsArgs),
     /// Remove scratch paths a PR adds or changes, in a commit on its branch, before it merges
-    #[command(override_usage = "gh arriba pr strip [OPTIONS] [PR] <PATH>...")]
+    #[command(override_usage = "gh arriba pr strip [OPTIONS] [PR] [PATH]...")]
     Strip(StripArgs),
 }
 
@@ -371,8 +371,8 @@ pub struct LabelsArgs {
 #[derive(Args)]
 pub struct StripArgs {
     /// [PR]: number, URL, or owner/repo#N (default: PR for the current branch), then the files or
-    /// directories to take out of it
-    #[arg(value_name = "[PR] PATH", required = true)]
+    /// directories to take out of it (default: strip: in .github/arriba.yml on the base branch)
+    #[arg(value_name = "[PR] PATH")]
     pub args: Vec<String>,
 
     /// Print what would change without committing
