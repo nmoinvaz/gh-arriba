@@ -93,6 +93,12 @@ gh arriba [options] <command>
 Listing runners needs admin access: for an organization, an org admin token with the `admin:org`
 scope (`gh auth refresh -s admin:org`). Without it, `runners` falls back to `--from-jobs`.
 
+### Worktrees
+
+| Command | Description |
+|---------|-------------|
+| `worktree list` | List worktrees with their PR, its state and checks, and uncommitted or unpushed work |
+
 ### Config sync
 
 | Command | Description |

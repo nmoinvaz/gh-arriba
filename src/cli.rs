@@ -40,6 +40,9 @@ pub enum Command {
     Dependabot(DependabotCommand),
     /// List self-hosted runners and what they are running
     Runners(RunnersArgs),
+    /// List and prune git worktrees by the state of their pull requests
+    #[command(subcommand)]
+    Worktree(WorktreeCommand),
     /// Sync project config files to and from a gist
     Config(ConfigArgs),
 }
@@ -746,6 +749,12 @@ pub struct RunnersArgs {
     /// Most recently pushed org repos to read when inferring runners from jobs
     #[arg(long, default_value_t = 10, value_name = "N")]
     pub repos: usize,
+}
+
+#[derive(Subcommand)]
+pub enum WorktreeCommand {
+    /// List worktrees with their PR, its state and checks, and uncommitted or unpushed work
+    List,
 }
 
 #[derive(Args)]

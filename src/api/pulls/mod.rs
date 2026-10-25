@@ -11,6 +11,7 @@ use crate::api::{Client, PrRef, Repo};
 
 mod branch;
 mod comments;
+mod heads;
 mod labels;
 mod pending;
 mod rollup;
@@ -21,6 +22,7 @@ pub use comments::{
     RestComment, edit_issue_comment, edit_review, edit_review_comment, find_issue_comment,
     find_review_comment, issue_comment, review, review_comment,
 };
+pub use heads::{BranchPr, prs_by_branch};
 pub use labels::{
     Contributor, RepoLabel, add_labels, contributors, pr_labels, remove_label, repo_labels,
     request_reviewers, requested_reviewers,

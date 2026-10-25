@@ -12,6 +12,7 @@ mod release;
 mod run;
 mod runners;
 mod workflow;
+mod worktree;
 
 use anyhow::Result;
 use clap::Parser;
@@ -42,6 +43,7 @@ fn main() -> Result<()> {
         Command::Release(args) => release::run(&ctx, args),
         Command::Dependabot(cmd) => dependabot::run(&ctx, cmd),
         Command::Runners(args) => runners::run(&ctx, args),
+        Command::Worktree(cmd) => worktree::run(&ctx, cmd),
         Command::Config(args) => config::run(&ctx, args),
     }
 }
