@@ -128,47 +128,111 @@ struct Row {
     pr: Option<BranchPr>,
 }
 
-/// The PR to show for a branch: the viewer's newest, else the newest, since branch names match across
-/// forks.
-fn pick_pr(prs: &[BranchPr], viewer: &str) -> Option<BranchPr> {
-    prs.iter()
+/// Git config key `worktree add` sets on a fork PR's branch to record the PR number, since the
+/// branch has no upstream and may not keep the fork's branch name.
+const PR_KEY: &str = "gh-arriba-pr";
+
+/// What ties a local branch to its PR.
+#[derive(Debug, Default)]
+struct Origin {
+    /// The PR number `worktree add` recorded on the branch.
+    recorded: Option<u64>,
+    /// OWNER/REPO the branch's upstream remote points at.
+    upstream_repo: Option<String>,
+}
+
+fn origin(root: &Path, branch: &str) -> Origin {
+    let config = |key: &str| {
+        git_in(
+            root,
+            &["config", "--get", &format!("branch.{branch}.{key}")],
+        )
+        .ok()
+        .filter(|v| !v.is_empty())
+    };
+    let upstream_repo = config("remote")
+        .and_then(|remote| git_in(root, &["remote", "get-url", &remote]).ok())
+        .and_then(|url| repo_of_url(&url));
+    Origin {
+        recorded: config(PR_KEY).and_then(|n| n.parse().ok()),
+        upstream_repo,
+    }
+}
+
+/// The PR of a branch, among the PRs with its name. Names repeat across forks, so a PR counts only
+/// when its head lives in the repo the branch's upstream points at, or its head is the worktree's
+/// commit. Among those the viewer's newest wins, then the newest.
+fn pick_pr(
+    prs: &[BranchPr],
+    viewer: &str,
+    upstream_repo: Option<&str>,
+    head: &str,
+) -> Option<BranchPr> {
+    let ours = |p: &&BranchPr| {
+        let same_repo = matches!(
+            (p.head_repo.as_deref(), upstream_repo),
+            (Some(a), Some(b)) if a.eq_ignore_ascii_case(b)
+        );
+        same_repo || p.head_oid == head
+    };
+    let matching: Vec<&BranchPr> = prs.iter().filter(ours).collect();
+    matching
+        .iter()
         .find(|p| p.author.eq_ignore_ascii_case(viewer))
-        .or_else(|| prs.first())
-        .cloned()
+        .or_else(|| matching.first())
+        .map(|p| (*p).clone())
 }
 
 /// Every worktree of the repository at `root`, with local state and PRs.
 fn rows(ctx: &Ctx, root: &Path) -> Result<Vec<Row>> {
     let list = git_in(root, &["worktree", "list", "--porcelain"])?;
     let worktrees = parse_list(&list);
-    let branches: Vec<String> = worktrees
+    let origins: Vec<Origin> = worktrees
         .iter()
-        .filter_map(|w| w.branch.clone())
+        .map(|w| {
+            w.branch
+                .as_deref()
+                .map(|b| origin(root, b))
+                .unwrap_or_default()
+        })
+        .collect();
+    let by_name: Vec<String> = worktrees
+        .iter()
+        .zip(&origins)
+        .filter(|(_, o)| o.recorded.is_none())
+        .filter_map(|(w, _)| w.branch.clone())
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
-    let (prs, viewer) = if branches.is_empty() {
-        Default::default()
-    } else {
+    let any_branch = worktrees.iter().any(|w| w.branch.is_some());
+    let (repo, prs, viewer) = if any_branch {
         let repo = ctx.repo()?;
-        let prs = pulls::prs_by_branch(&ctx.client, &repo, &branches)?;
-        (prs, ctx.client.viewer()?.to_string())
+        let prs = if by_name.is_empty() {
+            Default::default()
+        } else {
+            pulls::prs_by_branch(&ctx.client, &repo, &by_name)?
+        };
+        (Some(repo), prs, ctx.client.viewer()?.to_string())
+    } else {
+        (None, Default::default(), String::new())
     };
-    Ok(worktrees
-        .into_iter()
-        .map(|w| {
-            let pr = w
-                .branch
-                .as_ref()
-                .and_then(|b| prs.get(b))
-                .and_then(|p| pick_pr(p, &viewer));
-            Row {
-                local: local_state(root, &w),
-                worktree: w,
-                pr,
-            }
-        })
-        .collect())
+    let mut rows = Vec::new();
+    for (w, o) in worktrees.into_iter().zip(origins) {
+        let pr = match (&w.branch, o.recorded, &repo) {
+            // The number was recorded when the worktree was made, so it needs no matching.
+            (Some(_), Some(n), Some(repo)) => pulls::pr_by_number(&ctx.client, repo, n)?,
+            (Some(b), None, _) => prs
+                .get(b)
+                .and_then(|p| pick_pr(p, &viewer, o.upstream_repo.as_deref(), &w.head)),
+            _ => None,
+        };
+        rows.push(Row {
+            local: local_state(root, &w),
+            worktree: w,
+            pr,
+        });
+    }
+    Ok(rows)
 }
 
 /// The main worktree's root, from anywhere inside any worktree of the repository.
@@ -436,26 +500,38 @@ fn add_at(ctx: &Ctx, root: &Path, args: &WorktreeAddArgs) -> Result<()> {
                         "FETCH_HEAD",
                     ],
                 )?;
+                let key = format!("branch.{branch}.{PR_KEY}");
+                git_in(root, &["config", &key, &info.number.to_string()])?;
                 branch
             } else {
-                git_in(root, &["fetch", "--quiet", &remote, &info.head_ref])?;
+                // An explicit destination, since a single-branch clone's refspec doesn't cover it.
+                let refspec = format!("+refs/heads/{0}:refs/remotes/{remote}/{0}", info.head_ref);
+                git_in(root, &["fetch", "--quiet", &remote, &refspec])?;
                 if branch_exists(root, &info.head_ref) {
                     git_in(root, &["worktree", "add", "--quiet", &dir, &info.head_ref])?;
                 } else {
-                    let upstream = format!("{remote}/{}", info.head_ref);
+                    let start = format!("{remote}/{}", info.head_ref);
                     git_in(
                         root,
                         &[
                             "worktree",
                             "add",
                             "--quiet",
-                            "--track",
+                            "--no-track",
                             "-b",
                             &info.head_ref,
                             &dir,
-                            &upstream,
+                            &start,
                         ],
                     )?;
+                    // Set the upstream by hand: --track refuses a ref the fetch refspec doesn't map.
+                    let branch = &info.head_ref;
+                    git_in(
+                        root,
+                        &["config", &format!("branch.{branch}.remote"), &remote],
+                    )?;
+                    let merge = format!("refs/heads/{branch}");
+                    git_in(root, &["config", &format!("branch.{branch}.merge"), &merge])?;
                 }
                 info.head_ref.clone()
             };
@@ -494,18 +570,25 @@ fn remote_for(root: &Path, repo: &Repo) -> String {
     remote_matching(&remotes, repo).unwrap_or_else(|| "origin".to_string())
 }
 
-/// The first remote in `git remote -v` output whose URL ends in OWNER/REPO, with or without `.git`.
+/// The first remote in `git remote -v` output whose URL names `repo`.
 fn remote_matching(remotes: &str, repo: &Repo) -> Option<String> {
-    let want = format!("{}/{}", repo.owner, repo.name).to_lowercase();
+    let want = repo.to_string();
     remotes.lines().find_map(|line| {
         let mut parts = line.split_whitespace();
         let (name, url) = (parts.next()?, parts.next()?);
-        let url = url.to_lowercase();
-        let url = url.trim_end_matches('/');
-        let url = url.strip_suffix(".git").unwrap_or(url);
-        let tail = url.rsplit([':', '/']).take(2).collect::<Vec<_>>();
-        (tail.len() == 2 && format!("{}/{}", tail[1], tail[0]) == want).then(|| name.to_string())
+        repo_of_url(url)
+            .filter(|r| r.eq_ignore_ascii_case(&want))
+            .map(|_| name.to_string())
     })
+}
+
+/// OWNER/REPO from the last two segments of a remote URL, with or without `.git`.
+fn repo_of_url(url: &str) -> Option<String> {
+    let url = url.trim().trim_end_matches('/');
+    let url = url.strip_suffix(".git").unwrap_or(url);
+    let mut tail = url.rsplit([':', '/']);
+    let (name, owner) = (tail.next()?, tail.next()?);
+    (!name.is_empty() && !owner.is_empty()).then(|| format!("{owner}/{name}"))
 }
 
 fn branch_exists(root: &Path, branch: &str) -> bool {
@@ -670,16 +753,36 @@ prunable gitdir file points to non-existent location
             state: state.into(),
             author: author.into(),
             head_oid: "2222222222222222222222222222222222222222".into(),
+            head_repo: Some("o/r".into()),
             checks: Some("SUCCESS".into()),
         }
     }
 
     #[test]
-    fn prefers_the_viewers_pr() {
-        let prs = vec![pr(9, "someone", "OPEN"), pr(4, "Me", "MERGED")];
-        assert_eq!(pick_pr(&prs, "me").unwrap().number, 4);
-        assert_eq!(pick_pr(&prs, "other").unwrap().number, 9);
-        assert_eq!(pick_pr(&[], "me"), None);
+    fn picks_only_prs_tied_to_the_branch() {
+        let head = "2222222222222222222222222222222222222222";
+        let mut stranger = pr(9, "someone", "MERGED");
+        stranger.head_repo = Some("someone/r".into());
+        stranger.head_oid = "8888888888888888888888888888888888888888".into();
+        let mine = pr(4, "Me", "OPEN");
+        let other = pr(5, "teammate", "OPEN");
+        let prs = vec![stranger.clone(), other, mine.clone()];
+        // A fork's PR on the same name is never picked, and the viewer's wins among the rest.
+        assert_eq!(pick_pr(&prs, "me", Some("O/R"), "x").unwrap().number, 4);
+        assert_eq!(pick_pr(&prs, "nobody", Some("o/r"), "x").unwrap().number, 5);
+        assert_eq!(
+            pick_pr(std::slice::from_ref(&stranger), "me", Some("o/r"), head),
+            None
+        );
+        // Without a matching upstream, the PR's head has to be the worktree's commit.
+        assert_eq!(
+            pick_pr(std::slice::from_ref(&mine), "me", None, head)
+                .unwrap()
+                .number,
+            4
+        );
+        assert_eq!(pick_pr(&[mine], "me", None, "other"), None);
+        assert_eq!(pick_pr(&[], "me", Some("o/r"), head), None);
     }
 
     #[test]
@@ -989,6 +1092,12 @@ upstream\thttps://github.com/O/R (push)
         assert_eq!(remote_matching(remotes, &mine).as_deref(), Some("fork"));
         assert_eq!(remote_matching(remotes, &Repo::parse("x/y").unwrap()), None);
         assert_eq!(remote_matching("bad", &repo), None);
+        assert_eq!(
+            repo_of_url("https://github.com/o/r.git/").as_deref(),
+            Some("o/r")
+        );
+        assert_eq!(repo_of_url("git@github.com:o/r").as_deref(), Some("o/r"));
+        assert_eq!(repo_of_url("r"), None);
     }
 
     #[test]
@@ -1079,5 +1188,89 @@ upstream\thttps://github.com/O/R (push)
         mock_pr(&mut server, "fix/y", "abc", false);
         let err = add_at(&ctx(&server, true), &s.root(), &add_args(Some(s.root()))).unwrap_err();
         assert!(err.to_string().ends_with("already exists"));
+    }
+
+    #[test]
+    fn prune_ignores_another_forks_pr_on_the_same_branch_name() {
+        let s = Scratch::new("stranger");
+        let path = s.branch_worktree("develop");
+        let mut server = Server::new();
+        mock_lookup(
+            &mut server,
+            json!([{
+                "number": 3, "state": "MERGED", "author": {"login": "someone"},
+                "headRefOid": "8888888888888888888888888888888888888888",
+                "headRepository": {"nameWithOwner": "someone/r"}, "commits": {"nodes": []}
+            }]),
+        );
+        let ctx = ctx(&server, true);
+        let rows = rows(&ctx, &s.root()).unwrap();
+        assert!(rows.iter().all(|r| r.pr.is_none()));
+        let forced = WorktreePruneArgs {
+            force: true,
+            ..prune_args(false)
+        };
+        prune_at(&ctx, &s.root(), &forced).unwrap();
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn prune_finds_a_fork_worktree_by_its_recorded_pr() {
+        let s = Scratch::new("forkprune");
+        s.git(&["checkout", "--quiet", "-b", "feature"]);
+        s.commit("fork.txt", "fork\n");
+        let oid = s.git(&["rev-parse", "HEAD"]);
+        s.git(&["push", "--quiet", "origin", "HEAD:refs/pull/7/head"]);
+        s.git(&["checkout", "--quiet", "main"]);
+        let mut server = Server::new();
+        mock_pr(&mut server, "feature", &oid, true);
+        let dir = s.0.join("fork-wt");
+        let ctx = ctx(&server, true);
+        add_at(&ctx, &s.root(), &add_args(Some(dir.clone()))).unwrap();
+        assert_eq!(s.git(&["config", "--get", "branch.pr-7.gh-arriba-pr"]), "7");
+
+        // Only the main worktree's branch is looked up by name; pr-7 is looked up by number.
+        mock_lookup(&mut server, json!([]));
+        let by_number = server
+            .mock("POST", "/graphql")
+            .match_body(Matcher::Regex(
+                r"pullRequest\(number: \$number\) \{ number".into(),
+            ))
+            .with_body(
+                json!({"data": {"repository": {"pullRequest": {
+                    "number": 7, "state": "MERGED", "headRefOid": oid,
+                    "author": {"login": "contributor"},
+                    "headRepository": {"nameWithOwner": "fork/r"}, "commits": {"nodes": []}
+                }}}})
+                .to_string(),
+            )
+            .create();
+        prune_at(&ctx, &s.root(), &prune_args(false)).unwrap();
+        assert!(!dir.exists());
+        assert!(s.git(&["branch", "--list", "pr-7"]).is_empty());
+        by_number.assert();
+    }
+
+    #[test]
+    fn add_works_in_a_single_branch_clone() {
+        let s = Scratch::new("single");
+        s.git(&["checkout", "--quiet", "-b", "fix/z"]);
+        s.commit("z.txt", "z\n");
+        s.git(&["push", "--quiet", "origin", "fix/z"]);
+        let oid = s.git(&["rev-parse", "HEAD"]);
+        s.git(&["checkout", "--quiet", "main"]);
+        s.git(&["branch", "--quiet", "-D", "fix/z"]);
+        s.git(&["update-ref", "-d", "refs/remotes/origin/fix/z"]);
+        // As `git clone --single-branch` leaves it, the refspec only covers main.
+        s.git(&[
+            "config",
+            "remote.origin.fetch",
+            "+refs/heads/main:refs/remotes/origin/main",
+        ]);
+        let mut server = Server::new();
+        mock_pr(&mut server, "fix/z", &oid, false);
+        let dir = s.0.join("single-wt");
+        add_at(&ctx(&server, true), &s.root(), &add_args(Some(dir.clone()))).unwrap();
+        assert_eq!(git_in(&dir, &["rev-parse", "HEAD"]).unwrap(), oid);
     }
 }
