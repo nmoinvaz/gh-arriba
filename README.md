@@ -98,8 +98,8 @@ scope (`gh auth refresh -s admin:org`). Without it, `runners` falls back to `--f
 | Command | Description |
 |---------|-------------|
 | `worktree list` | List worktrees with their PR, its state and checks, and uncommitted or unpushed work |
-| `worktree prune` | Remove worktrees whose PR merged or closed, and their branches, keeping any with unpushed work |
-| `worktree add <PR> [DIR]` | Check a PR out into a new worktree beside the main one, or print the one it already has |
+| `worktree prune` | Remove worktrees of your PRs that merged or closed, and their branches, keeping any with unpushed work |
+| `worktree add <PR> [DIR]` | Check one of your PRs out into a new worktree beside the main one, or print the one it already has |
 
 ### Config sync
 
