@@ -269,12 +269,13 @@ struct Candidate {
     kept: Option<String>,
 }
 
-/// The worktrees whose PR merged or closed, or with `gone`, whose upstream branch was deleted. Each
+/// The worktrees of the viewer's own PRs that merged or closed. Worktrees of other people's PRs, and
+/// ones with no PR to tell whose they are, are never candidates. Each
 /// is kept when it is locked or holds work that isn't on the remote, unless `force` is set.
 /// `on_remote` tells whether a commit is reachable from a remote branch.
 fn plan_prune(
     rows: &[Row],
-    gone: bool,
+    viewer: &str,
     force: bool,
     on_remote: impl Fn(&str) -> bool,
 ) -> Vec<Candidate> {
@@ -287,12 +288,16 @@ fn plan_prune(
         if w.main || w.bare || w.prunable {
             continue;
         }
-        let reason = match &r.pr {
-            Some(p) if p.state == "MERGED" => format!("PR #{} merged", p.number),
-            Some(p) if p.state == "CLOSED" => format!("PR #{} closed", p.number),
-            Some(_) => continue,
-            None if gone && r.local.upstream_gone => "upstream gone".to_string(),
-            None => continue,
+        let Some(p) =
+            r.pr.as_ref()
+                .filter(|p| p.author.eq_ignore_ascii_case(viewer))
+        else {
+            continue;
+        };
+        let reason = match p.state.as_str() {
+            "MERGED" => format!("PR #{} merged", p.number),
+            "CLOSED" => format!("PR #{} closed", p.number),
+            _ => continue,
         };
         let l = &r.local;
         let kept = if w.locked {
@@ -305,7 +310,7 @@ fn plan_prune(
             Some(format!("{} unpushed commits", l.ahead))
         } else {
             // A merged PR's head, or any commit a remote branch has, is safe to drop locally.
-            let pushed = r.pr.as_ref().is_some_and(|p| p.head_oid == w.head) || on_remote(&w.head);
+            let pushed = p.head_oid == w.head || on_remote(&w.head);
             (!pushed).then(|| "commits on no remote branch".to_string())
         };
         out.push(Candidate {
@@ -342,7 +347,7 @@ fn prune_at(ctx: &Ctx, root: &Path, args: &WorktreePruneArgs) -> Result<()> {
         git_in(root, &["branch", "-r", "--contains", oid]).is_ok_and(|s| !s.trim().is_empty())
     };
     let (kept, removed): (Vec<Candidate>, Vec<Candidate>) =
-        plan_prune(&rows, args.gone, args.force, on_remote)
+        plan_prune(&rows, ctx.client.viewer()?, args.force, on_remote)
             .into_iter()
             .partition(|c| c.kept.is_some());
     let mut report = PruneReport {
@@ -450,6 +455,13 @@ fn add(ctx: &Ctx, args: WorktreeAddArgs) -> Result<()> {
 fn add_at(ctx: &Ctx, root: &Path, args: &WorktreeAddArgs) -> Result<()> {
     let pr = ctx.pr(Some(&args.pr))?;
     let info = fetch_pr(&ctx.client, &pr)?;
+    let viewer = ctx.client.viewer()?;
+    if !info.author.eq_ignore_ascii_case(viewer) {
+        anyhow::bail!(
+            "{pr} is by {}, and worktree add only checks out your own PRs",
+            info.author
+        );
+    }
     let worktrees = parse_list(&git_in(root, &["worktree", "list", "--porcelain"])?);
     // A fork's branch gets checked out as pr-N when its own name is taken locally.
     let fork_name = format!("pr-{}", info.number);
@@ -958,6 +970,8 @@ prunable gitdir file points to non-existent location
             upstream_gone: true,
             ..Local::default()
         };
+        let mut theirs = row("theirs", Some("MERGED"), Local::default());
+        theirs.pr.as_mut().unwrap().author = "teammate".into();
         let mut moved = row("moved", Some("MERGED"), Local::default());
         moved.worktree.head = "9999999999999999999999999999999999999999".into();
         let mut locked = row("locked", Some("CLOSED"), Local::default());
@@ -975,6 +989,7 @@ prunable gitdir file points to non-existent location
             locked,
             row("gone", None, gone),
             row("nopr", None, Local::default()),
+            theirs,
         ];
         let summary = |plan: Vec<Candidate>| -> Vec<(String, String, Option<String>)> {
             plan.into_iter()
@@ -983,7 +998,7 @@ prunable gitdir file points to non-existent location
         };
         let s = |v: &str| v.to_string();
         assert_eq!(
-            summary(plan_prune(&rows, false, false, |_| false)),
+            summary(plan_prune(&rows, "Me", false, |_| false)),
             vec![
                 (s("merged"), s("PR #42 merged"), None),
                 (s("closed"), s("PR #42 closed"), None),
@@ -1005,23 +1020,22 @@ prunable gitdir file points to non-existent location
                 (s("locked"), s("PR #42 closed"), Some(s("locked"))),
             ]
         );
-        // A remote branch holding the commit, --gone, and --force each let more go.
-        let plan = summary(plan_prune(&rows, true, true, |_| true));
+        // A remote branch holding the commit, and --force, each let more go, but never another
+        // person's worktree or one with no PR.
+        let plan = summary(plan_prune(&rows, "me", true, |_| true));
         assert!(plan.contains(&(s("moved"), s("PR #42 merged"), None)));
         assert!(plan.contains(&(s("dirty"), s("PR #42 merged"), None)));
-        assert!(plan.contains(&(s("gone"), s("upstream gone"), None)));
         assert!(plan.contains(&(s("locked"), s("PR #42 closed"), Some(s("locked")))));
         assert!(
             !plan
                 .iter()
-                .any(|(b, _, _)| b == "open" || b == "nopr" || b == "main")
+                .any(|(b, _, _)| ["open", "nopr", "gone", "theirs", "main"].contains(&b.as_str()))
         );
     }
 
     fn prune_args(dry_run: bool) -> WorktreePruneArgs {
         WorktreePruneArgs {
             dry_run,
-            gone: false,
             force: false,
         }
     }
@@ -1109,6 +1123,15 @@ upstream\thttps://github.com/O/R (push)
     }
 
     fn mock_pr(server: &mut Server, head: &str, oid: &str, fork: bool) {
+        mock_pr_by(server, head, oid, fork, "me");
+    }
+
+    fn mock_pr_by(server: &mut Server, head: &str, oid: &str, fork: bool, author: &str) {
+        server
+            .mock("POST", "/graphql")
+            .match_body(Matcher::Regex("viewer".into()))
+            .with_body(r#"{"data": {"viewer": {"login": "me"}}}"#)
+            .create();
         server
             .mock("POST", "/graphql")
             .match_body(Matcher::Regex("isCrossRepository".into()))
@@ -1117,6 +1140,7 @@ upstream\thttps://github.com/O/R (push)
                     "id": "PR_7", "number": 7, "state": "OPEN",
                     "createdAt": "2026-01-01T00:00:00Z", "baseRefName": "main",
                     "headRefName": head, "headRefOid": oid, "isCrossRepository": fork,
+                    "author": {"login": author},
                     "headRepository": {"nameWithOwner": if fork { "fork/r" } else { "o/r" }}
                 }}}})
                 .to_string(),
@@ -1182,6 +1206,19 @@ upstream\thttps://github.com/O/R (push)
     }
 
     #[test]
+    fn add_refuses_other_peoples_prs() {
+        let s = Scratch::new("theirs");
+        let mut server = Server::new();
+        mock_pr_by(&mut server, "fix/q", "abc", false, "teammate");
+        let err = add_at(&ctx(&server, true), &s.root(), &add_args(None)).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "o/r#7 is by teammate, and worktree add only checks out your own PRs"
+        );
+        assert!(!s.0.join("repo-pr-7").exists());
+    }
+
+    #[test]
     fn add_refuses_an_existing_directory() {
         let s = Scratch::new("exists");
         let mut server = Server::new();
@@ -1239,7 +1276,7 @@ upstream\thttps://github.com/O/R (push)
             .with_body(
                 json!({"data": {"repository": {"pullRequest": {
                     "number": 7, "state": "MERGED", "headRefOid": oid,
-                    "author": {"login": "contributor"},
+                    "author": {"login": "me"},
                     "headRepository": {"nameWithOwner": "fork/r"}, "commits": {"nodes": []}
                 }}}})
                 .to_string(),
