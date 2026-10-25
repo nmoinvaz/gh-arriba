@@ -3,8 +3,9 @@ use serde::Serialize;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use crate::api::pulls::{self, BranchPr};
-use crate::cli::{WorktreeCommand, WorktreePruneArgs};
+use crate::api::Repo;
+use crate::api::pulls::{self, BranchPr, fetch_pr};
+use crate::cli::{WorktreeAddArgs, WorktreeCommand, WorktreePruneArgs};
 use crate::context::{Ctx, git, git_in};
 use crate::{output, prompt};
 
@@ -12,6 +13,7 @@ pub fn run(ctx: &Ctx, cmd: WorktreeCommand) -> Result<()> {
     match cmd {
         WorktreeCommand::List => list(ctx),
         WorktreeCommand::Prune(args) => prune(ctx, args),
+        WorktreeCommand::Add(args) => add(ctx, args),
     }
 }
 
@@ -365,6 +367,158 @@ fn plural(n: usize, noun: &str) -> String {
     } else {
         format!("{n} {noun}s")
     }
+}
+
+#[derive(Debug, Serialize)]
+struct Added {
+    pr: String,
+    path: PathBuf,
+    branch: String,
+    /// The PR already had a worktree, which is reported instead of making another.
+    existing: bool,
+}
+
+fn add(ctx: &Ctx, args: WorktreeAddArgs) -> Result<()> {
+    add_at(ctx, &repo_root()?, &args)
+}
+
+/// Check a PR out into a new worktree beside the main one, or report the worktree it already has.
+fn add_at(ctx: &Ctx, root: &Path, args: &WorktreeAddArgs) -> Result<()> {
+    let pr = ctx.pr(Some(&args.pr))?;
+    let info = fetch_pr(&ctx.client, &pr)?;
+    let worktrees = parse_list(&git_in(root, &["worktree", "list", "--porcelain"])?);
+    // A fork's branch gets checked out as pr-N when its own name is taken locally.
+    let fork_name = format!("pr-{}", info.number);
+    let existing = worktrees.iter().find(|w| match w.branch.as_deref() {
+        Some(b) if !info.cross_repository => b == info.head_ref,
+        Some(b) => b == fork_name || (b == info.head_ref && w.head == info.head_oid),
+        None => false,
+    });
+    let added = match existing {
+        Some(w) => Added {
+            pr: pr.to_string(),
+            path: w.path.clone(),
+            branch: w.branch.clone().unwrap_or_default(),
+            existing: true,
+        },
+        None => {
+            let main = worktrees
+                .iter()
+                .find(|w| w.main)
+                .map(|w| w.path.clone())
+                .unwrap_or_else(|| root.to_path_buf());
+            let path = match &args.dir {
+                Some(d) => d.clone(),
+                None => default_dir(&main, info.number),
+            };
+            if path.exists() {
+                anyhow::bail!("{} already exists", path.display());
+            }
+            let remote = remote_for(root, &pr.repo);
+            let dir = path.to_string_lossy();
+            let branch = if info.cross_repository {
+                let branch = if branch_exists(root, &info.head_ref) {
+                    fork_name
+                } else {
+                    info.head_ref.clone()
+                };
+                let pull = format!("pull/{}/head", info.number);
+                git_in(root, &["fetch", "--quiet", &remote, &pull])?;
+                git_in(
+                    root,
+                    &[
+                        "worktree",
+                        "add",
+                        "--quiet",
+                        "-b",
+                        &branch,
+                        &dir,
+                        "FETCH_HEAD",
+                    ],
+                )?;
+                branch
+            } else {
+                git_in(root, &["fetch", "--quiet", &remote, &info.head_ref])?;
+                if branch_exists(root, &info.head_ref) {
+                    git_in(root, &["worktree", "add", "--quiet", &dir, &info.head_ref])?;
+                } else {
+                    let upstream = format!("{remote}/{}", info.head_ref);
+                    git_in(
+                        root,
+                        &[
+                            "worktree",
+                            "add",
+                            "--quiet",
+                            "--track",
+                            "-b",
+                            &info.head_ref,
+                            &dir,
+                            &upstream,
+                        ],
+                    )?;
+                }
+                info.head_ref.clone()
+            };
+            Added {
+                pr: pr.to_string(),
+                path,
+                branch,
+                existing: false,
+            }
+        }
+    };
+    if ctx.json {
+        return output::print_json(&added);
+    }
+    if added.existing {
+        eprintln!("{} already has a worktree on {}", added.pr, added.branch);
+    }
+    println!("{}", added.path.display());
+    Ok(())
+}
+
+/// `<repo>-pr-<N>` beside the main worktree.
+fn default_dir(main: &Path, number: u64) -> PathBuf {
+    let name = main
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "repo".into());
+    main.parent()
+        .unwrap_or(main)
+        .join(format!("{name}-pr-{number}"))
+}
+
+/// The remote whose URL names `repo`, or `origin`.
+fn remote_for(root: &Path, repo: &Repo) -> String {
+    let remotes = git_in(root, &["remote", "-v"]).unwrap_or_default();
+    remote_matching(&remotes, repo).unwrap_or_else(|| "origin".to_string())
+}
+
+/// The first remote in `git remote -v` output whose URL ends in OWNER/REPO, with or without `.git`.
+fn remote_matching(remotes: &str, repo: &Repo) -> Option<String> {
+    let want = format!("{}/{}", repo.owner, repo.name).to_lowercase();
+    remotes.lines().find_map(|line| {
+        let mut parts = line.split_whitespace();
+        let (name, url) = (parts.next()?, parts.next()?);
+        let url = url.to_lowercase();
+        let url = url.trim_end_matches('/');
+        let url = url.strip_suffix(".git").unwrap_or(url);
+        let tail = url.rsplit([':', '/']).take(2).collect::<Vec<_>>();
+        (tail.len() == 2 && format!("{}/{}", tail[1], tail[0]) == want).then(|| name.to_string())
+    })
+}
+
+fn branch_exists(root: &Path, branch: &str) -> bool {
+    git_in(
+        root,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ],
+    )
+    .is_ok()
 }
 
 /// A path relative to the main worktree's parent, where sibling worktrees usually live.
@@ -819,5 +973,111 @@ prunable gitdir file points to non-existent location
     fn plural_counts() {
         assert_eq!(plural(1, "worktree"), "1 worktree");
         assert_eq!(plural(0, "worktree"), "0 worktrees");
+    }
+
+    #[test]
+    fn remotes_match_by_owner_and_name() {
+        let remotes = "\
+fork\tgit@github.com:me/r.git (fetch)
+fork\tgit@github.com:me/r.git (push)
+upstream\thttps://github.com/O/R (fetch)
+upstream\thttps://github.com/O/R (push)
+";
+        let repo = Repo::parse("o/r").unwrap();
+        assert_eq!(remote_matching(remotes, &repo).as_deref(), Some("upstream"));
+        let mine = Repo::parse("me/r").unwrap();
+        assert_eq!(remote_matching(remotes, &mine).as_deref(), Some("fork"));
+        assert_eq!(remote_matching(remotes, &Repo::parse("x/y").unwrap()), None);
+        assert_eq!(remote_matching("bad", &repo), None);
+    }
+
+    #[test]
+    fn default_dir_sits_beside_the_main_worktree() {
+        assert_eq!(
+            default_dir(Path::new("/src/gh-arriba"), 42),
+            PathBuf::from("/src/gh-arriba-pr-42")
+        );
+    }
+
+    fn mock_pr(server: &mut Server, head: &str, oid: &str, fork: bool) {
+        server
+            .mock("POST", "/graphql")
+            .match_body(Matcher::Regex("isCrossRepository".into()))
+            .with_body(
+                json!({"data": {"repository": {"pullRequest": {
+                    "id": "PR_7", "number": 7, "state": "OPEN",
+                    "createdAt": "2026-01-01T00:00:00Z", "baseRefName": "main",
+                    "headRefName": head, "headRefOid": oid, "isCrossRepository": fork,
+                    "headRepository": {"nameWithOwner": if fork { "fork/r" } else { "o/r" }}
+                }}}})
+                .to_string(),
+            )
+            .create();
+    }
+
+    fn add_args(dir: Option<PathBuf>) -> WorktreeAddArgs {
+        WorktreeAddArgs {
+            pr: "7".into(),
+            dir,
+        }
+    }
+
+    #[test]
+    fn add_checks_out_a_branch_from_the_remote() {
+        let s = Scratch::new("add");
+        s.git(&["checkout", "--quiet", "-b", "fix/x"]);
+        s.commit("fix.txt", "fix\n");
+        s.git(&["push", "--quiet", "origin", "fix/x"]);
+        let oid = s.git(&["rev-parse", "HEAD"]);
+        s.git(&["checkout", "--quiet", "main"]);
+        s.git(&["branch", "--quiet", "-D", "fix/x"]);
+        let mut server = Server::new();
+        mock_pr(&mut server, "fix/x", &oid, false);
+
+        let ctx = ctx(&server, true);
+        add_at(&ctx, &s.root(), &add_args(None)).unwrap();
+        let path = s.0.join("repo-pr-7");
+        assert_eq!(git_in(&path, &["rev-parse", "HEAD"]).unwrap(), oid);
+        assert_eq!(
+            git_in(&path, &["rev-parse", "--abbrev-ref", "@{u}"]).unwrap(),
+            "origin/fix/x"
+        );
+        // A second call finds the worktree instead of making another.
+        add_at(&ctx, &s.root(), &add_args(Some(s.0.join("other")))).unwrap();
+        assert!(!s.0.join("other").exists());
+    }
+
+    #[test]
+    fn add_fetches_a_fork_pr_by_number() {
+        let s = Scratch::new("fork");
+        s.git(&["checkout", "--quiet", "-b", "feature"]);
+        s.commit("fork.txt", "fork\n");
+        let oid = s.git(&["rev-parse", "HEAD"]);
+        s.git(&["push", "--quiet", "origin", "HEAD:refs/pull/7/head"]);
+        s.git(&["checkout", "--quiet", "main"]);
+        // The fork's branch name is taken locally, so it lands on pr-7.
+        let mut server = Server::new();
+        mock_pr(&mut server, "feature", &oid, true);
+        let dir = s.0.join("fork-wt");
+        add_at(
+            &ctx(&server, false),
+            &s.root(),
+            &add_args(Some(dir.clone())),
+        )
+        .unwrap();
+        assert_eq!(git_in(&dir, &["rev-parse", "HEAD"]).unwrap(), oid);
+        assert_eq!(
+            git_in(&dir, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap(),
+            "pr-7"
+        );
+    }
+
+    #[test]
+    fn add_refuses_an_existing_directory() {
+        let s = Scratch::new("exists");
+        let mut server = Server::new();
+        mock_pr(&mut server, "fix/y", "abc", false);
+        let err = add_at(&ctx(&server, true), &s.root(), &add_args(Some(s.root()))).unwrap_err();
+        assert!(err.to_string().ends_with("already exists"));
     }
 }
