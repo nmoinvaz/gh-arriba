@@ -757,6 +757,17 @@ pub enum WorktreeCommand {
     List,
     /// Remove worktrees whose PR merged or closed, and their local branches
     Prune(WorktreePruneArgs),
+    /// Check a PR out into a new worktree, or print the one it already has
+    Add(WorktreeAddArgs),
+}
+
+#[derive(Args)]
+pub struct WorktreeAddArgs {
+    /// Number, URL, or owner/repo#N
+    pub pr: String,
+
+    /// Directory for the worktree (default: <repo>-pr-<N> beside the main worktree)
+    pub dir: Option<PathBuf>,
 }
 
 #[derive(Args)]
