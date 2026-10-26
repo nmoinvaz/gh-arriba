@@ -166,6 +166,9 @@ git push && gh arriba pr checks --sha HEAD --wait --fail-fast
 
 `--sha` waits for GitHub to see the push first, so the checks reported are the new commit's.
 
+Add `--notify` for a desktop notification per PR when the checks finish, fail with `--fail-fast`, or
+time out.
+
 Download only the failed job logs from a run and search them:
 
 ```

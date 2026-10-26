@@ -269,6 +269,10 @@ pub struct ChecksArgs {
     #[arg(long, requires = "wait")]
     pub fail_fast: bool,
 
+    /// Show a desktop notification per PR when the wait ends
+    #[arg(long, requires = "wait")]
+    pub notify: bool,
+
     /// First wait until the PR head is this commit, a hash or a local revision such as HEAD
     #[arg(long, value_name = "SHA")]
     pub sha: Option<String>,
