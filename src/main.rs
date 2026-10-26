@@ -4,6 +4,7 @@ mod config;
 mod context;
 mod dependabot;
 mod log;
+mod notifications;
 mod notify;
 mod output;
 mod parallel;
@@ -45,6 +46,7 @@ fn main() -> Result<()> {
         Command::Dependabot(cmd) => dependabot::run(&ctx, cmd),
         Command::Runners(args) => runners::run(&ctx, args),
         Command::Worktree(cmd) => worktree::run(&ctx, cmd),
+        Command::Notifications(cmd) => notifications::run(&ctx, cmd),
         Command::Config(args) => config::run(&ctx, args),
     }
 }

@@ -43,6 +43,9 @@ pub enum Command {
     /// List and prune git worktrees by the state of their pull requests
     #[command(subcommand)]
     Worktree(WorktreeCommand),
+    /// Raise desktop notifications for your GitHub inbox
+    #[command(subcommand)]
+    Notifications(NotificationsCommand),
     /// Sync project config files to and from a gist
     Config(ConfigArgs),
 }
@@ -787,6 +790,31 @@ pub struct WorktreePruneArgs {
     /// Remove worktrees with uncommitted changes or unpushed commits too
     #[arg(long)]
     pub force: bool,
+}
+
+#[derive(Subcommand)]
+pub enum NotificationsCommand {
+    /// Poll your notifications and show a desktop notification for each new one, until stopped
+    Watch(NotificationsWatchArgs),
+}
+
+#[derive(Args)]
+pub struct NotificationsWatchArgs {
+    /// Seconds between polls, never less than GitHub asks for
+    #[arg(long, value_name = "SECS", default_value_t = 60, value_parser = clap::value_parser!(u64).range(1..))]
+    pub interval: u64,
+
+    /// Only notifications sent for this reason, such as review_requested or mention, repeatable
+    #[arg(long, value_name = "REASON")]
+    pub reason: Vec<String>,
+
+    /// Only threads you take part in or are mentioned in
+    #[arg(long)]
+    pub participating: bool,
+
+    /// Also notify for what is already unread at start
+    #[arg(long)]
+    pub all: bool,
 }
 
 #[derive(Args)]

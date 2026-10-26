@@ -5,6 +5,7 @@ pub mod actions;
 mod client;
 pub mod dependabot;
 pub mod gists;
+pub mod notifications;
 pub mod pulls;
 pub mod releases;
 mod repo;
