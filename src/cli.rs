@@ -588,6 +588,10 @@ pub struct WaitArgs {
     /// Only wait for jobs whose name contains this, ignoring case
     #[arg(long, value_name = "PATTERN")]
     pub job: Option<String>,
+
+    /// Show a desktop notification when the runs finish
+    #[arg(long)]
+    pub notify: bool,
 }
 
 #[derive(Args)]

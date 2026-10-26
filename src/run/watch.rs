@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use crate::api::actions::{self, Job, WorkflowRun};
 use crate::api::{Repo, is_failed};
 use crate::context::Ctx;
+use crate::notify::{self, Note};
 use crate::output;
 
 /// How often to poll, how long to keep at it, and which jobs to wait for.
@@ -15,6 +16,8 @@ pub struct Wait {
     pub timeout: Duration,
     /// Case-insensitive substring of the job names to wait for. None waits for every job.
     pub job: Option<String>,
+    /// Show a desktop notification when the wait ends.
+    pub notify: bool,
 }
 
 impl From<&crate::cli::WaitArgs> for Wait {
@@ -23,6 +26,7 @@ impl From<&crate::cli::WaitArgs> for Wait {
             interval: Duration::from_secs(args.interval),
             timeout: Duration::from_secs(args.timeout * 60),
             job: args.job.as_ref().map(|j| j.to_lowercase()),
+            notify: args.notify,
         }
     }
 }
@@ -34,6 +38,7 @@ impl Default for Wait {
             interval: Duration::from_secs(20),
             timeout: Duration::from_secs(60 * 60),
             job: None,
+            notify: false,
         }
     }
 }
@@ -230,6 +235,36 @@ pub fn watch(ctx: &Ctx, runs: &[(Repo, u64)], wait: &Wait) -> Result<Vec<RunStat
     Ok(states)
 }
 
+/// Watch the runs, print the summary, and fail if any failed. With --notify, also show a desktop
+/// notification per run, or one for the error that ended the wait.
+pub fn watch_and_report(ctx: &Ctx, runs: &[(Repo, u64)], wait: &Wait) -> Result<()> {
+    let states = watch(ctx, runs, wait);
+    if wait.notify {
+        match &states {
+            Ok(states) => states.iter().for_each(|s| notify::send(&note(s))),
+            Err(e) => notify::send(&Note::new("Run watch stopped", format!("{e:#}"), None)),
+        }
+    }
+    report(ctx, &states?)
+}
+
+/// The notification for a finished run.
+fn note(run: &RunState) -> Note {
+    let outcome = if run.failed() {
+        "failed"
+    } else {
+        match run.conclusion.as_deref() {
+            Some("success") | None => "passed",
+            Some(other) => other,
+        }
+    };
+    Note::new(
+        format!("{} {outcome}", run.workflow),
+        format!("{}: {}", run.repo, run.title),
+        Some(run.url.clone()),
+    )
+}
+
 /// Per-run summary with a line for each job.
 pub fn render(runs: &[RunState]) -> String {
     let mut out = String::new();
@@ -369,6 +404,7 @@ mod tests {
             interval: Duration::from_secs(1),
             timeout: Duration::from_secs(1),
             job: Some("export".to_string()),
+            notify: false,
         };
         assert!(wait.wants("Export Check (gcc)"));
         assert!(!wait.wants("Ubuntu"));
@@ -440,6 +476,7 @@ mod tests {
             interval: Duration::ZERO,
             timeout: Duration::from_secs(60),
             job: job.map(str::to_string),
+            notify: false,
         }
     }
 
@@ -449,11 +486,13 @@ mod tests {
             interval: 5,
             timeout: 2,
             job: Some("Export".to_string()),
+            notify: true,
         })
             .into();
         assert_eq!(wait.interval, Duration::from_secs(5));
         assert_eq!(wait.timeout, Duration::from_secs(120));
         assert_eq!(wait.job.as_deref(), Some("export"));
+        assert!(wait.notify);
         assert_eq!(Wait::default().interval, Duration::from_secs(20));
     }
 
@@ -503,6 +542,7 @@ mod tests {
             interval: Duration::from_secs(60),
             timeout: Duration::ZERO,
             job: None,
+            notify: false,
         };
         let err = watch(&ctx, &[(Repo::parse("o/r").unwrap(), 9)], &wait)
             .unwrap_err()

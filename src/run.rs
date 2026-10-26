@@ -281,8 +281,7 @@ fn watch_runs(ctx: &Ctx, args: WatchArgs) -> Result<()> {
             .map(|r| resolve_run(ctx, r))
             .collect::<Result<Vec<_>>>()?
     };
-    let states = watch::watch(ctx, &runs, &wait)?;
-    watch::report(ctx, &states)
+    watch::watch_and_report(ctx, &runs, &wait)
 }
 
 /// Which commit's runs to watch.
@@ -445,8 +444,7 @@ fn dispatch(ctx: &Ctx, args: DispatchArgs) -> Result<()> {
     // The watch summary is the JSON document, so the dispatch line goes with the progress.
     watch::progress(ctx, &line);
     let run = run.context("Can't watch, the dispatched run did not appear in time")?;
-    let states = watch::watch(ctx, &[(repo, run.id)], &(&args.wait).into())?;
-    watch::report(ctx, &states)
+    watch::watch_and_report(ctx, &[(repo, run.id)], &(&args.wait).into())
 }
 
 #[cfg(test)]
@@ -585,6 +583,7 @@ mod tests {
             interval: 1,
             timeout: 1,
             job: None,
+            notify: false,
         }
     }
 
@@ -872,6 +871,22 @@ mod tests {
         };
         let err = watch_runs(&ctx, args).unwrap_err().to_string();
         assert_eq!(err, "Failed: CI: Build");
+
+        // --notify shows one notification per run.
+        let args = WatchArgs {
+            runs: vec!["9".to_string()],
+            sha: None,
+            branch: None,
+            workflow: None,
+            wait: WaitArgs {
+                notify: true,
+                ..wait_args()
+            },
+        };
+        assert!(watch_runs(&ctx, args).is_err());
+        let notes = crate::notify::sent();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].title, "CI failed");
 
         // Watching a commit finds its runs first.
         server
