@@ -101,6 +101,12 @@ scope (`gh auth refresh -s admin:org`). Without it, `runners` falls back to `--f
 | `worktree prune` | Remove worktrees of your PRs that merged or closed, and their branches, keeping any with unpushed work |
 | `worktree add <PR> [DIR]` | Check one of your PRs out into a new worktree beside the main one, or print the one it already has |
 
+### Notifications
+
+| Command | Description |
+|---------|-------------|
+| `notifications watch` | Poll your GitHub inbox and show a desktop notification for each new thread, until stopped |
+
 ### Config sync
 
 | Command | Description |
@@ -268,6 +274,14 @@ Merge every ready Dependabot PR, with lock-step groups merged together:
 
 ```
 gh arriba dependabot merge --all-ready
+```
+
+Get desktop notifications for review requests and mentions while you work, polling as often as
+GitHub allows. Pass `-R owner/repo` to watch one repo, and `--all` to also hear about what is already
+unread:
+
+```
+gh arriba notifications watch --reason review_requested --reason mention
 ```
 
 ## Config sync

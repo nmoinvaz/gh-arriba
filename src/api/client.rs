@@ -1,10 +1,21 @@
 use anyhow::{Context, Result, bail};
 use reqwest::Method;
 use reqwest::blocking::{Client as Http, RequestBuilder, Response};
-use reqwest::header::LINK;
+use reqwest::header::{IF_MODIFIED_SINCE, LAST_MODIFIED, LINK};
 use serde_json::{Value, json};
 use std::process::Command;
 use std::sync::OnceLock;
+
+/// A conditional GET's response.
+#[derive(Debug)]
+pub struct Polled {
+    /// None when nothing changed since the last poll.
+    pub body: Option<Value>,
+    /// Pass back as `since` on the next poll.
+    pub last_modified: Option<String>,
+    /// Seconds the server asks clients to wait between polls.
+    pub poll_interval: Option<u64>,
+}
 
 /// REST and GraphQL client authenticated with the token gh uses.
 pub struct Client {
@@ -124,6 +135,35 @@ impl Client {
             return Ok(None);
         }
         parse_json(check(resp, &Method::GET, path)?).map(Some)
+    }
+
+    /// A conditional GET for polling: the body is None when the server answers 304 Not Modified
+    /// to `since`, a Last-Modified value from an earlier poll.
+    pub fn poll(&self, path: &str, since: Option<&str>) -> Result<Polled> {
+        let url = self.url(path);
+        let mut req = self.request(Method::GET, &url);
+        if let Some(since) = since {
+            req = req.header(IF_MODIFIED_SINCE, since);
+        }
+        let resp = req.send().with_context(|| format!("GET {path} failed"))?;
+        let header = |name: &str| {
+            resp.headers()
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string)
+        };
+        let last_modified = header(LAST_MODIFIED.as_str());
+        let poll_interval = header("x-poll-interval").and_then(|v| v.parse().ok());
+        let body = if resp.status() == reqwest::StatusCode::NOT_MODIFIED {
+            None
+        } else {
+            Some(parse_json(check(resp, &Method::GET, path)?)?)
+        };
+        Ok(Polled {
+            body,
+            last_modified,
+            poll_interval,
+        })
     }
 
     /// GET every page of a list endpoint that returns a JSON array.
