@@ -102,6 +102,8 @@ fn invocation(os: &str, note: &Note, has: impl Fn(&str) -> bool) -> Option<Invoc
             program: "notify-send",
             args: vec![
                 "--app-name=gh arriba".into(),
+                // A title or body starting with a dash would otherwise parse as an option.
+                "--".into(),
                 note.title.clone(),
                 note.body_with_url(),
             ],
@@ -203,7 +205,7 @@ mod tests {
     fn linux_uses_notify_send_when_installed() {
         let inv = invocation("linux", &note(None), |p| p == "notify-send").unwrap();
         assert_eq!(inv.program, "notify-send");
-        assert_eq!(inv.args[1..], ["CI passed", "Fix inflate"]);
+        assert_eq!(inv.args[1..], ["--", "CI passed", "Fix inflate"]);
         assert_eq!(invocation("linux", &note(None), |_| false), None);
     }
 
