@@ -7,6 +7,7 @@ use crate::api::pulls::{self, CheckRun, StatusContext, StatusFields};
 use crate::api::{Client, PrRef, is_failed};
 use crate::cli::ChecksArgs;
 use crate::context::{Ctx, git};
+use crate::notify::{self, Note};
 use crate::output;
 use crate::pr::rollup::latest;
 
@@ -315,10 +316,15 @@ fn wait(ctx: &Ctx, prs: &[PrRef], args: &ChecksArgs, deadline: Instant) -> Resul
         }
 
         let failed = statuses.iter().any(|s| s.counts.fail > 0);
-        if settled || (args.fail_fast && failed) {
+        let done = settled || (args.fail_fast && failed);
+        let timed_out = !done && Instant::now() >= deadline;
+        if args.notify && (done || timed_out) {
+            statuses.iter().for_each(|s| notify::send(&note(s)));
+        }
+        if done {
             return report(ctx, &statuses);
         }
-        if Instant::now() >= deadline {
+        if timed_out {
             print_statuses(ctx, &statuses)?;
             fail_on_failures(&statuses)?;
             let pending: usize = statuses.iter().map(|s| s.counts.pending).sum();
@@ -329,6 +335,27 @@ fn wait(ctx: &Ctx, prs: &[PrRef], args: &ChecksArgs, deadline: Instant) -> Resul
         }
         std::thread::sleep(Duration::from_secs(args.interval));
     }
+}
+
+/// The notification for a PR when the wait ends, naming failed or still pending checks.
+fn note(status: &PrStatus) -> Note {
+    let c = &status.counts;
+    let outcome = if c.fail > 0 {
+        format!("{} {} failed", c.fail, plural(c.fail))
+    } else if c.pending > 0 {
+        format!("{} {} pending", c.pending, plural(c.pending))
+    } else {
+        "checks passed".to_string()
+    };
+    Note::new(
+        format!("{}#{}: {outcome}", status.repo, status.number),
+        status.title.clone(),
+        Some(status.url.clone()),
+    )
+}
+
+fn plural(n: usize) -> &'static str {
+    if n == 1 { "check" } else { "checks" }
 }
 
 /// Poll until the PR head is `sha`, since GitHub takes a moment to see a push.
@@ -481,6 +508,7 @@ mod tests {
             interval: 1,
             timeout: 0,
             fail_fast: false,
+            notify: false,
             sha: None,
         }
     }
@@ -548,10 +576,14 @@ mod tests {
         );
         let a = ChecksArgs {
             wait: true,
+            notify: true,
             ..args(&["1"])
         };
         let err = run(&ctx(&server, false), a).unwrap_err().to_string();
         assert_eq!(err, "Timed out after 0 minutes with 1 checks pending");
+        let notes = crate::notify::sent();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].title, "o/r#1: 1 check pending");
         m.assert();
     }
 
@@ -571,11 +603,14 @@ mod tests {
         let a = ChecksArgs {
             wait: true,
             fail_fast: true,
+            notify: true,
             timeout: 30,
             ..args(&["1", "2"])
         };
         let err = run(&ctx(&server, true), a).unwrap_err().to_string();
         assert_eq!(err, "1 check failed");
+        let titles: Vec<String> = crate::notify::sent().into_iter().map(|n| n.title).collect();
+        assert_eq!(titles, ["o/r#1: 1 check failed", "o/r#2: checks passed"]);
     }
 
     #[test]
