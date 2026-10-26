@@ -197,6 +197,14 @@ git push && gh arriba run watch
 
 Add `--job "Export Check"` to return as soon as the matching jobs finish, ignoring the rest.
 
+Add `--notify` to get a desktop notification when the runs finish, so you can switch away while
+they go. It uses `terminal-notifier` or `osascript` on macOS, `notify-send` on Linux, and a toast on
+Windows:
+
+```
+git push && gh arriba run watch --notify
+```
+
 Dispatch a workflow on a branch and follow the run it starts:
 
 ```

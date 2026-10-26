@@ -4,6 +4,7 @@ mod config;
 mod context;
 mod dependabot;
 mod log;
+mod notify;
 mod output;
 mod parallel;
 mod pr;
