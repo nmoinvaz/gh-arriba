@@ -32,21 +32,24 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    let ctx = Ctx {
-        client: Client::new()?,
-        repo_flag: cli.repo,
-        json: cli.json,
-        yes: cli.yes,
+    // Built on first use, so commands that never reach GitHub need no token.
+    let ctx = || -> Result<Ctx> {
+        Ok(Ctx {
+            client: Client::new()?,
+            repo_flag: cli.repo.clone(),
+            json: cli.json,
+            yes: cli.yes,
+        })
     };
 
     match cli.command {
-        Command::Pr(cmd) => pr::run(&ctx, cmd),
-        Command::Run(cmd) => run::run(&ctx, cmd),
-        Command::Release(args) => release::run(&ctx, args),
-        Command::Dependabot(cmd) => dependabot::run(&ctx, cmd),
-        Command::Runners(args) => runners::run(&ctx, args),
-        Command::Worktree(cmd) => worktree::run(&ctx, cmd),
-        Command::Notify(cmd) => notifications::run(&ctx, cmd),
-        Command::Config(args) => config::run(&ctx, args),
+        Command::Pr(cmd) => pr::run(&ctx()?, cmd),
+        Command::Run(cmd) => run::run(&ctx()?, cmd),
+        Command::Release(args) => release::run(&ctx()?, args),
+        Command::Dependabot(cmd) => dependabot::run(&ctx()?, cmd),
+        Command::Runners(args) => runners::run(&ctx()?, args),
+        Command::Worktree(cmd) => worktree::run(&ctx()?, cmd),
+        Command::Notify(args) => notifications::run(ctx, args),
+        Command::Config(args) => config::run(&ctx()?, args),
     }
 }

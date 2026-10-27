@@ -105,6 +105,7 @@ scope (`gh auth refresh -s admin:org`). Without it, `runners` falls back to `--f
 
 | Command | Description |
 |---------|-------------|
+| `notify <message>` | Show a desktop notification, subtitled and grouped by the git root unless `--subtitle` or `--group` say otherwise |
 | `notify watch` | Poll your GitHub inbox and show a desktop notification for each new thread, until stopped |
 
 ### Config sync
@@ -282,6 +283,12 @@ unread:
 
 ```
 gh arriba notify watch --reason review_requested --reason mention
+```
+
+Hear when a long build or test run ends, even from another window:
+
+```
+make test; gh arriba notify "tests done"
 ```
 
 ## Config sync

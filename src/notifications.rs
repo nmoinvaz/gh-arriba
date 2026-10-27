@@ -2,17 +2,46 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::api::Repo;
 use crate::api::notifications::{self, Thread};
-use crate::cli::{NotifyCommand, NotifyWatchArgs};
-use crate::context::Ctx;
+use crate::cli::{NotifyArgs, NotifyCommand, NotifySendArgs, NotifyWatchArgs};
+use crate::context::{self, Ctx};
 use crate::notify::{self, Note};
 
-pub fn run(ctx: &Ctx, cmd: NotifyCommand) -> Result<()> {
-    match cmd {
-        NotifyCommand::Watch(args) => watch(ctx, &args),
+/// `ctx` connects to GitHub, so only the commands that need it build one.
+pub fn run(ctx: impl FnOnce() -> Result<Ctx>, args: NotifyArgs) -> Result<()> {
+    match args.command {
+        Some(NotifyCommand::Watch(watch_args)) => watch(&ctx()?, &watch_args),
+        None => {
+            notify::send(&message_note(&args.send, &project_dir()));
+            Ok(())
+        }
+    }
+}
+
+/// The git root, or the working directory outside a repository.
+fn project_dir() -> PathBuf {
+    context::git(&["rev-parse", "--show-toplevel"])
+        .map(PathBuf::from)
+        .ok()
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_default()
+}
+
+/// The note for a message, named and grouped by the project it came from.
+fn message_note(args: &NotifySendArgs, project: &Path) -> Note {
+    let name = project
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned());
+    let group = format!("gh-arriba:{}", project.display());
+    Note {
+        subtitle: args.subtitle.clone().or(name),
+        group: Some(args.group.clone().unwrap_or(group)),
+        sound: args.sound.clone(),
+        ..Note::new(&args.title, args.message.clone().unwrap_or_default(), None)
     }
 }
 
@@ -197,6 +226,46 @@ mod tests {
             participating: false,
             all: false,
         }
+    }
+
+    fn send_args(message: &str) -> NotifySendArgs {
+        NotifySendArgs {
+            message: Some(message.into()),
+            title: "gh arriba".into(),
+            subtitle: None,
+            group: None,
+            sound: None,
+        }
+    }
+
+    #[test]
+    fn message_notes_take_their_name_and_group_from_the_project() {
+        let project = Path::new("/src/zlib-ng");
+        assert_eq!(
+            message_note(&send_args("tests done"), project),
+            Note {
+                subtitle: Some("zlib-ng".into()),
+                group: Some("gh-arriba:/src/zlib-ng".into()),
+                ..Note::new("gh arriba", "tests done", None)
+            }
+        );
+
+        let custom = NotifySendArgs {
+            title: "Claude Code".into(),
+            subtitle: Some("CI".into()),
+            group: Some("ci".into()),
+            sound: Some("Submarine".into()),
+            ..send_args("done")
+        };
+        assert_eq!(
+            message_note(&custom, project),
+            Note {
+                subtitle: Some("CI".into()),
+                group: Some("ci".into()),
+                sound: Some("Submarine".into()),
+                ..Note::new("Claude Code", "done", None)
+            }
+        );
     }
 
     fn thread(id: &str, reason: &str, updated: &str) -> Value {
