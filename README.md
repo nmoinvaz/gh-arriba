@@ -139,7 +139,8 @@ terminal or VS Code window.
 
 `notify watch --install` also offers hooks in `~/.codex/hooks.json` that notify when Codex needs your
 approval and when it finishes a turn. Codex has no hook for when it asks you a question. It runs a
-hook only after you trust it, so open `/hooks` in Codex after adding them.
+hook only after you trust it, so open `/hooks` in Codex after adding them. The hooks run in the
+background, which Codex supports from 0.148.0, as earlier releases skip them.
 
 ### Config sync
 
