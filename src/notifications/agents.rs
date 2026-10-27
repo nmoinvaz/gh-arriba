@@ -23,6 +23,8 @@ struct Agent {
     default_dir: &'static str,
     file: &'static str,
     hooks: &'static [Hook],
+    /// What to do before the added hooks run.
+    then: Option<&'static str>,
 }
 
 /// Its hook command is the one the README gives.
@@ -35,9 +37,29 @@ const CLAUDE: Agent = Agent {
         event: "Notification",
         command: r#"gh arriba notify --title 'Claude Code' "$(jq -r .message)""#,
     }],
+    then: None,
 };
 
-const AGENTS: &[Agent] = &[CLAUDE];
+/// Codex has no hook for its questions, so approvals and finished turns notify.
+const CODEX: Agent = Agent {
+    name: "Codex",
+    dir_var: "CODEX_HOME",
+    default_dir: ".codex",
+    file: "hooks.json",
+    hooks: &[
+        Hook {
+            event: "PermissionRequest",
+            command: r#"gh arriba notify --title Codex "$(jq -r '"Codex needs your permission to use \(.tool_name)"')""#,
+        },
+        Hook {
+            event: "Stop",
+            command: r#"gh arriba notify --title Codex "$(jq -r '.last_assistant_message // "Codex is waiting for you"')""#,
+        },
+    ],
+    then: Some("Trust them with /hooks in Codex, which skips hooks until they are trusted"),
+};
+
+const AGENTS: &[Agent] = &[CLAUDE, CODEX];
 
 /// Offer each agent that is set up its hooks. An agent whose file cannot change only warns, since
 /// the watch is set up either way.
@@ -97,13 +119,8 @@ impl Agent {
         if !ask(&question, yes)? {
             return Ok(());
         }
-        for hook in self.hooks {
-            // An event already hooked keeps its one hook.
-            if !has_hook(&file, hook.event) {
-                add_hook(&mut file, hook.event, hook.command)
-                    .with_context(|| format!("Failed to add a hook to {}", path.display()))?;
-            }
-        }
+        self.add_missing(&mut file)
+            .with_context(|| format!("Failed to add a hook to {}", path.display()))?;
         write(&path, &file)?;
         let events: Vec<&str> = self.hooks.iter().map(|h| h.event).collect();
         println!(
@@ -120,6 +137,19 @@ impl Agent {
                 "hooks read their messages"
             };
             eprintln!("warning: the {reads} with jq, which is not on the PATH");
+        }
+        if let Some(then) = self.then {
+            println!("{then}");
+        }
+        Ok(())
+    }
+
+    /// Add the hooks for events without one of ours, so an event already hooked keeps one hook.
+    fn add_missing(&self, file: &mut Value) -> Result<()> {
+        for hook in self.hooks {
+            if !has_hook(file, hook.event) {
+                add_hook(file, hook.event, hook.command)?;
+            }
         }
         Ok(())
     }
@@ -346,6 +376,39 @@ mod tests {
             json!({"hooks": {"Notification": [{"hooks": [{"command": COMMAND}]}]}, "a": 1, "b": 2});
         remove_hook(&mut emptied, "Notification");
         assert_eq!(serde_json::to_string(&emptied).unwrap(), r#"{"a":1,"b":2}"#);
+    }
+
+    #[test]
+    fn codex_gets_approval_and_finished_turn_hooks() {
+        let mut hooks_json = json!({});
+        CODEX.add_missing(&mut hooks_json).unwrap();
+        let handler = |hook: &Hook| json!([{"hooks": [{"type": "command", "command": hook.command, "async": true}]}]);
+        assert_eq!(
+            hooks_json,
+            json!({"hooks": {
+                "PermissionRequest": handler(&CODEX.hooks[0]),
+                "Stop": handler(&CODEX.hooks[1]),
+            }})
+        );
+        assert!(CODEX.hooks.iter().all(|h| is_ours(h.command)));
+
+        for hook in CODEX.hooks {
+            remove_hook(&mut hooks_json, hook.event);
+        }
+        assert_eq!(hooks_json, json!({}));
+    }
+
+    #[test]
+    fn an_event_already_hooked_keeps_one_hook() {
+        let edited = r#"gh arriba notify --title Codex --sound Glass "done""#;
+        let mut hooks_json = json!({"hooks": {"Stop": [{"hooks": [{"command": edited}]}]}});
+        CODEX.add_missing(&mut hooks_json).unwrap();
+        assert_eq!(hooks_json["hooks"]["Stop"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            hooks_json["hooks"]["Stop"][0]["hooks"][0]["command"],
+            edited
+        );
+        assert!(has_hook(&hooks_json, "PermissionRequest"));
     }
 
     #[test]
