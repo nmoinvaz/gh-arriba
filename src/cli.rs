@@ -805,8 +805,12 @@ pub struct NotifyArgs {
 #[derive(Args)]
 pub struct NotifySendArgs {
     /// Message to show
-    #[arg(required = true)]
+    #[arg(required_unless_present = "hook")]
     pub message: Option<String>,
+
+    /// Read the message from the JSON a Claude Code or Codex hook gets on stdin
+    #[arg(long, conflicts_with = "message")]
+    pub hook: bool,
 
     /// Notification title
     #[arg(long, default_value = "gh arriba")]
@@ -985,6 +989,13 @@ mod tests {
         assert_eq!(
             notify(&["notify", "--title", "CI"]).err(),
             Some(ErrorKind::MissingRequiredArgument)
+        );
+        // A hook's message comes from stdin, so it takes no argument.
+        let hooked = notify(&["notify", "--hook", "--title", "Codex"]).unwrap();
+        assert!(hooked.send.hook && hooked.send.message.is_none());
+        assert_eq!(
+            notify(&["notify", "--hook", "done"]).err(),
+            Some(ErrorKind::ArgumentConflict)
         );
         assert_eq!(
             notify(&["notify", "done", "watch"]).err(),

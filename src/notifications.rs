@@ -1,6 +1,6 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -35,9 +35,16 @@ pub fn run(ctx: impl FnOnce() -> Result<Ctx>, yes: bool, args: NotifyArgs) -> Re
         Some(NotifyCommand::Watch(watch_args)) => watch(&ctx()?, &watch_args),
         Some(NotifyCommand::Focus { target }) => focus::focus(&target),
         None => {
+            let (message, cwd) = if args.send.hook {
+                let input: HookInput = serde_json::from_reader(std::io::stdin())
+                    .context("--hook reads the hook's JSON from stdin")?;
+                (hook_message(&input, &args.send.title), input.cwd)
+            } else {
+                (args.send.message.clone().unwrap_or_default(), None)
+            };
             let note = Note {
                 command: focus::origin_command(),
-                ..message_note(&args.send, &project_dir())
+                ..message_note(&args.send, message, &project_dir(cwd.as_deref()))
             };
             notify::send(&note);
             Ok(())
@@ -45,17 +52,52 @@ pub fn run(ctx: impl FnOnce() -> Result<Ctx>, yes: bool, args: NotifyArgs) -> Re
     }
 }
 
-/// The git root, or the working directory outside a repository.
-fn project_dir() -> PathBuf {
-    context::git(&["rev-parse", "--show-toplevel"])
-        .map(PathBuf::from)
-        .ok()
-        .or_else(|| std::env::current_dir().ok())
-        .unwrap_or_default()
+/// The JSON a Claude Code or Codex hook gets on stdin, as far as a notification needs it.
+#[derive(Debug, Default, Deserialize)]
+struct HookInput {
+    cwd: Option<PathBuf>,
+    hook_event_name: Option<String>,
+    /// Claude Code's Notification says what it needs.
+    message: Option<String>,
+    /// A permission request names the tool it asks to use.
+    tool_name: Option<String>,
+    /// Codex's Stop carries the reply that ended the turn.
+    last_assistant_message: Option<String>,
 }
 
-/// The note for a message, named and grouped by the project it came from.
-fn message_note(args: &NotifySendArgs, project: &Path) -> Note {
+/// The agent's own message, or one made from the request or the turn it ended.
+fn hook_message(input: &HookInput, title: &str) -> String {
+    let given = |text: &Option<String>| {
+        text.as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(String::from)
+    };
+    if let Some(message) = given(&input.message) {
+        return message;
+    }
+    if input.hook_event_name.as_deref() == Some("PermissionRequest")
+        && let Some(tool) = given(&input.tool_name)
+    {
+        return format!("{title} needs your permission to use {tool}");
+    }
+    given(&input.last_assistant_message).unwrap_or_else(|| format!("{title} needs you"))
+}
+
+/// The git root of `dir`, or of the working directory without one, or the directory itself
+/// outside a repository.
+fn project_dir(dir: Option<&Path>) -> PathBuf {
+    let dir = dir
+        .map(Path::to_path_buf)
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_default();
+    context::git_in(&dir, &["rev-parse", "--show-toplevel"])
+        .map(PathBuf::from)
+        .unwrap_or(dir)
+}
+
+/// The note for `message`, named and grouped by the project it came from.
+fn message_note(args: &NotifySendArgs, message: String, project: &Path) -> Note {
     let name = project
         .file_name()
         .map(|n| n.to_string_lossy().into_owned());
@@ -64,7 +106,7 @@ fn message_note(args: &NotifySendArgs, project: &Path) -> Note {
         subtitle: args.subtitle.clone().or(name),
         group: Some(args.group.clone().unwrap_or(group)),
         sound: args.sound.clone(),
-        ..Note::new(&args.title, args.message.clone().unwrap_or_default(), None)
+        ..Note::new(&args.title, message, None)
     }
 }
 
@@ -256,6 +298,7 @@ mod tests {
     fn send_args(message: &str) -> NotifySendArgs {
         NotifySendArgs {
             message: Some(message.into()),
+            hook: false,
             title: "gh arriba".into(),
             subtitle: None,
             group: None,
@@ -263,11 +306,58 @@ mod tests {
         }
     }
 
+    fn hook(json: Value) -> HookInput {
+        serde_json::from_value(json).unwrap()
+    }
+
+    #[test]
+    fn hooks_say_what_the_agent_needs() {
+        let claude = hook(json!({
+            "session_id": "s", "cwd": "/src/zlib-ng", "hook_event_name": "Notification",
+            "message": "Claude needs your permission to use Bash", "notification_type": "permission_prompt"
+        }));
+        assert_eq!(
+            hook_message(&claude, "Claude Code"),
+            "Claude needs your permission to use Bash"
+        );
+        assert_eq!(claude.cwd.as_deref(), Some(Path::new("/src/zlib-ng")));
+
+        let approval = hook(json!({
+            "hook_event_name": "PermissionRequest", "tool_name": "Bash",
+            "tool_input": {"command": "rm -rf build"}, "turn_id": "t"
+        }));
+        assert_eq!(
+            hook_message(&approval, "Codex"),
+            "Codex needs your permission to use Bash"
+        );
+
+        let stop =
+            |last: Value| hook(json!({"hook_event_name": "Stop", "last_assistant_message": last}));
+        assert_eq!(
+            hook_message(&stop(json!(" Tests pass.\n")), "Codex"),
+            "Tests pass."
+        );
+        assert_eq!(hook_message(&stop(json!(null)), "Codex"), "Codex needs you");
+        assert_eq!(hook_message(&stop(json!("  ")), "Codex"), "Codex needs you");
+        assert_eq!(
+            hook_message(&HookInput::default(), "Claude Code"),
+            "Claude Code needs you"
+        );
+    }
+
+    #[test]
+    fn projects_outside_a_repository_are_their_directory() {
+        let dir = std::env::temp_dir().join(format!("gh-arriba-project-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(project_dir(Some(&dir)), dir);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn message_notes_take_their_name_and_group_from_the_project() {
         let project = Path::new("/src/zlib-ng");
         assert_eq!(
-            message_note(&send_args("tests done"), project),
+            message_note(&send_args("tests done"), "tests done".into(), project),
             Note {
                 subtitle: Some("zlib-ng".into()),
                 group: Some("gh-arriba:/src/zlib-ng".into()),
@@ -283,7 +373,7 @@ mod tests {
             ..send_args("done")
         };
         assert_eq!(
-            message_note(&custom, project),
+            message_note(&custom, "done".into(), project),
             Note {
                 subtitle: Some("CI".into()),
                 group: Some("ci".into()),
