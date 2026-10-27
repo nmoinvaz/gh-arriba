@@ -12,9 +12,21 @@ use crate::context::{self, Ctx};
 use crate::focus;
 use crate::notify::{self, Note};
 
+mod startup;
+
 /// `ctx` connects to GitHub, so only the commands that need it build one.
 pub fn run(ctx: impl FnOnce() -> Result<Ctx>, args: NotifyArgs) -> Result<()> {
     match args.command {
+        // Building the context first fails without a token, before a watch that cannot poll is set up.
+        Some(NotifyCommand::Watch(watch_args)) if watch_args.install => {
+            startup::install(&ctx()?, &watch_args)
+        }
+        Some(NotifyCommand::Watch(watch_args)) if watch_args.uninstall => {
+            if !startup::uninstall()? {
+                println!("No watch was set to start at login");
+            }
+            Ok(())
+        }
         Some(NotifyCommand::Watch(watch_args)) => watch(&ctx()?, &watch_args),
         Some(NotifyCommand::Focus { target }) => focus::focus(&target),
         None => {
@@ -231,6 +243,8 @@ mod tests {
             reason: Vec::new(),
             participating: false,
             all: false,
+            install: false,
+            uninstall: false,
         }
     }
 

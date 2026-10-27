@@ -868,6 +868,14 @@ pub struct NotifyWatchArgs {
     /// Also notify for what is already unread at start
     #[arg(long)]
     pub all: bool,
+
+    /// Start this watch, with these options, now and at every login (macOS and Linux)
+    #[arg(long, conflicts_with_all = ["all", "uninstall"])]
+    pub install: bool,
+
+    /// Stop the watch that starts at login, and stop starting it
+    #[arg(long)]
+    pub uninstall: bool,
 }
 
 #[derive(Args)]
@@ -980,6 +988,15 @@ mod tests {
         );
         assert_eq!(
             notify(&["notify", "done", "watch"]).err(),
+            Some(ErrorKind::ArgumentConflict)
+        );
+        // Repeating every unread thread at each login would bury the new ones.
+        assert_eq!(
+            notify(&["notify", "watch", "--install", "--all"]).err(),
+            Some(ErrorKind::ArgumentConflict)
+        );
+        assert_eq!(
+            notify(&["notify", "watch", "--install", "--uninstall"]).err(),
             Some(ErrorKind::ArgumentConflict)
         );
     }
