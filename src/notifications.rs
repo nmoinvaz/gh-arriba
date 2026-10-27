@@ -6,13 +6,13 @@ use std::time::Duration;
 
 use crate::api::Repo;
 use crate::api::notifications::{self, Thread};
-use crate::cli::{NotificationsCommand, NotificationsWatchArgs};
+use crate::cli::{NotifyCommand, NotifyWatchArgs};
 use crate::context::Ctx;
 use crate::notify::{self, Note};
 
-pub fn run(ctx: &Ctx, cmd: NotificationsCommand) -> Result<()> {
+pub fn run(ctx: &Ctx, cmd: NotifyCommand) -> Result<()> {
     match cmd {
-        NotificationsCommand::Watch(args) => watch(ctx, &args),
+        NotifyCommand::Watch(args) => watch(ctx, &args),
     }
 }
 
@@ -42,7 +42,7 @@ struct Line<'a> {
     updated_at: DateTime<Utc>,
 }
 
-fn watch(ctx: &Ctx, args: &NotificationsWatchArgs) -> Result<()> {
+fn watch(ctx: &Ctx, args: &NotifyWatchArgs) -> Result<()> {
     let repo = ctx.repo_flag.as_deref().map(Repo::parse).transpose()?;
     let mut inbox = Inbox::default();
     loop {
@@ -62,7 +62,7 @@ fn watch(ctx: &Ctx, args: &NotificationsWatchArgs) -> Result<()> {
 fn poll_once(
     ctx: &Ctx,
     repo: Option<&Repo>,
-    args: &NotificationsWatchArgs,
+    args: &NotifyWatchArgs,
     inbox: &mut Inbox,
 ) -> Result<Vec<Thread>> {
     let poll = notifications::poll(
@@ -95,7 +95,7 @@ fn poll_once(
     Ok(fresh)
 }
 
-fn wanted(args: &NotificationsWatchArgs, thread: &Thread) -> bool {
+fn wanted(args: &NotifyWatchArgs, thread: &Thread) -> bool {
     args.reason.is_empty() || args.reason.iter().any(|r| r == &thread.reason)
 }
 
@@ -190,8 +190,8 @@ mod tests {
         }
     }
 
-    fn args() -> NotificationsWatchArgs {
-        NotificationsWatchArgs {
+    fn args() -> NotifyWatchArgs {
+        NotifyWatchArgs {
             interval: 60,
             reason: Vec::new(),
             participating: false,
@@ -292,7 +292,7 @@ mod tests {
                 thread("2", "ci_activity", "2026-01-02T12:00:00Z"),
             ])),
         );
-        let a = NotificationsWatchArgs {
+        let a = NotifyWatchArgs {
             reason: vec!["review_requested".into()],
             all: true,
             ..args()

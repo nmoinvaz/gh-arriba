@@ -105,7 +105,7 @@ scope (`gh auth refresh -s admin:org`). Without it, `runners` falls back to `--f
 
 | Command | Description |
 |---------|-------------|
-| `notifications watch` | Poll your GitHub inbox and show a desktop notification for each new thread, until stopped |
+| `notify watch` | Poll your GitHub inbox and show a desktop notification for each new thread, until stopped |
 
 ### Config sync
 
@@ -281,7 +281,7 @@ GitHub allows. Pass `-R owner/repo` to watch one repo, and `--all` to also hear 
 unread:
 
 ```
-gh arriba notifications watch --reason review_requested --reason mention
+gh arriba notify watch --reason review_requested --reason mention
 ```
 
 ## Config sync
