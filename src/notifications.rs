@@ -9,14 +9,20 @@ use crate::api::Repo;
 use crate::api::notifications::{self, Thread};
 use crate::cli::{NotifyArgs, NotifyCommand, NotifySendArgs, NotifyWatchArgs};
 use crate::context::{self, Ctx};
+use crate::focus;
 use crate::notify::{self, Note};
 
 /// `ctx` connects to GitHub, so only the commands that need it build one.
 pub fn run(ctx: impl FnOnce() -> Result<Ctx>, args: NotifyArgs) -> Result<()> {
     match args.command {
         Some(NotifyCommand::Watch(watch_args)) => watch(&ctx()?, &watch_args),
+        Some(NotifyCommand::Focus { target }) => focus::focus(&target),
         None => {
-            notify::send(&message_note(&args.send, &project_dir()));
+            let note = Note {
+                command: focus::origin_command(),
+                ..message_note(&args.send, &project_dir())
+            };
+            notify::send(&note);
             Ok(())
         }
     }

@@ -830,6 +830,25 @@ pub struct NotifySendArgs {
 pub enum NotifyCommand {
     /// Poll your notifications and show a desktop notification for each new one, until stopped
     Watch(NotifyWatchArgs),
+    /// Focus the window or tab a notification came from, run when it is clicked
+    #[command(hide = true)]
+    Focus {
+        #[command(subcommand)]
+        target: FocusTarget,
+    },
+}
+
+/// Where a notification came from.
+#[derive(Subcommand, Clone, Debug, PartialEq)]
+pub enum FocusTarget {
+    /// A Ghostty terminal, by its scripting ID
+    Ghostty { id: String },
+    /// A Terminal.app tab, by its TTY
+    Terminal { tty: String },
+    /// The VS Code window whose workspace folder holds this directory
+    Vscode { dir: PathBuf },
+    /// Any other app, by its bundle ID
+    App { bundle: String },
 }
 
 #[derive(Args)]

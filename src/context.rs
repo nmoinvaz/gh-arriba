@@ -94,7 +94,8 @@ pub fn git_in(dir: &Path, args: &[&str]) -> Result<String> {
     run("git", args, Some(dir))
 }
 
-fn run(program: &str, args: &[&str], dir: Option<&Path>) -> Result<String> {
+/// Run `program` in `dir`, or the working directory, and return trimmed stdout.
+pub fn run(program: &str, args: &[&str], dir: Option<&Path>) -> Result<String> {
     let mut cmd = Command::new(program);
     cmd.args(args);
     if let Some(d) = dir {

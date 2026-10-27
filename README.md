@@ -27,6 +27,27 @@ short:
 * Use `gh arriba` for what `gh` lacks, such as PR review threads, pending reviews, CI reruns, job logs, releases, and Dependabot. Run `gh arriba --help` for the commands.
 ```
 
+To hear when Claude Code needs you, and get back to its terminal or window with a click, add a
+Notification hook to `~/.claude/settings.json`. The hook gets its message as JSON on stdin:
+
+```json
+{
+  "hooks": {
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "gh arriba notify --title 'Claude Code' \"$(jq -r .message)\"",
+            "async": true
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
 ## Usage
 
 ```
@@ -107,6 +128,14 @@ scope (`gh auth refresh -s admin:org`). Without it, `runners` falls back to `--f
 |---------|-------------|
 | `notify <message>` | Show a desktop notification, subtitled and grouped by the git root unless `--subtitle` or `--group` say otherwise |
 | `notify watch` | Poll your GitHub inbox and show a desktop notification for each new thread, until stopped |
+
+On macOS with [terminal-notifier](https://github.com/julienXX/terminal-notifier), clicking a
+`notify <message>` notification returns to where it ran: the Ghostty 1.3+ terminal, the Terminal tab,
+or the VS Code window. VS Code is matched by the window the Claude Code extension serves, or else by
+the open folder that holds the working directory. Other apps only come to the front.
+
+macOS hides notifications after a few seconds by default. To keep them until dismissed, set
+terminal-notifier to Persistent in System Settings > Notifications (Alerts on older macOS).
 
 ### Config sync
 
