@@ -109,6 +109,13 @@ scope (`gh auth refresh -s admin:org`). Without it, `runners` falls back to `--f
 |---------|-------------|
 | `notify <message>` | Show a desktop notification, subtitled and grouped by the git root unless `--subtitle` or `--group` say otherwise |
 | `notify watch` | Poll your GitHub inbox and show a desktop notification for each new thread, until stopped |
+| `notify watch --install` | Start the watch with the options given, now and at every login, on macOS and Linux |
+| `notify watch --uninstall` | Stop the watch that starts at login, and stop starting it |
+
+`--install` registers a LaunchAgent on macOS, logging to `~/Library/Logs/gh-arriba-notify-watch.log`,
+or a systemd user service on Linux, logging to the journal. Either one restarts the watch a minute
+after it exits, as when the first poll runs before the network is up, and runs it with the `PATH`
+you installed from so it finds `gh` and the notifier. Run `--install` again to change the options.
 
 On macOS with [terminal-notifier](https://github.com/julienXX/terminal-notifier), clicking a
 `notify <message>` notification returns to where it ran: the Ghostty 1.3+ terminal, the Terminal tab,
@@ -318,6 +325,12 @@ unread:
 
 ```
 gh arriba notify watch --reason review_requested --reason mention
+```
+
+Or keep that watch running from every login:
+
+```
+gh arriba notify watch --install --reason review_requested --reason mention
 ```
 
 Hear when a long build or test run ends, even from another window:
