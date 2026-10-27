@@ -93,6 +93,22 @@ pub fn poll(
     })
 }
 
+/// Every thread in the inbox, read or unread, all or one repo's. Threads marked done are not in
+/// it.
+pub fn inbox(client: &Client, repo: Option<&Repo>) -> Result<Vec<Thread>> {
+    let root = repo.map(|r| format!("{}/", r.api())).unwrap_or_default();
+    // The notifications API serves at most 50 a page.
+    let threads = client.get_all(&format!("{root}notifications?all=true&per_page=50"))?;
+    serde_json::from_value(threads.into()).context("Failed to parse notifications")
+}
+
+/// Mark the thread with `id` done, moving it out of the inbox without unsubscribing.
+pub fn mark_done(client: &Client, id: &str) -> Result<()> {
+    client
+        .delete(&format!("notifications/threads/{id}"))
+        .map(drop)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
