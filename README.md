@@ -27,26 +27,7 @@ short:
 * Use `gh arriba` for what `gh` lacks, such as PR review threads, pending reviews, CI reruns, job logs, releases, and Dependabot. Run `gh arriba --help` for the commands.
 ```
 
-To hear when Claude Code needs you, and get back to its terminal or window with a click, add a
-Notification hook to `~/.claude/settings.json`. The hook gets its message as JSON on stdin:
-
-```json
-{
-  "hooks": {
-    "Notification": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "gh arriba notify --title 'Claude Code' \"$(jq -r .message)\"",
-            "async": true
-          }
-        ]
-      }
-    ]
-  }
-}
-```
+To hear when Claude Code needs you, see [Claude Code notifications](#claude-code-notifications).
 
 ## Usage
 
@@ -136,6 +117,31 @@ the open folder that holds the working directory. Other apps only come to the fr
 
 macOS hides notifications after a few seconds by default. To keep them until dismissed, set
 terminal-notifier to Persistent in System Settings > Notifications (Alerts on older macOS).
+
+#### Claude Code notifications
+
+A Notification hook in `~/.claude/settings.json` tells you when Claude Code needs you, and a click
+returns to its terminal or VS Code window. The hook gets its message as JSON on stdin, so it needs
+[jq](https://github.com/jqlang/jq), and the click needs terminal-notifier. On macOS,
+`brew install terminal-notifier jq` installs both.
+
+```json
+{
+  "hooks": {
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "gh arriba notify --title 'Claude Code' \"$(jq -r .message)\"",
+            "async": true
+          }
+        ]
+      }
+    ]
+  }
+}
+```
 
 ### Config sync
 
