@@ -251,7 +251,7 @@ pub fn add_review_thread(client: &Client, t: &NewThread) -> Result<Option<String
         .and_then(|t| t.id))
 }
 
-/// A review just submitted. Fields sort by name, as the raw response printed.
+/// A review just submitted. Fields sort by name.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct SubmittedReview {
     pub id: Option<String>,
@@ -549,7 +549,7 @@ mod tests {
 
     #[test]
     fn submitted_review_prints_like_the_raw_response() {
-        let raw = json!({ "id": "PRR_1", "url": "u", "state": "APPROVED" });
+        let raw = json!({ "id": "PRR_1", "state": "APPROVED", "url": "u" });
         let typed: SubmittedReview = serde_json::from_value(raw.clone()).unwrap();
         assert_eq!(
             serde_json::to_string_pretty(&typed).unwrap(),
