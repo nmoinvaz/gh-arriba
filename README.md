@@ -10,6 +10,33 @@ CI retries, signed rebases, releases, Dependabot, and project config sync.
 Every command takes `--json`, and every prompt has a flag that answers it, so scripts and coding
 agents can drive the same workflows a person runs by hand.
 
+## Contents
+
+- [Install](#install)
+- [Use with Claude](#use-with-claude)
+- [Usage](#usage)
+  - [Pull requests](#pull-requests)
+  - [Workflows and releases](#workflows-and-releases)
+  - [Dependabot](#dependabot)
+  - [Runners](#runners)
+  - [Worktrees](#worktrees)
+  - [Notifications](#notifications)
+  - [Inbox](#inbox)
+  - [Config sync](#config-sync)
+  - [Options](#options)
+- [Examples](#examples)
+- [Config sync](#config-sync-1)
+  - [First machine](#first-machine)
+  - [Every other machine](#every-other-machine)
+  - [Which side wins](#which-side-wins)
+  - [Platform-specific files](#platform-specific-files)
+  - [Options](#options-1)
+  - [Safety](#safety)
+  - [Gist layout](#gist-layout)
+- [Authentication](#authentication)
+- [Development](#development)
+- [License](#license)
+
 ## Install
 
 ```
