@@ -21,8 +21,9 @@ pub use runners::{
     OrgRepo, Runner, org_repos, org_runners, recently_pushed_org_repos, repo_runners,
 };
 pub use runs::{
-    Job, WorkflowRun, attempt_jobs, branch_runs, commit_runs, job, job_log, job_opt, recent_runs,
-    run_jobs, runs_with_status, successful_branch_runs, workflow_run, workflow_run_opt,
+    Job, WorkflowRun, all_attempt_jobs, attempt_jobs, branch_runs, commit_runs, completed_runs,
+    job, job_log, job_opt, recent_runs, run_jobs, runs_with_status, successful_branch_runs,
+    workflow_run, workflow_run_opt,
 };
 pub use workflows::{
     Workflow, dispatch_workflow, file_name, file_stem, workflow_dispatch_runs, workflow_file,

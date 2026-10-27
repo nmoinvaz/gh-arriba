@@ -54,6 +54,9 @@ pub struct Job {
     pub id: u64,
     #[serde(default)]
     pub run_id: u64,
+    /// Which attempt of the run the job belongs to, counting from 1.
+    #[serde(default)]
+    pub run_attempt: u64,
     #[serde(default, deserialize_with = "null_default")]
     pub name: String,
     /// "queued", "in_progress", or "completed".
@@ -202,6 +205,50 @@ pub fn run_jobs(client: &Client, repo: &Repo, run_id: u64) -> Result<Vec<Job>> {
         )?,
         "job",
     )
+}
+
+/// Jobs of every attempt of a run, so a job that failed and then passed on a re-run shows both.
+pub fn all_attempt_jobs(client: &Client, repo: &Repo, run_id: u64) -> Result<Vec<Job>> {
+    parse_all(
+        client.get_all_in(
+            &format!("{}/actions/runs/{run_id}/jobs?filter=all", repo.api()),
+            "jobs",
+        )?,
+        "job",
+    )
+}
+
+/// The newest `limit` completed runs on `branch`, of one workflow or all, newest first. Pages are
+/// fetched only until the limit is reached.
+pub fn completed_runs(
+    client: &Client,
+    repo: &Repo,
+    workflow_id: Option<u64>,
+    branch: &str,
+    limit: usize,
+) -> Result<Vec<WorkflowRun>> {
+    let root = match workflow_id {
+        Some(id) => format!("{}/actions/workflows/{id}/runs", repo.api()),
+        None => format!("{}/actions/runs", repo.api()),
+    };
+    let per_page = limit.clamp(1, 100);
+    let mut runs = Vec::new();
+    for page in 1.. {
+        let found: RunsPage = parse(
+            client.get(&format!(
+                "{root}?branch={}&status=completed&per_page={per_page}&page={page}",
+                encode_path(branch)
+            ))?,
+            "workflow runs",
+        )?;
+        let last = found.workflow_runs.len() < per_page;
+        runs.extend(found.workflow_runs);
+        if last || runs.len() >= limit {
+            break;
+        }
+    }
+    runs.truncate(limit);
+    Ok(runs)
 }
 
 /// Jobs of one attempt of a run.
