@@ -5,7 +5,6 @@ use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
-use crate::notify;
 use crate::prompt;
 
 /// A hook that runs `command` for the agent's `event`.
@@ -34,7 +33,7 @@ const CLAUDE: Agent = Agent {
     file: "settings.json",
     hooks: &[Hook {
         event: "Notification",
-        command: r#"gh arriba notify --title 'Claude Code' "$(jq -r .message)""#,
+        command: "gh arriba notify --hook --title 'Claude Code'",
     }],
     then: None,
 };
@@ -48,11 +47,11 @@ const CODEX: Agent = Agent {
     hooks: &[
         Hook {
             event: "PermissionRequest",
-            command: r#"gh arriba notify --title Codex "$(jq -r '"Codex needs your permission to use \(.tool_name)"')""#,
+            command: "gh arriba notify --hook --title Codex",
         },
         Hook {
             event: "Stop",
-            command: r#"gh arriba notify --title Codex "$(jq -r '.last_assistant_message // "Codex is waiting for you"')""#,
+            command: "gh arriba notify --hook --title Codex",
         },
     ],
     then: Some("Trust them with /hooks in Codex, which skips hooks until they are trusted"),
@@ -129,14 +128,6 @@ impl Agent {
             self.hook_word(),
             path.display()
         );
-        if !notify::on_path("jq") {
-            let reads = if self.hooks.len() == 1 {
-                "hook reads its message"
-            } else {
-                "hooks read their messages"
-            };
-            eprintln!("warning: the {reads} with jq, which is not on the PATH");
-        }
         if let Some(then) = self.then {
             println!("{then}");
         }
@@ -322,6 +313,7 @@ mod tests {
     #[test]
     fn edited_hooks_count_as_ours_but_the_watch_does_not() {
         assert!(is_ours(COMMAND));
+        // Hooks added before --hook read their message with jq.
         assert!(is_ours(
             r#"gh arriba notify --title 'Claude Code' --sound Submarine "$(jq -r .message)""#
         ));
