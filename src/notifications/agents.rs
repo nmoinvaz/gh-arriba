@@ -27,7 +27,6 @@ struct Agent {
     then: Option<&'static str>,
 }
 
-/// Its hook command is the one the README gives.
 const CLAUDE: Agent = Agent {
     name: "Claude Code",
     dir_var: "CLAUDE_CONFIG_DIR",
