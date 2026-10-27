@@ -46,6 +46,9 @@ pub enum Command {
     /// Show a desktop notification, or raise them for your GitHub inbox
     #[command(alias = "notifications")]
     Notify(NotifyArgs),
+    /// Tidy your GitHub notifications inbox
+    #[command(subcommand)]
+    Inbox(InboxCommand),
     /// Sync project config files to and from a gist
     Config(ConfigArgs),
 }
@@ -853,6 +856,19 @@ pub enum FocusTarget {
     Vscode { dir: PathBuf },
     /// Any other app, by its bundle ID
     App { bundle: String },
+}
+
+#[derive(Subcommand)]
+pub enum InboxCommand {
+    /// Mark done the threads whose pull request or issue merged or closed, or whose repo is gone
+    Clean(InboxCleanArgs),
+}
+
+#[derive(Args)]
+pub struct InboxCleanArgs {
+    /// List the threads that would be marked done without marking them
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Args)]

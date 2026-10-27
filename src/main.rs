@@ -4,6 +4,7 @@ mod config;
 mod context;
 mod dependabot;
 mod focus;
+mod inbox;
 mod log;
 mod notifications;
 mod notify;
@@ -51,6 +52,7 @@ fn main() -> Result<()> {
         Command::Runners(args) => runners::run(&ctx()?, args),
         Command::Worktree(cmd) => worktree::run(&ctx()?, cmd),
         Command::Notify(args) => notifications::run(ctx, cli.yes, args),
+        Command::Inbox(cmd) => inbox::run(&ctx()?, cmd),
         Command::Config(args) => config::run(&ctx()?, args),
     }
 }

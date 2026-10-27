@@ -142,6 +142,15 @@ approval and when it finishes a turn. Codex has no hook for when it asks you a q
 hook only after you trust it, so open `/hooks` in Codex after adding them. The hooks run in the
 background, which Codex supports from 0.148.0, as earlier releases skip them.
 
+### Inbox
+
+| Command | Description |
+|---------|-------------|
+| `inbox clean` | Mark done the inbox threads whose PR or issue merged or closed, or whose repo is gone, previewing with `--dry-run` |
+
+Marking a thread done moves it to the Done tab without unsubscribing, and new activity brings it
+back. Pass `-R owner/repo` to clean one repo's threads.
+
 ### Config sync
 
 | Command | Description |
@@ -317,6 +326,13 @@ unread:
 
 ```
 gh arriba notify watch --reason review_requested --reason mention
+```
+
+Clear merged and closed PRs out of your inbox, previewing first:
+
+```
+gh arriba inbox clean --dry-run
+gh arriba inbox clean
 ```
 
 Or keep that watch running from every login:
