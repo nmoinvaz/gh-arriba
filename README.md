@@ -116,8 +116,9 @@ scope (`gh auth refresh -s admin:org`). Without it, `runners` falls back to `--f
 or a systemd user service on Linux, logging to the journal. Either one restarts the watch a minute
 after it exits, as when the first poll runs before the network is up, and runs it with the `PATH`
 you installed from so it finds `gh` and the notifier. Run `--install` again to change the options.
-When Claude Code is set up without the [Claude Code hook](#claude-code-notifications), `--install`
-also offers to add it, and `--uninstall` offers to remove it. `--yes` answers both.
+When [Claude Code](#claude-code-notifications) or [Codex](#codex-notifications) is set up without
+the hooks that run `notify`, `--install` also offers to add them, and `--uninstall` offers to remove
+them. `--yes` answers both.
 
 On macOS with [terminal-notifier](https://github.com/julienXX/terminal-notifier), clicking a
 `notify <message>` notification returns to where it ran: the Ghostty 1.3+ terminal, the Terminal tab,
@@ -144,6 +145,42 @@ or add it yourself:
           {
             "type": "command",
             "command": "gh arriba notify --title 'Claude Code' \"$(jq -r .message)\"",
+            "async": true
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+#### Codex notifications
+
+Codex has no hook for when it asks you a question, so its hooks in `~/.codex/hooks.json` notify when
+it needs your approval and when it finishes a turn. They read their message with jq too. Codex runs
+a hook only after you trust it, so open `/hooks` in Codex after adding them. `notify watch --install`
+offers to add the hooks, or add them yourself:
+
+```json
+{
+  "hooks": {
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "gh arriba notify --title Codex \"$(jq -r '\"Codex needs your permission to use \\(.tool_name)\"')\"",
+            "async": true
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "gh arriba notify --title Codex \"$(jq -r '.last_assistant_message // \"Codex is waiting for you\"')\"",
             "async": true
           }
         ]
