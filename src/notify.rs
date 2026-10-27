@@ -14,6 +14,8 @@ pub struct Note {
     pub group: Option<String>,
     /// Played with the note where the notifier supports it.
     pub sound: Option<String>,
+    /// Program and arguments run on click where the notifier supports it.
+    pub command: Option<Vec<String>>,
 }
 
 impl Note {
@@ -56,6 +58,16 @@ $toast = [Windows.UI.Notifications.ToastNotification]::new($template)
 $app = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe'
 [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($app).Show($toast)";
 
+/// `args` as one sh command line. terminal-notifier runs -execute through sh, so each argument is
+/// single-quoted.
+fn shell_line(args: &[String]) -> String {
+    let quoted: Vec<String> = args
+        .iter()
+        .map(|a| format!("'{}'", a.replace('\'', r"'\''")))
+        .collect();
+    quoted.join(" ")
+}
+
 /// The command that shows `note` on `os`, preferring a notifier `has` reports as installed.
 fn invocation(os: &str, note: &Note, has: impl Fn(&str) -> bool) -> Option<Invocation> {
     match os {
@@ -76,6 +88,9 @@ fn invocation(os: &str, note: &Note, has: impl Fn(&str) -> bool) -> Option<Invoc
             }
             if let Some(url) = &note.url {
                 args.extend(["-open".into(), url.clone()]);
+            }
+            if let Some(command) = &note.command {
+                args.extend(["-execute".into(), shell_line(command)]);
             }
             Some(Invocation {
                 program: "terminal-notifier",
@@ -224,6 +239,19 @@ mod tests {
                 "-sound",
                 "Submarine"
             ]
+        );
+    }
+
+    #[test]
+    fn terminal_notifier_runs_the_click_command_through_sh() {
+        let clicked = Note {
+            command: Some(vec!["/Apps/gh arriba".into(), "it's".into()]),
+            ..note(None)
+        };
+        let inv = invocation("macos", &clicked, |p| p == "terminal-notifier").unwrap();
+        assert!(
+            inv.args
+                .ends_with(&["-execute".into(), r"'/Apps/gh arriba' 'it'\''s'".into()])
         );
     }
 

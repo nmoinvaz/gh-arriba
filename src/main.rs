@@ -3,6 +3,7 @@ mod cli;
 mod config;
 mod context;
 mod dependabot;
+mod focus;
 mod log;
 mod notifications;
 mod notify;
