@@ -44,8 +44,8 @@ pub enum Command {
     #[command(subcommand)]
     Worktree(WorktreeCommand),
     /// Raise desktop notifications for your GitHub inbox
-    #[command(subcommand)]
-    Notifications(NotificationsCommand),
+    #[command(subcommand, alias = "notifications")]
+    Notify(NotifyCommand),
     /// Sync project config files to and from a gist
     Config(ConfigArgs),
 }
@@ -793,13 +793,13 @@ pub struct WorktreePruneArgs {
 }
 
 #[derive(Subcommand)]
-pub enum NotificationsCommand {
+pub enum NotifyCommand {
     /// Poll your notifications and show a desktop notification for each new one, until stopped
-    Watch(NotificationsWatchArgs),
+    Watch(NotifyWatchArgs),
 }
 
 #[derive(Args)]
-pub struct NotificationsWatchArgs {
+pub struct NotifyWatchArgs {
     /// Seconds between polls, never less than GitHub asks for
     #[arg(long, value_name = "SECS", default_value_t = 60, value_parser = clap::value_parser!(u64).range(1..))]
     pub interval: u64,
