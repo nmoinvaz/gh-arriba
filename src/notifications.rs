@@ -12,7 +12,7 @@ use crate::context::{self, Ctx};
 use crate::focus;
 use crate::notify::{self, Note};
 
-mod claude;
+mod agents;
 mod startup;
 
 /// `ctx` connects to GitHub, so only the commands that need it build one. `yes` answers prompts
@@ -22,19 +22,14 @@ pub fn run(ctx: impl FnOnce() -> Result<Ctx>, yes: bool, args: NotifyArgs) -> Re
         // Building the context first fails without a token, before a watch that cannot poll is set up.
         Some(NotifyCommand::Watch(watch_args)) if watch_args.install => {
             startup::install(&ctx()?, &watch_args)?;
-            // The watch is set up either way, so a settings file that cannot change only warns.
-            if let Err(e) = claude::offer_add(yes) {
-                eprintln!("warning: {e:#}");
-            }
+            agents::offer_add(yes);
             Ok(())
         }
         Some(NotifyCommand::Watch(watch_args)) if watch_args.uninstall => {
             if !startup::uninstall()? {
                 println!("No watch was set to start at login");
             }
-            if let Err(e) = claude::offer_remove(yes) {
-                eprintln!("warning: {e:#}");
-            }
+            agents::offer_remove(yes);
             Ok(())
         }
         Some(NotifyCommand::Watch(watch_args)) => watch(&ctx()?, &watch_args),
