@@ -143,7 +143,7 @@ fn invocation(os: &str, note: &Note, has: impl Fn(&str) -> bool) -> Option<Invoc
 
 /// Whether `program` is on the PATH.
 #[cfg_attr(test, allow(dead_code))]
-fn on_path(program: &str) -> bool {
+pub fn on_path(program: &str) -> bool {
     let Some(path) = std::env::var_os("PATH") else {
         return false;
     };

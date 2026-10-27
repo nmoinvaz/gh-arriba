@@ -50,7 +50,7 @@ fn main() -> Result<()> {
         Command::Dependabot(cmd) => dependabot::run(&ctx()?, cmd),
         Command::Runners(args) => runners::run(&ctx()?, args),
         Command::Worktree(cmd) => worktree::run(&ctx()?, cmd),
-        Command::Notify(args) => notifications::run(ctx, args),
+        Command::Notify(args) => notifications::run(ctx, cli.yes, args),
         Command::Config(args) => config::run(&ctx()?, args),
     }
 }
