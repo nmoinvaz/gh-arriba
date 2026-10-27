@@ -143,6 +143,65 @@ returns to its terminal or VS Code window. The hook gets its message as JSON on 
 }
 ```
 
+#### Watching your inbox from login
+
+On macOS, a LaunchAgent starts `notify watch` when you log in, and restarts it a minute after it
+exits, as when the first poll runs before the network is up. Save this as
+`~/Library/LaunchAgents/com.github.nmoinvaz.gh-arriba.notify-watch.plist`, with `you` replaced by
+your user name, any `--reason` or other options added after `watch`, and `/usr/local/bin` in place
+of `/opt/homebrew/bin` on an Intel Mac:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.github.nmoinvaz.gh-arriba.notify-watch</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/gh</string>
+    <string>arriba</string>
+    <string>notify</string>
+    <string>watch</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>60</integer>
+  <key>StandardOutPath</key>
+  <string>/Users/you/Library/Logs/gh-arriba-notify-watch.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/you/Library/Logs/gh-arriba-notify-watch.log</string>
+</dict>
+</plist>
+```
+
+launchd starts programs without Homebrew on the `PATH`, so the agent sets one. Without it, `gh auth
+token` and terminal-notifier are not found and the watch stops with "No GitHub token found". The log
+gets a line per notification and any errors.
+
+Start it without logging out, and macOS lists it under System Settings > General > Login Items &
+Extensions:
+
+```
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.github.nmoinvaz.gh-arriba.notify-watch.plist
+```
+
+To stop it, unload it and delete the file:
+
+```
+launchctl bootout gui/$(id -u)/com.github.nmoinvaz.gh-arriba.notify-watch
+rm ~/Library/LaunchAgents/com.github.nmoinvaz.gh-arriba.notify-watch.plist
+```
+
 ### Config sync
 
 | Command | Description |
@@ -319,6 +378,8 @@ unread:
 ```
 gh arriba notify watch --reason review_requested --reason mention
 ```
+
+To have it running from login on macOS, see [Watching your inbox from login](#watching-your-inbox-from-login).
 
 Hear when a long build or test run ends, even from another window:
 
