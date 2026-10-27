@@ -116,6 +116,8 @@ scope (`gh auth refresh -s admin:org`). Without it, `runners` falls back to `--f
 or a systemd user service on Linux, logging to the journal. Either one restarts the watch a minute
 after it exits, as when the first poll runs before the network is up, and runs it with the `PATH`
 you installed from so it finds `gh` and the notifier. Run `--install` again to change the options.
+When Claude Code is set up without the [Claude Code hook](#claude-code-notifications), `--install`
+also offers to add it, and `--uninstall` offers to remove it. `--yes` answers both.
 
 On macOS with [terminal-notifier](https://github.com/julienXX/terminal-notifier), clicking a
 `notify <message>` notification returns to where it ran: the Ghostty 1.3+ terminal, the Terminal tab,
@@ -130,7 +132,8 @@ terminal-notifier to Persistent in System Settings > Notifications (Alerts on ol
 A Notification hook in `~/.claude/settings.json` tells you when Claude Code needs you, and a click
 returns to its terminal or VS Code window. The hook gets its message as JSON on stdin, so it needs
 [jq](https://github.com/jqlang/jq), and the click needs terminal-notifier. On macOS,
-`brew install terminal-notifier jq` installs both.
+`brew install terminal-notifier jq` installs both. `notify watch --install` offers to add the hook,
+or add it yourself:
 
 ```json
 {
