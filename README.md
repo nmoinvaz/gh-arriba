@@ -108,6 +108,7 @@ scope (`gh auth refresh -s admin:org`). Without it, `runners` falls back to `--f
 | Command | Description |
 |---------|-------------|
 | `notify <message>` | Show a desktop notification, subtitled and grouped by the git root unless `--subtitle` or `--group` say otherwise |
+| `notify --hook` | Show the notification a Claude Code or Codex hook describes in the JSON it gets on stdin |
 | `notify watch` | Poll your GitHub inbox and show a desktop notification for each new thread, until stopped |
 | `notify watch --install` | Start the watch with the options given, now and at every login, on macOS and Linux |
 | `notify watch --uninstall` | Stop the watch that starts at login, and stop starting it |
@@ -131,9 +132,8 @@ terminal-notifier to Persistent in System Settings > Notifications (Alerts on ol
 #### Claude Code notifications
 
 `notify watch --install` offers a Notification hook in `~/.claude/settings.json` that tells you when
-Claude Code needs you, and a click returns to its terminal or VS Code window. The hook reads its
-message with [jq](https://github.com/jqlang/jq), and the click needs terminal-notifier. On macOS,
-`brew install terminal-notifier jq` installs both.
+Claude Code needs you. With terminal-notifier installed, clicking the notification returns to its
+terminal or VS Code window.
 
 #### Codex notifications
 
