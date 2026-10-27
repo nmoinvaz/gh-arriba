@@ -130,65 +130,16 @@ terminal-notifier to Persistent in System Settings > Notifications (Alerts on ol
 
 #### Claude Code notifications
 
-A Notification hook in `~/.claude/settings.json` tells you when Claude Code needs you, and a click
-returns to its terminal or VS Code window. The hook gets its message as JSON on stdin, so it needs
-[jq](https://github.com/jqlang/jq), and the click needs terminal-notifier. On macOS,
-`brew install terminal-notifier jq` installs both. `notify watch --install` offers to add the hook,
-or add it yourself:
-
-```json
-{
-  "hooks": {
-    "Notification": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "gh arriba notify --title 'Claude Code' \"$(jq -r .message)\"",
-            "async": true
-          }
-        ]
-      }
-    ]
-  }
-}
-```
+`notify watch --install` offers a Notification hook in `~/.claude/settings.json` that tells you when
+Claude Code needs you, and a click returns to its terminal or VS Code window. The hook reads its
+message with [jq](https://github.com/jqlang/jq), and the click needs terminal-notifier. On macOS,
+`brew install terminal-notifier jq` installs both.
 
 #### Codex notifications
 
-Codex has no hook for when it asks you a question, so its hooks in `~/.codex/hooks.json` notify when
-it needs your approval and when it finishes a turn. They read their message with jq too. Codex runs
-a hook only after you trust it, so open `/hooks` in Codex after adding them. `notify watch --install`
-offers to add the hooks, or add them yourself:
-
-```json
-{
-  "hooks": {
-    "PermissionRequest": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "gh arriba notify --title Codex \"$(jq -r '\"Codex needs your permission to use \\(.tool_name)\"')\"",
-            "async": true
-          }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "gh arriba notify --title Codex \"$(jq -r '.last_assistant_message // \"Codex is waiting for you\"')\"",
-            "async": true
-          }
-        ]
-      }
-    ]
-  }
-}
-```
+`notify watch --install` also offers hooks in `~/.codex/hooks.json` that notify when Codex needs your
+approval and when it finishes a turn. Codex has no hook for when it asks you a question. It runs a
+hook only after you trust it, so open `/hooks` in Codex after adding them.
 
 ### Config sync
 
