@@ -2,12 +2,18 @@
 //! banner instead of a terminal someone has to keep checking.
 
 /// One desktop notification.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Note {
     pub title: String,
     pub body: String,
     /// Opened on click where the notifier supports it, otherwise appended to the body.
     pub url: Option<String>,
+    /// Shown under the title where the notifier supports it.
+    pub subtitle: Option<String>,
+    /// Replaces the last note of the same group where the notifier supports it.
+    pub group: Option<String>,
+    /// Played with the note where the notifier supports it.
+    pub sound: Option<String>,
 }
 
 impl Note {
@@ -16,6 +22,7 @@ impl Note {
             title: title.into(),
             body: body.into(),
             url,
+            ..Self::default()
         }
     }
 
@@ -59,8 +66,14 @@ fn invocation(os: &str, note: &Note, has: impl Fn(&str) -> bool) -> Option<Invoc
                 "-message".into(),
                 note.body.clone(),
                 "-group".into(),
-                "gh-arriba".into(),
+                note.group.clone().unwrap_or_else(|| "gh-arriba".into()),
             ];
+            if let Some(subtitle) = &note.subtitle {
+                args.extend(["-subtitle".into(), subtitle.clone()]);
+            }
+            if let Some(sound) = &note.sound {
+                args.extend(["-sound".into(), sound.clone()]);
+            }
             if let Some(url) = &note.url {
                 args.extend(["-open".into(), url.clone()]);
             }
@@ -186,6 +199,32 @@ mod tests {
         .unwrap();
         assert_eq!(inv.program, "terminal-notifier");
         assert!(inv.args.ends_with(&["-open".into(), "https://x/1".into()]));
+    }
+
+    #[test]
+    fn terminal_notifier_takes_the_group_subtitle_and_sound() {
+        let has = |p: &str| p == "terminal-notifier";
+        let inv = invocation("macos", &note(None), has).unwrap();
+        assert!(inv.args.ends_with(&["-group".into(), "gh-arriba".into()]));
+
+        let styled = Note {
+            subtitle: Some("zlib-ng".into()),
+            group: Some("gh-arriba:/src/zlib-ng".into()),
+            sound: Some("Submarine".into()),
+            ..note(None)
+        };
+        let inv = invocation("macos", &styled, has).unwrap();
+        assert_eq!(
+            inv.args[4..],
+            [
+                "-group",
+                "gh-arriba:/src/zlib-ng",
+                "-subtitle",
+                "zlib-ng",
+                "-sound",
+                "Submarine"
+            ]
+        );
     }
 
     #[test]

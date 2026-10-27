@@ -43,9 +43,9 @@ pub enum Command {
     /// List and prune git worktrees by the state of their pull requests
     #[command(subcommand)]
     Worktree(WorktreeCommand),
-    /// Raise desktop notifications for your GitHub inbox
-    #[command(subcommand, alias = "notifications")]
-    Notify(NotifyCommand),
+    /// Show a desktop notification, or raise them for your GitHub inbox
+    #[command(alias = "notifications")]
+    Notify(NotifyArgs),
     /// Sync project config files to and from a gist
     Config(ConfigArgs),
 }
@@ -792,6 +792,40 @@ pub struct WorktreePruneArgs {
     pub force: bool,
 }
 
+#[derive(Args)]
+#[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
+pub struct NotifyArgs {
+    #[command(subcommand)]
+    pub command: Option<NotifyCommand>,
+
+    #[command(flatten)]
+    pub send: NotifySendArgs,
+}
+
+#[derive(Args)]
+pub struct NotifySendArgs {
+    /// Message to show
+    #[arg(required = true)]
+    pub message: Option<String>,
+
+    /// Notification title
+    #[arg(long, default_value = "gh arriba")]
+    pub title: String,
+
+    /// Line under the title (default: name of the git root or working directory)
+    #[arg(long)]
+    pub subtitle: Option<String>,
+
+    /// A newer notification replaces an older one in its group (default: git root or working
+    /// directory)
+    #[arg(long)]
+    pub group: Option<String>,
+
+    /// Sound to play, such as Submarine on macOS
+    #[arg(long)]
+    pub sound: Option<String>,
+}
+
 #[derive(Subcommand)]
 pub enum NotifyCommand {
     /// Poll your notifications and show a desktop notification for each new one, until stopped
@@ -896,5 +930,38 @@ mod tests {
         assert!(parse_age("7").is_err());
         assert!(parse_age("d").is_err());
         assert!(parse_age("7y").is_err());
+    }
+
+    fn notify(args: &[&str]) -> Result<NotifyArgs, clap::error::ErrorKind> {
+        let argv = ["gh-arriba"].iter().chain(args);
+        match Cli::try_parse_from(argv).map_err(|e| e.kind())?.command {
+            Command::Notify(args) => Ok(args),
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn notify_takes_a_message_or_a_subcommand() {
+        let sent = notify(&["notify", "--title", "CI", "tests done"]).unwrap();
+        assert!(sent.command.is_none());
+        assert_eq!(sent.send.message.as_deref(), Some("tests done"));
+        assert_eq!(sent.send.title, "CI");
+
+        let watch = notify(&["notifications", "watch", "--all"]).unwrap();
+        assert!(matches!(watch.command, Some(NotifyCommand::Watch(w)) if w.all));
+
+        // A message that names a subcommand needs a separator.
+        let literal = notify(&["notify", "--", "watch"]).unwrap();
+        assert_eq!(literal.send.message.as_deref(), Some("watch"));
+
+        use clap::error::ErrorKind;
+        assert_eq!(
+            notify(&["notify", "--title", "CI"]).err(),
+            Some(ErrorKind::MissingRequiredArgument)
+        );
+        assert_eq!(
+            notify(&["notify", "done", "watch"]).err(),
+            Some(ErrorKind::ArgumentConflict)
+        );
     }
 }
