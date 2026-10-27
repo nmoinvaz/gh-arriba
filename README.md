@@ -71,6 +71,7 @@ gh arriba [options] <command>
 | `run dispatch <WORKFLOW>` | Dispatch any workflow with `-f` inputs, printing its run and following it with `--watch` |
 | `run artifacts [RUN]...` | List artifacts with size and expiry for runs, a commit, a branch, or a PR, download them with `--download`, or delete old ones with `--prune` |
 | `run caches` | Show Actions cache usage against the repo's 10 GB limit, grouped by ref and key, or delete caches with `--prune` |
+| `run stats` | Show each job's pass rate, flaky re-runs, and median and p90 run time over a branch's recent runs, one workflow with `-w` |
 | `release` | Dispatch the repo's release workflow with a version bump, previewing with `--dry-run` |
 
 ### Dependabot
@@ -306,6 +307,12 @@ Or those left behind by closed and merged PRs, which GitHub keeps until it needs
 
 ```
 gh arriba run caches --prune --closed
+```
+
+Find the jobs that fail or need a re-run on the default branch, over its last 100 runs:
+
+```
+gh arriba run stats --limit 100
 ```
 
 Cut a minor release through the repo's Release workflow:

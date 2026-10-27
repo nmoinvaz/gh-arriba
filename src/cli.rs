@@ -390,6 +390,23 @@ pub enum RunCommand {
     Artifacts(ArtifactsArgs),
     /// Show Actions cache usage by ref and key against the repo limit, or prune caches
     Caches(CachesArgs),
+    /// Show each job's pass rate, flaky re-runs, and run time over recent runs
+    Stats(StatsArgs),
+}
+
+#[derive(Args)]
+pub struct StatsArgs {
+    /// Only runs of this workflow, by name or file
+    #[arg(short, long, value_name = "NAME")]
+    pub workflow: Option<String>,
+
+    /// Branch whose runs to measure (default: the default branch)
+    #[arg(long)]
+    pub branch: Option<String>,
+
+    /// Completed runs to measure, newest first
+    #[arg(long, value_name = "N", default_value_t = 50, value_parser = clap::value_parser!(u64).range(1..=1000))]
+    pub limit: u64,
 }
 
 #[derive(Args)]
