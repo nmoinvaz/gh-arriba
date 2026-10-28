@@ -15,6 +15,14 @@ pub fn indent(text: &str, prefix: &str) -> String {
         .join("\n")
 }
 
+/// `s` with the characters XML reserves as entities, for text and attribute values alike.
+pub fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
 /// Keep the first `max` lines of `text`, noting how many were dropped.
 pub fn first_lines(text: &str, max: usize) -> String {
     let lines: Vec<&str> = text.trim().lines().collect();
