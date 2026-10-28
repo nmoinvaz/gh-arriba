@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use crate::cli::NotifyWatchArgs;
 use crate::context::{self, Ctx};
+use crate::output::xml_escape;
 
 const LABEL: &str = "com.github.nmoinvaz.gh-arriba.notify-watch";
 const UNIT: &str = "gh-arriba-notify-watch.service";
@@ -192,13 +193,6 @@ fn plist_xml(argv: &[String], path: &str, log: &Path) -> String {
 </plist>
 "#
     )
-}
-
-fn xml_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
 }
 
 fn systemd_unit(home: &Path) -> PathBuf {
