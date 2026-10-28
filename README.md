@@ -154,8 +154,14 @@ On macOS with [terminal-notifier](https://github.com/julienXX/terminal-notifier)
 or the VS Code window. VS Code is matched by the window the Claude Code extension serves, or else by
 the open folder that holds the working directory. Other apps only come to the front.
 
+Notifications carry the GitHub mark. A macOS notification's icon is its sender's, so `notify`
+makes a copy of terminal-notifier.app named gh arriba in `~/Library/Application Support/gh-arriba`,
+which macOS asks you to allow the first time and lists in System Settings > Notifications. Until it
+is allowed, the installed terminal-notifier shows the notification instead, so if you refused, turn
+gh arriba on there.
+
 macOS hides notifications after a few seconds by default. To keep them until dismissed, set
-terminal-notifier to Persistent in System Settings > Notifications (Alerts on older macOS).
+gh arriba to Persistent in System Settings > Notifications (Alerts on older macOS).
 
 #### Claude Code notifications
 
