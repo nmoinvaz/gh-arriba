@@ -64,7 +64,8 @@ $toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
 $app = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe'
 [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($app).Show($toast)";
 
-/// The toast as the XML the WinRT API takes, with `icon` in place of PowerShell's logo.
+/// The toast as the XML the WinRT API takes, with `icon` in place of PowerShell's logo. The text
+/// comes first, as the schema's own examples order it.
 fn toast_xml(note: &Note, icon: Option<&Path>) -> String {
     let image = icon
         .map(|png| {
@@ -73,7 +74,7 @@ fn toast_xml(note: &Note, icon: Option<&Path>) -> String {
         })
         .unwrap_or_default();
     format!(
-        "<toast><visual><binding template=\"ToastGeneric\">{image}<text>{}</text><text>{}</text></binding></visual></toast>",
+        "<toast><visual><binding template=\"ToastGeneric\"><text>{}</text><text>{}</text>{image}</binding></visual></toast>",
         xml_escape(&note.title),
         xml_escape(&note.body_with_url())
     )
@@ -392,9 +393,9 @@ mod tests {
         assert_eq!(
             toast_xml(&note, Some(icon)),
             "<toast><visual><binding template=\"ToastGeneric\">\
+             <text>&lt;b&gt; &amp; &quot;c&quot;</text><text>a &lt; b</text>\
              <image placement=\"appLogoOverride\" \
              src=\"file:///C:/Users/Nathan%20Moin/AppData/Local/gh-arriba/icon.png\"/>\
-             <text>&lt;b&gt; &amp; &quot;c&quot;</text><text>a &lt; b</text>\
              </binding></visual></toast>"
         );
         assert_eq!(
